@@ -57,10 +57,14 @@ def build_doc_graph_embeddings(
                     G.add_edge(di, dj, weight=float(s), type="embedding_cosine")
     return G
 
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger("build_doc_graph_embed")
-    csv_path = "english_fact_checks.csv"
+    
+    # Chemin complet vers le fichier CSV
+    csv_path = os.path.join(os.path.dirname(__file__), "..", "data", "english_fact_checks.csv")
+    
     G = build_doc_graph_embeddings(csv_path, logger=logger)
     print(f"Graphe construit: {G.number_of_nodes()} nœuds, {G.number_of_edges()} arêtes")
     nx.write_gpickle(G, "doc_graph_embed.gpickle")
