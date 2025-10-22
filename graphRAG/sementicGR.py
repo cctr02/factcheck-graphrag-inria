@@ -7,7 +7,7 @@ import logging
 # Import de la fonction utilitaire
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "utils"))
-from io_utils import load_corpus_from_csv
+from utils.io_utils import load_corpus_from_csv
 
 
 from sentence_transformers import SentenceTransformer
