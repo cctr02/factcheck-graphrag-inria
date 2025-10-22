@@ -31,7 +31,7 @@ from sklearn.metrics import mean_squared_error
 
 from utils.logger import setup_logger
 from utils.helpers import maybe_tqdm
-from utils.io import load_corpus_from_csv
+from utils.io_utils import load_corpus_from_csv
 from topic_modeling.data_preprocessing import basic_clean, build_stopwords_english
 from topic_modeling.analysis import export_topic_distributions, export_top_terms, top_topics_per_doc
 

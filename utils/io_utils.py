@@ -10,37 +10,23 @@ def load_corpus_from_csv(
     lang_col: str = "language",
     lang_value: str = "english",
     encoding: str = "utf-8",
+    n_rows: Optional[int] = None, 
     logger: Optional[logging.Logger] = None,
 ) -> Tuple[List[str], List[str]]:
-    """Load and combine title + body from a CSV; filter by language.
+    """Load and combine title + body from a CSV; filter by language."""
 
-    Args:
-        path: Path to CSV.
-        id_col: Column name for unique ids.
-        title_col: Column name for titles.
-        body_col: Column name for bodies.
-        lang_col: Column name for language.
-        lang_value: Language to keep (case-insensitive).
-        encoding: File encoding.
-        logger: Optional logger.
-
-    Returns:
-        (texts, doc_names) where texts are concatenated title + body strings,
-        and doc_names are the ids as strings.
-
-    Input expectations:
-        CSV must contain the headers listed in the arguments; language rows are filtered to lang_value.
-    Output expectations:
-        Lists of equal length; len(texts)==len(doc_names)>=0.
-    """
     if logger:
         logger.info(f"Loading CSV: {path}")
-    df = pd.read_csv(path, encoding=encoding)
+    df = pd.read_csv(path, encoding=encoding, nrows=n_rows)
+
     for c in [id_col, title_col, body_col, lang_col]:
         if c not in df.columns:
             raise ValueError(f"Missing column '{c}'. Found: {list(df.columns)}")
 
-    before = len(df)
+    # compute total row count from the full file (excluding header)
+    with open(path, "r", encoding=encoding, errors="ignore") as f:
+        before = max(sum(1 for _ in f) - 1, 0)
+
     df = df[df[lang_col].astype(str).str.lower() == str(lang_value).lower()].copy()
     after = len(df)
     if logger:
@@ -58,3 +44,5 @@ def load_corpus_from_csv(
     if logger:
         logger.info(f"Prepared {len(texts)} documents")
     return texts, doc_names
+
+

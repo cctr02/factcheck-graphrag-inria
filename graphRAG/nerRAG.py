@@ -4,59 +4,34 @@
 #  - Edge: shared named entities between docs
 # ============================================
 
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict
 import itertools
-import logging
-import pandas as pd
 import networkx as nx
 import spacy
-from tqdm import tqdm
+import sys
+import os
 
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+from utils.io_utils import load_corpus_from_csv
+from utils.logger import setup_logger
+from utils.helpers import maybe_tqdm
 
-# --- 1) Load the corpus ---
-def load_corpus_from_csv(
-    path: str,
-    id_col: str = "id",
-    title_col: str = "title",
-    body_col: str = "body",
-    lang_col: str = "language",
-    lang_value: str = "english",
-    encoding: str = "utf-8",
-    logger: Optional[logging.Logger] = None,
-) -> Tuple[List[str], List[str]]:
-    """Load and combine title + body from a CSV file; filter by language."""
-    if logger:
-        logger.info(f"Loading CSV: {path}")
+logger = setup_logger("graphRAG/nerRAG.log", log_level="INFO")
 
-    df = pd.read_csv(path, encoding=encoding)
-    for c in [id_col, title_col, body_col, lang_col]:
-        if c not in df.columns:
-            raise ValueError(f"Missing column '{c}'. Found: {list(df.columns)}")
-
-    # Filter by language
-    df = df[df[lang_col].astype(str).str.lower() == str(lang_value).lower()].copy()
-
-    # Combine title and body
-    def _combine(row) -> str:
-        t = str(row.get(title_col, "") or "").strip()
-        b = str(row.get(body_col, "") or "").strip()
-        return f"{t}. {b}" if t and b else t or b
-
-    texts = df.apply(_combine, axis=1).astype(str).tolist()
-    doc_names = df[id_col].astype(str).tolist()
-    return texts, doc_names
-
-
-# --- 2) Named Entity Recognition (NER) ---
 def extract_named_entities(texts: List[str], model: str = "en_core_web_sm") -> List[List[str]]:
     """
     Extract named entities (ORG, PERSON, GPE, PRODUCT...) for each document.
-    Returns: list of entity lists aligned with texts.
+    Returns: list of entity lists in a doc aligned with texts.
     """
     nlp = spacy.load(model, disable=["parser", "tagger"])
     all_entities = []
 
-    for doc in tqdm(nlp.pipe(texts, batch_size=16), total=len(texts), desc="Extracting NER"):
+    for doc in maybe_tqdm(
+        nlp.pipe(texts, batch_size=16),
+        enable=True,
+        total=len(texts),
+        desc="Extracting NER"
+    ):
         entities = [
             ent.text.strip()
             for ent in doc.ents
@@ -66,8 +41,6 @@ def extract_named_entities(texts: List[str], model: str = "en_core_web_sm") -> L
 
     return all_entities
 
-
-# --- 3) Build a document–document graph ---
 def build_doc_graph(doc_names: List[str], doc_entities: List[List[str]]) -> nx.Graph:
     """
     Build a graph where:
@@ -88,7 +61,7 @@ def build_doc_graph(doc_names: List[str], doc_entities: List[List[str]]) -> nx.G
             entity_to_docs.setdefault(e, []).append(doc_id)
 
     # Create edges for shared entities
-    for entity, docs in tqdm(entity_to_docs.items(), desc="Building edges"):
+    for entity, docs in maybe_tqdm(entity_to_docs.items(),enable=True, desc="Building edges"):
         if len(docs) > 1:
             for d1, d2 in itertools.combinations(set(docs), 2):
                 if G.has_edge(d1, d2):
@@ -98,28 +71,30 @@ def build_doc_graph(doc_names: List[str], doc_entities: List[List[str]]) -> nx.G
                     G.add_edge(d1, d2, weight=1, entities={entity})
     return G
 
-
-# --- 4) Example usage ---
 if __name__ == "__main__":
-    # Load the corpus
-    texts, doc_names = load_corpus_from_csv("factchecks.csv")
-
-    # Extract named entities
+    texts, doc_names = load_corpus_from_csv(path="data/english_fact_checks.csv", n_rows=1000, logger= logger)
     doc_entities = extract_named_entities(texts, model="en_core_web_sm")
 
     # Build the document graph
     G = build_doc_graph(doc_names, doc_entities)
 
     # Display graph summary
-    print(f"✅ Graph built: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
+    logger.info(f"Graph built: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
 
     # Example: show neighbors of one document
     example_doc = doc_names[0]
-    print(f"\n🔹 Neighbors of {example_doc}:")
+    logger.info(f"\n Neighbors of {example_doc}:")
     for neighbor in list(G.neighbors(example_doc))[:5]:
         edge = G[example_doc][neighbor]
-        print(f"  ↳ {neighbor} (shared entities: {list(edge['entities'])})")
+        logger.info(f"  {neighbor} (shared entities: {list(edge['entities'])})")
 
-    # Save for visualization (e.g., in Gephi)
-    nx.write_gexf(G, "graph_rag_docdoc.gexf")
-    print("💾 Graph saved to graph_rag_docdoc.gexf")
+    # Convert non-serializable attribute types (set/list) to a serializable string before writing GEXF
+    for u, v, data in G.edges(data=True):
+        ents = data.get("entities")
+        if isinstance(ents, (set, list)):
+            # deterministic ordering + comma-separated string for GEXF compatibility
+            data["entities"] = ", ".join(sorted(list(ents)))
+
+    graph_output_path = "graphRAG/nerRAG.gexf"
+    nx.write_gexf(G, graph_output_path)
+    logger.info(f"Graph saved to {graph_output_path}")
