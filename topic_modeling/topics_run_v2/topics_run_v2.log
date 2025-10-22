@@ -1,0 +1,28 @@
+2025-10-19 19:43:27,929 | INFO | Starting topic modeling pipeline
+2025-10-19 19:43:27,930 | INFO | Loading CSV: data/english_fact_checks.csv
+2025-10-19 19:43:29,866 | INFO | Filtered language=='english': kept 38087/38087 rows
+2025-10-19 19:43:30,612 | INFO | Prepared 38087 documents
+2025-10-19 19:43:30,681 | INFO | Cleaning corpus
+2025-10-19 19:44:14,520 | INFO | Building vectorizers
+2025-10-19 19:44:14,521 | INFO | Fitting CountVectorizer (LDA input)
+2025-10-19 19:45:22,827 | INFO | Fitting TfidfVectorizer (NMF input)
+2025-10-19 19:46:31,220 | INFO | Training LDA
+2025-10-19 19:48:37,954 | INFO | Transforming documents with LDA
+2025-10-19 19:48:59,868 | INFO | LDA perplexity: 4643.1378
+2025-10-19 19:48:59,869 | INFO | Training NMF
+2025-10-19 19:49:39,553 | INFO | Transforming documents with NMF and computing reconstruction error
+2025-10-19 19:58:19,698 | INFO | NMF reconstruction MSE: 0.000031
+2025-10-19 19:58:29,905 | INFO | Exports written with prefix 'topic_modeling\topics_run_v2\topics_run_v2'
+2025-10-19 19:58:29,908 | INFO | Computing top terms tables
+2025-10-19 19:58:30,906 | INFO | Top terms exported with prefix 'topic_modeling\topics_run_v2\topics_run_v2'
+2025-10-19 19:58:30,908 | INFO | Pipeline finished. Metrics below:
+2025-10-19 19:58:30,909 | INFO | 
+{
+  "lda_perplexity": 4643.1378057748125,
+  "nmf_mse_reconstruction": 3.125358152147577e-05,
+  "n_docs": 38087,
+  "n_terms_count": 30000,
+  "n_terms_tfidf": 30000,
+  "n_topics_requested": 10,
+  "n_topics_nmf": 10
+}

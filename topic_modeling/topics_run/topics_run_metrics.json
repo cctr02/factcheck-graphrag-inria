@@ -1,0 +1,9 @@
+{
+  "lda_perplexity": 3492.22529332988,
+  "nmf_mse_reconstruction": 3.100935978202322e-05,
+  "n_docs": 38087,
+  "n_terms_count": 30000,
+  "n_terms_tfidf": 30000,
+  "n_topics_requested": 12,
+  "n_topics_nmf": 12
+}
