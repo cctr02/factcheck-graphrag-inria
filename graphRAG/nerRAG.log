@@ -41,3 +41,18 @@
 2025-10-22 14:21:07 [INFO] utils.logger:   586 (shared entities: ['Twitter', 'India', 'Google'])
 2025-10-22 14:21:07 [INFO] utils.logger:   196 (shared entities: ['Twitter', 'India'])
 2025-10-22 14:21:16 [INFO] utils.logger: Graph saved to graphRAG/nerRAG.gexf
+2025-10-22 14:30:09 [INFO] utils.logger: Loading CSV: data/english_fact_checks.csv
+2025-10-22 14:30:09 [INFO] utils.logger: Filtered language=='english': kept 1000/829687 rows
+2025-10-22 14:30:09 [INFO] utils.logger: Prepared 1000 documents
+2025-10-22 14:31:06 [INFO] utils.logger: Loading CSV: data/english_fact_checks.csv
+2025-10-22 14:31:07 [INFO] utils.logger: Filtered language=='english': kept 1000/829687 rows
+2025-10-22 14:31:07 [INFO] utils.logger: Prepared 1000 documents
+2025-10-22 14:32:35 [INFO] utils.logger: Graph built: 1000 nodes, 356446 edges
+2025-10-22 14:32:35 [INFO] utils.logger: 
+ Neighbors of 0:
+2025-10-22 14:32:35 [INFO] utils.logger:   612 (shared entities: ['Google', 'Twitter'])
+2025-10-22 14:32:35 [INFO] utils.logger:   692 (shared entities: ['Google'])
+2025-10-22 14:32:35 [INFO] utils.logger:   232 (shared entities: ['Google', 'India', 'Twitter'])
+2025-10-22 14:32:35 [INFO] utils.logger:   552 (shared entities: ['Google'])
+2025-10-22 14:32:35 [INFO] utils.logger:   714 (shared entities: ['Google'])
+2025-10-22 14:32:36 [INFO] utils.logger: Graph saved to graphRAG/nerRAG.gpickle
