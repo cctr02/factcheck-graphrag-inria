@@ -27,3 +27,6 @@ EOF
 Lancer Ubuntu
 cd /mnt/c/Users/cedri/PythonProject/PRL/factcheckbureau
 bash scripts/run.sh
+
+# Spacy download
+uv run python -m spacy download en_core_web_sm

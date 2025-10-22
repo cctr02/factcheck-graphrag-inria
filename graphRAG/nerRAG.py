@@ -10,6 +10,7 @@ import networkx as nx
 import spacy
 import sys
 import os
+import pickle
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from utils.io_utils import load_corpus_from_csv
@@ -35,7 +36,7 @@ def extract_named_entities(texts: List[str], model: str = "en_core_web_sm") -> L
         entities = [
             ent.text.strip()
             for ent in doc.ents
-            if ent.label_ in {"ORG", "PERSON", "GPE", "PRODUCT", "EVENT"}
+            if ent.label_ in {"ORG", "PERSON", "GPE", "PRODUCT", "EVENT"} 
         ]
         all_entities.append(list(set(entities)))  # deduplicate per document
 
@@ -95,6 +96,7 @@ if __name__ == "__main__":
             # deterministic ordering + comma-separated string for GEXF compatibility
             data["entities"] = ", ".join(sorted(list(ents)))
 
-    graph_output_path = "graphRAG/nerRAG.gexf"
-    nx.write_gexf(G, graph_output_path)
+    graph_output_path = "graphRAG/nerRAG.gpickle"
+    with open(graph_output_path, 'wb') as f:
+        pickle.dump(G, f)
     logger.info(f"Graph saved to {graph_output_path}")

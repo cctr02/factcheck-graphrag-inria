@@ -3,9 +3,10 @@ import sys
 import numpy as np
 import networkx as nx
 import logging
+import pickle
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "utils"))
-from io_utils import load_corpus_from_csv
+from utils.io_utils import load_corpus_from_csv
 
 from sentence_transformers import SentenceTransformer
 
@@ -70,8 +71,7 @@ if __name__ == "__main__":
     G = build_doc_graph_embeddings(csv_path, logger=logger, max_docs=1000)
     print(f"Graph built: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
     
-    # Save graph with pickle
-    import pickle
+    
     with open("doc_graph_embed.gpickle", 'wb') as f:
         pickle.dump(G, f)
     print("Graph saved in doc_graph_embed.gpickle")
