@@ -1,4 +1,4 @@
-import tqdm
+from tqdm import tqdm
 
 def maybe_tqdm(iterable, enable: bool, **kwargs):
     """Wrap iterable with tqdm when enabled.

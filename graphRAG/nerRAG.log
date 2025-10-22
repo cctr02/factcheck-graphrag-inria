@@ -1,0 +1,43 @@
+2025-10-22 13:56:03 [INFO] utils.logger: Loading CSV: data/english_fact_checks.csv
+2025-10-22 13:56:04 [INFO] utils.logger: Filtered language=='english': kept 1000/829687 rows
+2025-10-22 13:56:04 [INFO] utils.logger: Prepared 1000 documents
+2025-10-22 13:58:40 [INFO] utils.logger: Loading CSV: data/english_fact_checks.csv
+2025-10-22 13:58:40 [INFO] utils.logger: Filtered language=='english': kept 1000/829687 rows
+2025-10-22 13:58:40 [INFO] utils.logger: Prepared 1000 documents
+2025-10-22 14:04:56 [INFO] utils.logger: Loading CSV: data/english_fact_checks.csv
+2025-10-22 14:04:57 [INFO] utils.logger: Filtered language=='english': kept 1000/829687 rows
+2025-10-22 14:04:57 [INFO] utils.logger: Prepared 1000 documents
+2025-10-22 14:05:47 [INFO] utils.logger: Loading CSV: data/english_fact_checks.csv
+2025-10-22 14:05:47 [INFO] utils.logger: Filtered language=='english': kept 1000/829687 rows
+2025-10-22 14:05:47 [INFO] utils.logger: Prepared 1000 documents
+2025-10-22 14:06:59 [INFO] utils.logger: Graph built: 1000 nodes, 356446 edges
+2025-10-22 14:06:59 [INFO] utils.logger: 
+ Neighbors of 0:
+2025-10-22 14:06:59 [INFO] utils.logger:   916 (shared entities: ['India'])
+2025-10-22 14:06:59 [INFO] utils.logger:   252 (shared entities: ['Twitter', 'India', 'Google'])
+2025-10-22 14:06:59 [INFO] utils.logger:   557 (shared entities: ['Twitter', 'India', 'Google'])
+2025-10-22 14:06:59 [INFO] utils.logger:   667 (shared entities: ['Twitter', 'Getty Images', 'India'])
+2025-10-22 14:06:59 [INFO] utils.logger:   646 (shared entities: ['Twitter', 'India'])
+2025-10-22 14:11:58 [INFO] utils.logger: Loading CSV: data/english_fact_checks.csv
+2025-10-22 14:11:59 [INFO] utils.logger: Filtered language=='english': kept 1000/829687 rows
+2025-10-22 14:11:59 [INFO] utils.logger: Prepared 1000 documents
+2025-10-22 14:12:49 [INFO] utils.logger: Graph built: 1000 nodes, 356446 edges
+2025-10-22 14:12:49 [INFO] utils.logger: 
+ Neighbors of 0:
+2025-10-22 14:12:49 [INFO] utils.logger:   316 (shared entities: ['Gaza', 'Israel'])
+2025-10-22 14:12:49 [INFO] utils.logger:   263 (shared entities: ['Gaza', 'Israel'])
+2025-10-22 14:12:49 [INFO] utils.logger:   142 (shared entities: ['Gaza', 'Israel', 'Twitter'])
+2025-10-22 14:12:49 [INFO] utils.logger:   581 (shared entities: ['Gaza', 'Google'])
+2025-10-22 14:12:49 [INFO] utils.logger:   654 (shared entities: ['India', 'Twitter'])
+2025-10-22 14:19:40 [INFO] utils.logger: Loading CSV: data/english_fact_checks.csv
+2025-10-22 14:19:41 [INFO] utils.logger: Filtered language=='english': kept 1000/829687 rows
+2025-10-22 14:19:41 [INFO] utils.logger: Prepared 1000 documents
+2025-10-22 14:21:07 [INFO] utils.logger: Graph built: 1000 nodes, 356446 edges
+2025-10-22 14:21:07 [INFO] utils.logger: 
+ Neighbors of 0:
+2025-10-22 14:21:07 [INFO] utils.logger:   535 (shared entities: ['Twitter', 'Belfast Telegraph', 'Google'])
+2025-10-22 14:21:07 [INFO] utils.logger:   764 (shared entities: ['Twitter', 'India'])
+2025-10-22 14:21:07 [INFO] utils.logger:   957 (shared entities: ['India'])
+2025-10-22 14:21:07 [INFO] utils.logger:   586 (shared entities: ['Twitter', 'India', 'Google'])
+2025-10-22 14:21:07 [INFO] utils.logger:   196 (shared entities: ['Twitter', 'India'])
+2025-10-22 14:21:16 [INFO] utils.logger: Graph saved to graphRAG/nerRAG.gexf
