@@ -5,3 +5,5 @@ __pycache__/
 factcheckbureau/
 .vscode/
 data/
+*.pkl
+*.gpickle

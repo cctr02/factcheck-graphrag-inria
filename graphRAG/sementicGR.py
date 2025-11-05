@@ -8,7 +8,7 @@ import pickle
 #uv run python graphRAG/graph_search.py -g "doc_graph_embed.gpickle" -q "photo from Gaza 2008 shared on Facebook"
 
 
-sys.path.append(os.path.join(os.path.dirname(__file__), "..", "utils"))
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from utils.io_utils import load_corpus_from_csv
 
 from sentence_transformers import SentenceTransformer
