@@ -38,6 +38,18 @@ class GraphConfig:
 
 
 @dataclass
+class DatabaseConfig:
+    """Configuration for PostgreSQL database connection."""
+
+    # PostgreSQL connection parameters
+    host: str = "localhost"
+    port: int = 5432
+    database: str = "knowledge_graph"
+    user: str = "postgres"
+    password: str = "postgres"
+
+
+@dataclass
 class RetrievalConfig:
     """Configuration for retrieval strategy."""
 

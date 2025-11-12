@@ -1,7 +1,30 @@
-scikit-learn
-pandas
-numpy
-nltk
-tqdm
-spacy
-sentence-transformers
+# Core dependencies
+networkx>=3.0
+numpy>=1.24.0
+pandas>=2.0.0
+scikit-learn>=1.3.0
+
+# NLP and ML
+spacy>=3.5.0
+sentence-transformers>=2.2.0
+bertopic>=0.15.0
+nltk>=3.8.0
+
+# Database
+psycopg2-binary>=2.9.0
+
+# Visualization
+pyvis>=0.3.0
+
+# Configuration and CLI
+pyyaml>=6.0
+click>=8.1.0
+
+# Utilities
+requests>=2.28.0
+tqdm>=4.65.0
+
+# Optional: Development
+pytest>=7.4.0
+black>=23.0.0
+flake8>=6.0.0

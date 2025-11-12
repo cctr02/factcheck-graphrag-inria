@@ -16,8 +16,9 @@ from sentence_transformers import SentenceTransformer
 # Add parent directory to path
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
-from fact_check_kg.config import RetrievalConfig, GraphConfig
+from fact_check_kg.config import RetrievalConfig, GraphConfig, DatabaseConfig
 from fact_check_kg.retrieval import HybridRetriever
+from fact_check_kg.db_connector import GraphDatabaseConnector
 
 
 def setup_logging(log_level: str = "INFO") -> logging.Logger:
@@ -118,6 +119,41 @@ def main():
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Logging level"
     )
+    parser.add_argument(
+        "--use-postgres",
+        action="store_true",
+        help="Load from PostgreSQL instead of pickle file"
+    )
+    parser.add_argument(
+        "--db-host",
+        type=str,
+        default="localhost",
+        help="PostgreSQL host"
+    )
+    parser.add_argument(
+        "--db-port",
+        type=int,
+        default=5432,
+        help="PostgreSQL port"
+    )
+    parser.add_argument(
+        "--db-name",
+        type=str,
+        default="knowledge_graph",
+        help="PostgreSQL database name"
+    )
+    parser.add_argument(
+        "--db-user",
+        type=str,
+        default="postgres",
+        help="PostgreSQL username"
+    )
+    parser.add_argument(
+        "--db-password",
+        type=str,
+        default="postgres",
+        help="PostgreSQL password"
+    )
 
     args = parser.parse_args()
 
@@ -134,17 +170,47 @@ def main():
 
     # Load graph
     logger.info("\nLoading knowledge graph...")
-    graph_path = os.path.join(os.path.dirname(__file__), args.graph)
-    with open(graph_path, 'rb') as f:
-        graph = pickle.load(f)
-    logger.info(f"Graph loaded: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
+    if args.use_postgres:
+        db_config = DatabaseConfig(
+            host=args.db_host,
+            port=args.db_port,
+            database=args.db_name,
+            user=args.db_user,
+            password=args.db_password
+        )
+        db = GraphDatabaseConnector(
+            host=db_config.host,
+            port=db_config.port,
+            database=db_config.database,
+            user=db_config.user,
+            password=db_config.password,
+            logger=logger
+        )
+        try:
+            db.connect()
+            graph = db.load_graph()
+        finally:
+            db.disconnect()
+        logger.info(f"Graph loaded from PostgreSQL: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
 
-    # Load topic model
-    logger.info("\nLoading topic model...")
-    topic_model_path = graph_path.replace('.gpickle', '_topic_model.pkl')
-    with open(topic_model_path, 'rb') as f:
-        topic_model = pickle.load(f)
-    logger.info("Topic model loaded")
+        # Load topic model (still from pickle)
+        logger.info("\nLoading topic model...")
+        topic_model_path = os.path.join(os.path.dirname(__file__), 'topic_model.pkl')
+        with open(topic_model_path, 'rb') as f:
+            topic_model = pickle.load(f)
+        logger.info("Topic model loaded")
+    else:
+        graph_path = os.path.join(os.path.dirname(__file__), args.graph)
+        with open(graph_path, 'rb') as f:
+            graph = pickle.load(f)
+        logger.info(f"Graph loaded from pickle: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
+
+        # Load topic model
+        logger.info("\nLoading topic model...")
+        topic_model_path = graph_path.replace('.gpickle', '_topic_model.pkl')
+        with open(topic_model_path, 'rb') as f:
+            topic_model = pickle.load(f)
+        logger.info("Topic model loaded")
 
     # Load models
     logger.info("\nLoading embedding and NER models...")

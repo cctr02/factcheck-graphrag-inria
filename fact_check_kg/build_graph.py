@@ -14,7 +14,7 @@ import argparse
 # Add parent directory to path
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
-from fact_check_kg.config import GraphConfig
+from fact_check_kg.config import GraphConfig, DatabaseConfig
 from fact_check_kg.data_loader import load_and_chunk_documents
 from fact_check_kg.graph_builder import KnowledgeGraphBuilder
 
@@ -77,6 +77,41 @@ def main():
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Logging level"
     )
+    parser.add_argument(
+        "--db-host",
+        type=str,
+        default="localhost",
+        help="PostgreSQL host"
+    )
+    parser.add_argument(
+        "--db-port",
+        type=int,
+        default=5432,
+        help="PostgreSQL port"
+    )
+    parser.add_argument(
+        "--db-name",
+        type=str,
+        default="knowledge_graph",
+        help="PostgreSQL database name"
+    )
+    parser.add_argument(
+        "--db-user",
+        type=str,
+        default="postgres",
+        help="PostgreSQL username"
+    )
+    parser.add_argument(
+        "--db-password",
+        type=str,
+        default="postgres",
+        help="PostgreSQL password"
+    )
+    parser.add_argument(
+        "--use-postgres",
+        action="store_true",
+        help="Save to PostgreSQL instead of pickle file"
+    )
 
     args = parser.parse_args()
 
@@ -134,17 +169,36 @@ def main():
     # Step 4: Save graph and models
     logger.info("\n### STEP 4: Saving graph and models ###")
 
-    # Save graph
-    output_path = os.path.join(os.path.dirname(__file__), args.output)
-    with open(output_path, 'wb') as f:
-        pickle.dump(graph, f)
-    logger.info(f"Graph saved to: {output_path}")
+    if args.use_postgres:
+        # Save to PostgreSQL
+        logger.info("Saving graph to PostgreSQL database...")
+        builder.save_to_postgres(
+            host=args.db_host,
+            port=args.db_port,
+            database=args.db_name,
+            user=args.db_user,
+            password=args.db_password,
+            clear_existing=True
+        )
 
-    # Save topic model (for retrieval)
-    topic_model_path = output_path.replace('.gpickle', '_topic_model.pkl')
-    with open(topic_model_path, 'wb') as f:
-        pickle.dump(builder.topic_model, f)
-    logger.info(f"Topic model saved to: {topic_model_path}")
+        # Still save topic model as pickle for retrieval
+        output_dir = os.path.dirname(__file__)
+        topic_model_path = os.path.join(output_dir, 'topic_model.pkl')
+        with open(topic_model_path, 'wb') as f:
+            pickle.dump(builder.topic_model, f)
+        logger.info(f"Topic model saved to: {topic_model_path}")
+    else:
+        # Save graph as pickle (legacy mode)
+        output_path = os.path.join(os.path.dirname(__file__), args.output)
+        with open(output_path, 'wb') as f:
+            pickle.dump(graph, f)
+        logger.info(f"Graph saved to: {output_path}")
+
+        # Save topic model (for retrieval)
+        topic_model_path = output_path.replace('.gpickle', '_topic_model.pkl')
+        with open(topic_model_path, 'wb') as f:
+            pickle.dump(builder.topic_model, f)
+        logger.info(f"Topic model saved to: {topic_model_path}")
 
     logger.info("\n" + "=" * 60)
     logger.info("GRAPH BUILDING COMPLETED SUCCESSFULLY")

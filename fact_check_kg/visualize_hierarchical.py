@@ -9,12 +9,46 @@ import pickle
 import networkx as nx
 from pyvis.network import Network
 import argparse
+import os
+import sys
+
+# Add parent directory to path
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+
+from fact_check_kg.db_connector import GraphDatabaseConnector
+from fact_check_kg.config import DatabaseConfig
+
+
+def load_graph_from_source(graph_path: str = None, use_postgres: bool = False, db_config: DatabaseConfig = None) -> nx.Graph:
+    """Load graph from PostgreSQL or pickle file."""
+    if use_postgres:
+        if db_config is None:
+            db_config = DatabaseConfig()
+        print(f"Loading graph from PostgreSQL ({db_config.database})...")
+        db = GraphDatabaseConnector(
+            host=db_config.host,
+            port=db_config.port,
+            database=db_config.database,
+            user=db_config.user,
+            password=db_config.password
+        )
+        try:
+            db.connect()
+            return db.load_graph()
+        finally:
+            db.disconnect()
+    else:
+        print(f"Loading graph from {graph_path}...")
+        with open(graph_path, 'rb') as f:
+            return pickle.load(f)
 
 
 def visualize_hierarchical_entity(
-    graph_path: str,
     entity_name: str,
-    output_path: str = "graph_hierarchical.html"
+    output_path: str = "graph_hierarchical.html",
+    graph_path: str = None,
+    use_postgres: bool = False,
+    db_config: DatabaseConfig = None
 ):
     """
     Create a hierarchical visualization centered on an entity.
@@ -26,13 +60,13 @@ def visualize_hierarchical_entity(
     - Documents at the periphery
 
     Args:
-        graph_path: Path to .gpickle file
         entity_name: Entity to center on
         output_path: Output HTML file
+        graph_path: Path to .gpickle file (if not using postgres)
+        use_postgres: Whether to load from PostgreSQL
+        db_config: Database configuration
     """
-    print(f"Loading graph from {graph_path}...")
-    with open(graph_path, 'rb') as f:
-        G = pickle.load(f)
+    G = load_graph_from_source(graph_path, use_postgres, db_config)
 
     # Find entity
     entity_nodes = [
@@ -269,8 +303,10 @@ def visualize_hierarchical_entity(
 
 
 def visualize_full_hierarchical(
-    graph_path: str,
-    output_path: str = "graph_full_hierarchical.html"
+    output_path: str = "graph_full_hierarchical.html",
+    graph_path: str = None,
+    use_postgres: bool = False,
+    db_config: DatabaseConfig = None
 ):
     """
     Create hierarchical view of entire graph structure.
@@ -281,12 +317,12 @@ def visualize_full_hierarchical(
     - Themes and Entities (level 3)
 
     Args:
-        graph_path: Path to .gpickle file
         output_path: Output HTML file
+        graph_path: Path to .gpickle file (if not using postgres)
+        use_postgres: Whether to load from PostgreSQL
+        db_config: Database configuration
     """
-    print(f"Loading graph from {graph_path}...")
-    with open(graph_path, 'rb') as f:
-        G = pickle.load(f)
+    G = load_graph_from_source(graph_path, use_postgres, db_config)
 
     print(f"Graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
 
@@ -404,16 +440,62 @@ def main():
         type=str,
         help="Output HTML file"
     )
+    parser.add_argument(
+        "--use-postgres",
+        action="store_true",
+        help="Load from PostgreSQL instead of pickle file"
+    )
+    parser.add_argument(
+        "--db-host",
+        type=str,
+        default="localhost",
+        help="PostgreSQL host"
+    )
+    parser.add_argument(
+        "--db-port",
+        type=int,
+        default=5432,
+        help="PostgreSQL port"
+    )
+    parser.add_argument(
+        "--db-name",
+        type=str,
+        default="knowledge_graph",
+        help="PostgreSQL database name"
+    )
+    parser.add_argument(
+        "--db-user",
+        type=str,
+        default="postgres",
+        help="PostgreSQL username"
+    )
+    parser.add_argument(
+        "--db-password",
+        type=str,
+        default="postgres",
+        help="PostgreSQL password"
+    )
 
     args = parser.parse_args()
 
+    # Create database config if using postgres
+    db_config = None
+    if args.use_postgres:
+        db_config = DatabaseConfig(
+            host=args.db_host,
+            port=args.db_port,
+            database=args.db_name,
+            user=args.db_user,
+            password=args.db_password
+        )
+
     if args.mode == "entity":
         output = args.output or f"graph_hierarchical_{args.entity}.html"
-        visualize_hierarchical_entity(args.graph, args.entity, output)
+        visualize_hierarchical_entity(args.entity, output, args.graph, args.use_postgres, db_config)
 
     elif args.mode == "full":
         output = args.output or "graph_full_hierarchical.html"
-        visualize_full_hierarchical(args.graph, output)
+        visualize_full_hierarchical(output, args.graph, args.use_postgres, db_config)
 
 
 if __name__ == "__main__":

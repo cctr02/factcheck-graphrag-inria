@@ -12,20 +12,72 @@ import networkx as nx
 from pyvis.network import Network
 import argparse
 from collections import defaultdict
+import os
+import sys
+
+# Add parent directory to path
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+
+from fact_check_kg.db_connector import GraphDatabaseConnector
+from fact_check_kg.config import DatabaseConfig
 
 
-def visualize_full_graph(graph_path: str, output_path: str = "graph_full.html", max_nodes: int = 200):
+def load_graph_from_source(graph_path: str = None, use_postgres: bool = False, db_config: DatabaseConfig = None) -> nx.Graph:
+    """
+    Load graph either from PostgreSQL or pickle file.
+
+    Args:
+        graph_path: Path to .gpickle file (used if use_postgres=False)
+        use_postgres: Whether to load from PostgreSQL
+        db_config: Database configuration (used if use_postgres=True)
+
+    Returns:
+        NetworkX graph
+    """
+    if use_postgres:
+        if db_config is None:
+            db_config = DatabaseConfig()
+
+        print(f"Loading graph from PostgreSQL ({db_config.database})...")
+        db = GraphDatabaseConnector(
+            host=db_config.host,
+            port=db_config.port,
+            database=db_config.database,
+            user=db_config.user,
+            password=db_config.password
+        )
+
+        try:
+            db.connect()
+            G = db.load_graph()
+            return G
+        finally:
+            db.disconnect()
+    else:
+        print(f"Loading graph from {graph_path}...")
+        with open(graph_path, 'rb') as f:
+            G = pickle.load(f)
+        return G
+
+
+def visualize_full_graph(
+    graph_path: str = None,
+    output_path: str = "graph_full.html",
+    max_nodes: int = 200,
+    use_postgres: bool = False,
+    db_config: DatabaseConfig = None
+):
     """
     Visualize a filtered version of the full graph.
 
     Args:
-        graph_path: Path to .gpickle file
+        graph_path: Path to .gpickle file (if not using postgres)
         output_path: Output HTML file
         max_nodes: Maximum nodes to display (for readability)
+        use_postgres: Whether to load from PostgreSQL
+        db_config: Database configuration
     """
-    print(f"Loading graph from {graph_path}...")
-    with open(graph_path, 'rb') as f:
-        G = pickle.load(f)
+    G = load_graph_from_source(graph_path, use_postgres, db_config)
 
     print(f"Graph loaded: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
 
@@ -110,23 +162,25 @@ def visualize_full_graph(graph_path: str, output_path: str = "graph_full.html", 
 
 
 def visualize_entity_subgraph(
-    graph_path: str,
     entity_name: str,
     output_path: str = "graph_entity.html",
-    max_neighbors: int = 50
+    max_neighbors: int = 50,
+    graph_path: str = None,
+    use_postgres: bool = False,
+    db_config: DatabaseConfig = None
 ):
     """
     Visualize subgraph around a specific entity.
 
     Args:
-        graph_path: Path to .gpickle file
         entity_name: Entity to center on (e.g., "gaza", "facebook")
         output_path: Output HTML file
         max_neighbors: Max neighbors to include
+        graph_path: Path to .gpickle file (if not using postgres)
+        use_postgres: Whether to load from PostgreSQL
+        db_config: Database configuration
     """
-    print(f"Loading graph from {graph_path}...")
-    with open(graph_path, 'rb') as f:
-        G = pickle.load(f)
+    G = load_graph_from_source(graph_path, use_postgres, db_config)
 
     # Find entity node
     entity_nodes = [
@@ -219,16 +273,16 @@ def visualize_entity_subgraph(
     print(f"\nVisualization saved to: {output_path}")
 
 
-def analyze_graph_stats(graph_path: str):
+def analyze_graph_stats(graph_path: str = None, use_postgres: bool = False, db_config: DatabaseConfig = None):
     """
     Print detailed graph statistics.
 
     Args:
-        graph_path: Path to .gpickle file
+        graph_path: Path to .gpickle file (if not using postgres)
+        use_postgres: Whether to load from PostgreSQL
+        db_config: Database configuration
     """
-    print(f"Loading graph from {graph_path}...")
-    with open(graph_path, 'rb') as f:
-        G = pickle.load(f)
+    G = load_graph_from_source(graph_path, use_postgres, db_config)
 
     print("\n" + "="*60)
     print("GRAPH STATISTICS")
@@ -287,7 +341,7 @@ def main():
         "--graph",
         type=str,
         default="knowledge_graph.gpickle",
-        help="Path to graph file"
+        help="Path to graph file (ignored if --use-postgres is set)"
     )
     parser.add_argument(
         "--mode",
@@ -313,19 +367,65 @@ def main():
         default=200,
         help="Max nodes for full mode"
     )
+    parser.add_argument(
+        "--use-postgres",
+        action="store_true",
+        help="Load from PostgreSQL instead of pickle file"
+    )
+    parser.add_argument(
+        "--db-host",
+        type=str,
+        default="localhost",
+        help="PostgreSQL host"
+    )
+    parser.add_argument(
+        "--db-port",
+        type=int,
+        default=5432,
+        help="PostgreSQL port"
+    )
+    parser.add_argument(
+        "--db-name",
+        type=str,
+        default="knowledge_graph",
+        help="PostgreSQL database name"
+    )
+    parser.add_argument(
+        "--db-user",
+        type=str,
+        default="postgres",
+        help="PostgreSQL username"
+    )
+    parser.add_argument(
+        "--db-password",
+        type=str,
+        default="postgres",
+        help="PostgreSQL password"
+    )
 
     args = parser.parse_args()
 
+    # Create database config if using postgres
+    db_config = None
+    if args.use_postgres:
+        db_config = DatabaseConfig(
+            host=args.db_host,
+            port=args.db_port,
+            database=args.db_name,
+            user=args.db_user,
+            password=args.db_password
+        )
+
     if args.mode == "stats":
-        analyze_graph_stats(args.graph)
+        analyze_graph_stats(args.graph, args.use_postgres, db_config)
 
     elif args.mode == "full":
         output = args.output or "graph_full.html"
-        visualize_full_graph(args.graph, output, args.max_nodes)
+        visualize_full_graph(args.graph, output, args.max_nodes, args.use_postgres, db_config)
 
     elif args.mode == "entity":
         output = args.output or f"graph_entity_{args.entity}.html"
-        visualize_entity_subgraph(args.graph, args.entity, output)
+        visualize_entity_subgraph(args.entity, output, 50, args.graph, args.use_postgres, db_config)
 
 
 if __name__ == "__main__":

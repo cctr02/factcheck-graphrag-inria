@@ -18,6 +18,8 @@ from sentence_transformers import SentenceTransformer
 from bertopic import BERTopic
 import logging
 
+from fact_check_kg.db_connector import GraphDatabaseConnector
+
 
 class KnowledgeGraphBuilder:
     """
@@ -546,3 +548,61 @@ Topic label:"""
             self.logger.info(f"  {etype}: {count}")
 
         self.logger.info("=" * 60)
+
+    def save_to_postgres(
+        self,
+        host: str = "localhost",
+        port: int = 5432,
+        database: str = "knowledge_graph",
+        user: str = "postgres",
+        password: str = "postgres",
+        clear_existing: bool = True
+    ):
+        """
+        Save the graph to PostgreSQL database.
+
+        Args:
+            host: PostgreSQL host
+            port: PostgreSQL port
+            database: Database name
+            user: Username
+            password: Password
+            clear_existing: Whether to clear existing data before saving
+        """
+        self.logger.info("\n" + "=" * 60)
+        self.logger.info("SAVING GRAPH TO POSTGRESQL")
+        self.logger.info("=" * 60)
+
+        # Initialize database connector
+        db = GraphDatabaseConnector(
+            host=host,
+            port=port,
+            database=database,
+            user=user,
+            password=password,
+            logger=self.logger
+        )
+
+        try:
+            # Connect to database
+            db.connect()
+
+            # Create tables if they don't exist
+            db.create_tables()
+
+            # Clear existing data if requested
+            if clear_existing:
+                db.clear_graph()
+
+            # Save the graph
+            db.save_graph(self.graph)
+
+            self.logger.info("=" * 60)
+            self.logger.info("GRAPH SAVED SUCCESSFULLY TO POSTGRESQL")
+            self.logger.info("=" * 60)
+
+        except Exception as e:
+            self.logger.error(f"Failed to save graph to PostgreSQL: {e}")
+            raise
+        finally:
+            db.disconnect()

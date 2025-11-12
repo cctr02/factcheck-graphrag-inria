@@ -1,8 +1,0 @@
-2025-10-22 14:35:02 [INFO] utils.logger: Error: File graphRAG/graph_visualisation.gpickle does not exist.
-2025-10-22 14:35:02 [INFO] utils.logger: Run sementicGR.py first to generate the graph.
-2025-10-22 14:35:24 [INFO] utils.logger: Graph loaded: 1000 nodes, 356446 edges
-2025-11-05 13:43:42 [INFO] utils.logger: Graph loaded: 1000 nodes, 356446 edges
-2025-11-05 13:55:33 [INFO] utils.logger: Graph loaded: 1000 nodes, 356446 edges
-2025-11-05 13:57:46 [INFO] utils.logger: Graph loaded: 1000 nodes, 3140 edges
-2025-11-05 13:57:46 [INFO] utils.logger: 
-Visualization saved in: graph_visualization.html

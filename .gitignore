@@ -1,9 +1,89 @@
-
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
 
-factcheckbureau/
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDEs
 .vscode/
-data/
-*.pkl
-*.gpickle
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+logs/
+*.log
+
+# Outputs
+outputs/graphs/*.gpickle
+outputs/graphs/*.pkl
+outputs/visualizations/*.html
+outputs/exports/*
+outputs/models/*
+
+# Cache
+.cache/
+*.cache
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Large data files (keep directory structure)
+data/*.csv
+data/*.json
+data/*.parquet
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Documentation builds
+docs/_build/
+
+# OS
+Thumbs.db
+
+# Project specific - keep factcheckbureau
+factcheckbureau/
+remove/
+note.md
+journal.md
+uv.lock
