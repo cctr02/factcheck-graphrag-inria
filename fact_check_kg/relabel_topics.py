@@ -50,7 +50,7 @@ Topic label:"""
                     'num_predict': 20
                 }
             },
-            timeout=15
+            timeout=300
         )
 
         if response.status_code == 200:

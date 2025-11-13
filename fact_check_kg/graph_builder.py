@@ -205,7 +205,7 @@ Topic label:"""
                         'num_predict': 20  # Short responses
                     }
                 },
-                timeout=10
+                timeout=300
             )
 
             if response.status_code == 200:

@@ -1,0 +1,17 @@
+{
+  "timestamp": "20251113_113759",
+  "created_at": "2025-11-13T11:38:00.170107",
+  "max_documents": 500,
+  "chunk_size": 500,
+  "chunk_overlap": 100,
+  "num_nodes": 14344,
+  "num_edges": 693524,
+  "num_documents": 500,
+  "num_chunks": 4759,
+  "edge_types": {
+    "unknown": 693524
+  },
+  "storage_type": "pickle",
+  "graph_path": "outputs\\graphs\\graph_20251113_113759.gpickle",
+  "topic_model_path": "outputs\\graphs\\topic_model_20251113_113759.pkl"
+}
