@@ -120,6 +120,8 @@ def build(max_docs, chunk_size, chunk_overlap, use_postgres, log_level):
 def visualize(mode, entity, max_nodes, output, use_postgres, graph_file):
     """Visualize the knowledge graph."""
     import subprocess
+    from fact_check_kg.visualize_graph import analyze_graph_stats
+    from fact_check_kg.config import DatabaseConfig
 
     logger.info("=" * 60)
     logger.info(f"VISUALIZING GRAPH - MODE: {mode.upper()}")
@@ -127,12 +129,27 @@ def visualize(mode, entity, max_nodes, output, use_postgres, graph_file):
 
     # Build command based on mode
     if mode == 'stats':
-        # Use analyze_graph_stats
-        cmd = [sys.executable, "-c",
-               f"from fact_check_kg.visualize_graph import analyze_graph_stats; "
-               f"analyze_graph_stats(use_postgres={use_postgres})"]
+        # Call analyze_graph_stats directly with proper parameters
         try:
-            subprocess.run(cmd, check=True)
+            db_config = None
+            if use_postgres:
+                db_config = DatabaseConfig(
+                    host=config.database.host,
+                    port=config.database.port,
+                    database=config.database.database,
+                    user=config.database.user,
+                    password=config.database.password
+                )
+
+            # Use provided graph_file or default
+            if not graph_file and not use_postgres:
+                graph_file = "fact_check_kg/knowledge_graph.gpickle"
+
+            analyze_graph_stats(
+                graph_path=graph_file,
+                use_postgres=use_postgres,
+                db_config=db_config
+            )
             return
         except Exception as e:
             logger.error(f"Error showing stats: {e}", exc_info=True)
@@ -251,13 +268,42 @@ def retrieve(claim, alpha, beta, gamma, top_k, use_postgres, test, top_n, save_r
             with open(topic_model_path, 'rb') as f:
                 topic_model = pickle.load(f)
         else:
-            graph_path = Path(f"{config.paths.graphs_dir}/knowledge_graph.gpickle")
+            # Try multiple locations for the graph file
+            possible_paths = [
+                Path("fact_check_kg/knowledge_graph.gpickle"),  # Default build location
+                Path(f"{config.paths.graphs_dir}/knowledge_graph.gpickle"),  # Config location
+            ]
+
+            graph_path = None
+            for path in possible_paths:
+                if path.exists():
+                    graph_path = path
+                    break
+
+            if not graph_path:
+                logger.error("No graph file found. Please run 'build' command first.")
+                sys.exit(1)
+
             with open(graph_path, 'rb') as f:
                 graph = pickle.load(f)
-            logger.info(f"Graph loaded from pickle: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
+            logger.info(f"Graph loaded from {graph_path}: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
 
-            # Load topic model
-            topic_model_path = graph_path.parent / "topic_model.pkl"
+            # Load topic model (try both naming conventions)
+            topic_model_paths = [
+                graph_path.parent / "topic_model.pkl",  # New naming
+                graph_path.parent / "knowledge_graph_topic_model.pkl",  # Legacy naming
+            ]
+
+            topic_model_path = None
+            for path in topic_model_paths:
+                if path.exists():
+                    topic_model_path = path
+                    break
+
+            if not topic_model_path:
+                logger.error(f"No topic model found near {graph_path}")
+                sys.exit(1)
+
             with open(topic_model_path, 'rb') as f:
                 topic_model = pickle.load(f)
 
@@ -373,6 +419,8 @@ def stats(use_postgres, detailed):
 
     try:
         db_config = None
+        graph_path = None
+
         if use_postgres:
             db_config = DatabaseConfig(
                 host=config.database.host,
@@ -381,9 +429,12 @@ def stats(use_postgres, detailed):
                 user=config.database.user,
                 password=config.database.password
             )
+        else:
+            # Use default graph path if not using postgres
+            graph_path = "fact_check_kg/knowledge_graph.gpickle"
 
         analyze_graph_stats(
-            graph_path=None,
+            graph_path=graph_path,
             use_postgres=use_postgres,
             db_config=db_config
         )

@@ -115,6 +115,9 @@ def main():
 
     args = parser.parse_args()
 
+    # Load configuration
+    config = get_config()
+
     # Setup logging
     logger = setup_logging(args.log_level)
 
@@ -128,20 +131,24 @@ def main():
     logger.info(f"Chunk overlap: {args.chunk_overlap}")
     logger.info("=" * 60)
 
-    # Load configuration
-    config = GraphConfig(
-        chunk_size=args.chunk_size,
-        chunk_overlap=args.chunk_overlap
-    )
-
     # Step 1: Load and chunk documents
     logger.info("\n### STEP 1: Loading and chunking documents ###")
-    csv_path = os.path.join(os.path.dirname(__file__), args.csv)
+
+    # Handle both absolute and relative paths
+    if os.path.isabs(args.csv):
+        csv_path = args.csv
+    else:
+        # If relative path starts with "..", resolve from script directory
+        # Otherwise, resolve from current working directory (for CLI usage)
+        if args.csv.startswith(".."):
+            csv_path = os.path.join(os.path.dirname(__file__), args.csv)
+        else:
+            csv_path = args.csv
 
     chunks, n_docs = load_and_chunk_documents(
         csv_path=csv_path,
-        chunk_size=config.chunk_size,
-        chunk_overlap=config.chunk_overlap,
+        chunk_size=args.chunk_size,
+        chunk_overlap=args.chunk_overlap,
         max_docs=args.max_docs,
         logger=logger
     )
@@ -149,12 +156,11 @@ def main():
     # Step 2: Initialize graph builder
     logger.info("\n### STEP 2: Initializing graph builder ###")
     builder = KnowledgeGraphBuilder(
-        embedding_model=config.embedding_model,
-        ner_model=config.ner_model,
-        entity_types=config.entity_types,
-        co_occur_threshold=config.co_occur_threshold,
-        semantic_sim_threshold=config.semantic_sim_threshold,
-        entity_related_threshold=config.entity_related_threshold,
+        embedding_model=config.models.embedding_model,
+        ner_model=config.models.ner_model,
+        entity_types=config.graph_construction.entity_types,
+        co_occur_threshold=config.graph_construction.co_occurrence_threshold,
+        semantic_sim_threshold=config.graph_construction.semantic_similarity_threshold,
         logger=logger
     )
 
@@ -162,8 +168,8 @@ def main():
     logger.info("\n### STEP 3: Building knowledge graph ###")
     graph = builder.build_graph(
         chunks=chunks,
-        min_topic_size=config.min_topic_size,
-        nr_topics=config.nr_topics
+        min_topic_size=config.graph_construction.min_topic_size,
+        nr_topics=config.graph_construction.nr_topics
     )
 
     # Step 4: Save graph and models

@@ -349,7 +349,7 @@ class HybridRetriever:
 
         self.logger.info("\n--- Fusion ---")
         self.logger.info(f"Total unique chunks: {len(all_chunks)}")
-        self.logger.info(f"Weights: α={self.alpha}, β={self.beta}, γ={self.gamma}")
+        self.logger.info(f"Weights: alpha={self.alpha}, beta={self.beta}, gamma={self.gamma}")
 
         results = []
         for chunk_id in all_chunks:

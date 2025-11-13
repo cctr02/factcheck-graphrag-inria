@@ -4,7 +4,12 @@
       "Bash(dir:*)",
       "Bash(python cli.py:*)",
       "Bash(timeout 120 python cli.py:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(uv run python:*)",
+      "Bash(timeout 180 uv run python:*)",
+      "Bash(timeout 60 uv run python:*)",
+      "Bash(timeout 30 uv run python:*)",
+      "Bash(cat:*)"
     ],
     "deny": [],
     "ask": []

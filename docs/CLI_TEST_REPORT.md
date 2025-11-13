@@ -24,11 +24,11 @@ Version: 1.0.0
 | `cli.py stats --help` | ✓ PASS | Shows stats options |
 | `cli.py relabel --help` | ✓ PASS | Shows relabel options |
 | `cli.py init --help` | ✓ PASS | Shows init options |
-| `cli.py build --max-docs 5` | ⚠ SKIP | Requires dependencies (spaCy, etc.) |
-| `cli.py stats` | ⚠ SKIP | Requires existing graph |
-| `cli.py visualize` | ⚠ SKIP | Requires existing graph |
-| `cli.py retrieve` | ⚠ SKIP | Requires existing graph |
-| `cli.py relabel` | ⚠ SKIP | Requires existing graph + Ollama |
+| `cli.py build --max-docs 10` | ✓ PASS | Built graph with 10 docs, 83 chunks, 401 nodes |
+| `cli.py stats` | ✓ PASS | Displays graph statistics (5 edge types, no RELATED_TO) |
+| `cli.py visualize --mode stats` | ✓ PASS | Shows detailed stats with themes and entities |
+| `cli.py retrieve "claim"` | ✓ PASS | Retrieves and ranks chunks with detailed scoring |
+| `cli.py relabel` | ⚠ SKIP | Requires Ollama (LLM service not running) |
 
 ## Detailed Test Results
 
@@ -441,6 +441,168 @@ The CLI is fully functional and ready for use once dependencies are installed. A
 3. **Test PostgreSQL**: Set up PostgreSQL and test `init --postgres`
 4. **Test Ollama**: Set up Ollama and test `relabel` command
 5. **Integration Testing**: Test complete workflows end-to-end
+
+---
+
+## Latest Test Session (2025-11-13 10:00)
+
+### Environment
+- Using `uv run` for isolated Python environment
+- All dependencies installed successfully
+
+### Build Command Test
+**Command**: `uv run python cli.py build --max-docs 10 --log-level INFO`
+
+**Results**:
+- ✓ Graph built successfully in ~1 minute
+- ✓ 10 documents processed → 83 chunks
+- ✓ 401 nodes created (10 docs + 83 chunks + 306 entities + 2 themes)
+- ✓ 2266 edges created across **5 edge types** (CONTAINS, HAS_TOPIC, MENTIONS, CO_OCCURS, SEMANTIC_SIM)
+- ✓ **NO RELATED_TO edges** (successfully removed)
+- ✓ tqdm progress bar working: "Adding documents and chunks: 100%|##########| 83/83"
+- ✓ Statistics automatically saved to 4 files in `outputs/statistics/`:
+  - general_stats_*.json
+  - topic_stats_*.json (includes documents per topic)
+  - entity_stats_*.json
+  - summary_*.txt
+
+**Output Files**:
+```
+fact_check_kg/knowledge_graph.gpickle (401 nodes, 2266 edges)
+fact_check_kg/knowledge_graph_topic_model.pkl
+outputs/statistics/general_stats_20251113_095738.json
+outputs/statistics/topic_stats_20251113_095738.json
+outputs/statistics/entity_stats_20251113_095738.json
+outputs/statistics/summary_20251113_095738.txt
+```
+
+### Stats Command Test
+**Command**: `uv run python cli.py stats`
+
+**Results**:
+- ✓ Loaded graph automatically from default location
+- ✓ Displays complete statistics:
+  - Node counts by type (401 total)
+  - **Edge counts by type (5 types, NO RELATED_TO)**
+  - Top 15 entities by degree
+  - Themes with keywords
+
+### Visualize Command Test
+**Command**: `uv run python cli.py visualize --mode stats`
+
+**Results**:
+- ✓ Same output as stats command
+- ✓ Confirms only 5 edge types present
+- ✓ Shows theme keywords and connection counts
+
+### Retrieve Command Test
+**Command**: `uv run python cli.py retrieve "Photo from Gaza shared on Facebook" --top-k 3 --top-n 3`
+
+**Results**:
+- ✓ Successfully loaded graph and models
+- ✓ tqdm progress bars shown for embedding computation
+- ✓ Detailed retrieval process logged:
+  - Step 1: Semantic retrieval (83 chunks)
+  - Step 2: Thematic retrieval (49 chunks, 2 themes detected)
+  - Step 3: Entity-based retrieval (2 chunks, 1 entity extracted: Gaza)
+  - Fusion with weights alpha=0.4, beta=0.3, gamma=0.3
+- ✓ Results show detailed score breakdown:
+  - Total score
+  - Semantic score
+  - Thematic score
+  - Entity score
+  - Dominant component identified
+- ✓ **6 alternative rankings** provided:
+  - By total score
+  - By semantic score
+  - By thematic score
+  - By entity score
+  - By balance (lowest variance)
+  - By max component
+- ✓ Results saved to `outputs/retrieval_results/`:
+  - results_*.json (detailed data)
+  - results_*.txt (human-readable)
+
+**Top Result Example**:
+```
+--- Result #1 ---
+Document ID: 0
+Chunk ID: chunk::0::0
+
+Scores:
+  Total:    1.0000
+  Semantic: 1.0000
+  Thematic: 1.0000
+  Entity:   1.0000
+
+Text preview:
+  This is an 11-year-old photo from Gaza, not from recent violence in Indian Kashmir...
+
+Dominant component: semantic (1.0000)
+```
+
+### Issues Fixed During Testing
+
+1. **CSV Path Resolution** ([build_graph.py:133-143](../fact_check_kg/build_graph.py#L133-L143))
+   - Added logic to handle both absolute and relative paths
+   - Works when called from CLI or directly
+
+2. **Missing Config Import** ([build_graph.py:119](../fact_check_kg/build_graph.py#L119))
+   - Added `config = get_config()` to load configuration
+
+3. **Config Parameter Access** ([build_graph.py:159-172](../fact_check_kg/build_graph.py#L159-L172))
+   - Updated to use nested config structure: `config.models.embedding_model` instead of `config.embedding_model`
+   - Removed `entity_related_threshold` parameter (RELATED_TO cleanup)
+
+4. **Stats Command Default Path** ([cli.py:387-388](../cli.py#L387-L388))
+   - Added default graph path for non-postgres mode: `fact_check_kg/knowledge_graph.gpickle`
+
+5. **Retrieve Command Path Resolution** ([cli.py:254-291](../cli.py#L254-L291))
+   - Added fallback logic to search multiple locations for graph file
+   - Searches for topic model in both naming conventions
+
+6. **Visualize Stats Mode** ([cli.py:131-156](../cli.py#L131-L156))
+   - Changed from subprocess call to direct function call
+   - Properly passes graph_path parameter
+   - Uses default path when not specified
+
+7. **Unicode Encoding in Logging** ([retrieval.py:352](../fact_check_kg/retrieval.py#L352))
+   - Changed Greek letters (α, β, γ) to "alpha, beta, gamma" for Windows compatibility
+
+### Verification of RELATED_TO Removal
+
+✓ **Confirmed**: NO RELATED_TO edges in graph
+- Build output shows only 5 edge types
+- Stats command confirms 5 edge types
+- Total edges: 2266 (CONTAINS: 83, HAS_TOPIC: 49, MENTIONS: 544, CO_OCCURS: 155, SEMANTIC_SIM: 1435)
+
+✓ **Confirmed**: All Python files cleaned
+- 0 mentions of RELATED_TO in code
+- Entity-theme relationships removed from graph_builder.py
+- Removed from visualization edge color maps
+- Removed from config.yaml
+
+### New Features Verified
+
+1. ✓ **Automatic Statistics Generation**
+   - 4 files created after each build
+   - Includes documents per topic as requested
+   - JSON and text formats
+
+2. ✓ **Enhanced Retrieval Scoring**
+   - Detailed score breakdowns for each result
+   - Shows why document #1 scored highest
+   - 6 different ranking methods
+   - Statistical analysis (variance, dominant component)
+
+3. ✓ **Progress Tracking with tqdm**
+   - Progress bar for document/chunk processing
+   - Progress bar for embedding computation
+   - Doesn't significantly slow down processing
+
+4. ✓ **Results Auto-Save**
+   - Retrieval results saved to dedicated directory
+   - Both JSON (for programmatic access) and TXT (human-readable)
 
 ---
 

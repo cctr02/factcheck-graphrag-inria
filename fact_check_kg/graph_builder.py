@@ -16,6 +16,7 @@ from collections import defaultdict, Counter
 from sentence_transformers import SentenceTransformer
 from bertopic import BERTopic
 import logging
+from tqdm import tqdm
 
 from fact_check_kg.db_connector import GraphDatabaseConnector
 
@@ -297,7 +298,7 @@ Topic label:"""
         """Add document and chunk nodes with CONTAINS edges."""
         doc_ids_seen = set()
 
-        for chunk in chunks:
+        for chunk in tqdm(chunks, desc="Adding documents and chunks", disable=self.logger.level > logging.INFO):
             chunk_id = chunk['chunk_id']
             doc_id = chunk['doc_id']
             text = chunk['text']
