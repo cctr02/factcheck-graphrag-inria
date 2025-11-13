@@ -57,7 +57,7 @@ def cli():
               default='INFO', help='Logging level')
 def build(max_docs, chunk_size, chunk_overlap, use_postgres, log_level):
     """Build the knowledge graph from CSV data."""
-    from fact_check_kg.build_graph import build_graph_main
+    import subprocess
 
     logger.info("=" * 60)
     logger.info("BUILDING KNOWLEDGE GRAPH")
@@ -68,15 +68,33 @@ def build(max_docs, chunk_size, chunk_overlap, use_postgres, log_level):
     chunk_size = chunk_size or config.graph_construction.chunk_size
     chunk_overlap = chunk_overlap or config.graph_construction.chunk_overlap
 
+    # Build command
+    cmd = [
+        sys.executable,
+        "fact_check_kg/build_graph.py",
+        "--csv", config.paths.csv_file,
+        "--max-docs", str(max_docs),
+        "--chunk-size", str(chunk_size),
+        "--chunk-overlap", str(chunk_overlap),
+        "--log-level", log_level
+    ]
+
+    if use_postgres:
+        cmd.extend([
+            "--use-postgres",
+            "--db-host", config.database.host,
+            "--db-port", str(config.database.port),
+            "--db-name", config.database.database,
+            "--db-user", config.database.user,
+            "--db-password", config.database.password
+        ])
+
     try:
-        build_graph_main(
-            max_docs=max_docs,
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            use_postgres=use_postgres,
-            log_level=log_level
-        )
+        result = subprocess.run(cmd, check=True, capture_output=False)
         logger.info("Graph building completed successfully!")
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Error building graph: {e}")
+        sys.exit(1)
     except Exception as e:
         logger.error(f"Error building graph: {e}", exc_info=True)
         sys.exit(1)
@@ -101,30 +119,59 @@ def build(max_docs, chunk_size, chunk_overlap, use_postgres, log_level):
               help='Path to graph pickle file (if not using postgres)')
 def visualize(mode, entity, max_nodes, output, use_postgres, graph_file):
     """Visualize the knowledge graph."""
-    from fact_check_kg.visualize_graph import visualize_main
+    import subprocess
 
     logger.info("=" * 60)
     logger.info(f"VISUALIZING GRAPH - MODE: {mode.upper()}")
     logger.info("=" * 60)
 
-    # Generate output path
-    if output is None:
-        timestamp = datetime.now().strftime(config.export.timestamp_format)
-        if mode == 'entity' and entity:
+    # Build command based on mode
+    if mode == 'stats':
+        # Use analyze_graph_stats
+        cmd = [sys.executable, "-c",
+               f"from fact_check_kg.visualize_graph import analyze_graph_stats; "
+               f"analyze_graph_stats(use_postgres={use_postgres})"]
+        try:
+            subprocess.run(cmd, check=True)
+            return
+        except Exception as e:
+            logger.error(f"Error showing stats: {e}", exc_info=True)
+            sys.exit(1)
+
+    # For other modes, call the main() function with arguments
+    cmd = [sys.executable, "fact_check_kg/visualize_graph.py"]
+
+    if graph_file:
+        cmd.extend(["--graph", graph_file])
+
+    if mode == 'entity' and entity:
+        cmd.extend(["--entity", entity])
+        if not output:
+            timestamp = datetime.now().strftime(config.export.timestamp_format)
             output = f"{config.paths.visualizations_dir}/graph_entity_{entity}_{timestamp}.html"
-        else:
-            output = f"{config.paths.visualizations_dir}/graph_{mode}_{timestamp}.html"
+    elif mode == 'hierarchical' and entity:
+        # Call hierarchical visualization
+        cmd = [sys.executable, "fact_check_kg/visualize_hierarchical.py", "--entity", entity]
+        if not output:
+            timestamp = datetime.now().strftime(config.export.timestamp_format)
+            output = f"{config.paths.visualizations_dir}/graph_hierarchical_{entity}_{timestamp}.html"
+    elif mode == 'full':
+        if not output:
+            timestamp = datetime.now().strftime(config.export.timestamp_format)
+            output = f"{config.paths.visualizations_dir}/graph_full_{timestamp}.html"
+        if max_nodes:
+            cmd.extend(["--max-nodes", str(max_nodes)])
+
+    if output:
+        cmd.extend(["--output", output])
+
+    if use_postgres:
+        cmd.extend(["--use-postgres"])
 
     try:
-        visualize_main(
-            mode=mode,
-            entity=entity,
-            max_nodes=max_nodes or config.visualization.max_nodes_full_view,
-            output=output,
-            use_postgres=use_postgres,
-            graph_file=graph_file
-        )
-        logger.info(f"Visualization saved to: {output}")
+        subprocess.run(cmd, check=True)
+        if output:
+            logger.info(f"Visualization saved to: {output}")
     except Exception as e:
         logger.error(f"Error visualizing graph: {e}", exc_info=True)
         sys.exit(1)
@@ -148,9 +195,18 @@ def visualize(mode, entity, max_nodes, output, use_postgres, graph_file):
               help='Load graph from PostgreSQL')
 @click.option('--test', is_flag=True,
               help='Run with test claims from config')
-def retrieve(claim, alpha, beta, gamma, top_k, use_postgres, test):
-    """Retrieve relevant chunks for a fact-checking claim."""
-    from fact_check_kg.test_retrieval import retrieval_main
+@click.option('--top-n', type=int, default=5,
+              help='Number of top results to display in detail (default: 5)')
+@click.option('--save-results/--no-save-results', default=True,
+              help='Save results to files (default: True)')
+def retrieve(claim, alpha, beta, gamma, top_k, use_postgres, test, top_n, save_results):
+    """Retrieve relevant chunks for a fact-checking claim with detailed scoring."""
+    import pickle
+    import spacy
+    from sentence_transformers import SentenceTransformer
+    from fact_check_kg.retrieval import HybridRetriever
+    from fact_check_kg.retrieval_results import RetrievalResultsManager
+    from fact_check_kg.db_connector import GraphDatabaseConnector
 
     logger.info("=" * 60)
     logger.info("KNOWLEDGE GRAPH RETRIEVAL")
@@ -172,14 +228,119 @@ def retrieve(claim, alpha, beta, gamma, top_k, use_postgres, test):
         sys.exit(1)
 
     try:
-        retrieval_main(
-            claims=claims,
+        # Load graph
+        logger.info("Loading knowledge graph...")
+        if use_postgres:
+            db = GraphDatabaseConnector(
+                host=config.database.host,
+                port=config.database.port,
+                database=config.database.database,
+                user=config.database.user,
+                password=config.database.password,
+                logger=logger
+            )
+            try:
+                db.connect()
+                graph = db.load_graph()
+            finally:
+                db.disconnect()
+            logger.info(f"Graph loaded from PostgreSQL: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
+
+            # Load topic model
+            topic_model_path = Path("fact_check_kg/topic_model.pkl")
+            with open(topic_model_path, 'rb') as f:
+                topic_model = pickle.load(f)
+        else:
+            graph_path = Path(f"{config.paths.graphs_dir}/knowledge_graph.gpickle")
+            with open(graph_path, 'rb') as f:
+                graph = pickle.load(f)
+            logger.info(f"Graph loaded from pickle: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
+
+            # Load topic model
+            topic_model_path = graph_path.parent / "topic_model.pkl"
+            with open(topic_model_path, 'rb') as f:
+                topic_model = pickle.load(f)
+
+        # Load models
+        logger.info("Loading embedding and NER models...")
+        embedding_model = SentenceTransformer(config.models.embedding_model)
+        nlp = spacy.load(config.models.ner_model)
+        logger.info("Models loaded")
+
+        # Initialize retriever
+        logger.info("Initializing retriever...")
+        retriever = HybridRetriever(
+            graph=graph,
+            topic_model=topic_model,
+            embedding_model=embedding_model,
+            nlp=nlp,
+            entity_types=config.graph_construction.entity_types,
             alpha=alpha,
             beta=beta,
             gamma=gamma,
             top_k=top_k,
-            use_postgres=use_postgres
+            theme_threshold=config.retrieval.theme_threshold,
+            logger=logger
         )
+
+        # Initialize results manager
+        logger.info("Initializing results manager...")
+        results_manager = RetrievalResultsManager(logger=logger)
+
+        # Process each claim
+        for claim_text in claims:
+            results = retriever.retrieve(claim_text)
+
+            # Display results
+            results_manager.display_results_console(claim_text, results, top_n=top_n)
+
+            # Generate multiple rankings
+            rankings = results_manager.create_multiple_rankings(results)
+
+            # Display alternative rankings summary
+            print("\n" + "=" * 80)
+            print("ALTERNATIVE RANKINGS (Top 3)")
+            print("=" * 80)
+
+            for ranking_name, ranking_results in rankings.items():
+                if ranking_name == "by_total_score":
+                    continue  # Already shown above
+
+                print(f"\n{ranking_name.replace('_', ' ').title()}:")
+                for i, result in enumerate(ranking_results[:3], 1):
+                    print(f"  {i}. {result['chunk_id']} - Total: {result['score_total']:.4f}")
+
+            # Generate statistics
+            stats = results_manager.generate_statistics(results)
+            if stats:
+                print("\n" + "=" * 80)
+                print("STATISTICS")
+                print("=" * 80)
+                print(f"\nScore Averages:")
+                for score_type, values in stats["score_statistics"].items():
+                    print(f"  {score_type.capitalize()}: {values['mean']:.4f} (min: {values['min']:.4f}, max: {values['max']:.4f})")
+
+                print(f"\nComponent Dominance:")
+                for component, count in stats["component_analysis"].items():
+                    percentage = (count / stats["total_results"]) * 100
+                    print(f"  {component.capitalize()}: {count} ({percentage:.1f}%)")
+
+            # Save results to files
+            if save_results and results:
+                print("\n" + "=" * 80)
+                print("SAVING RESULTS")
+                print("=" * 80)
+                json_path, text_path = results_manager.save_results(
+                    claim_text, results, alpha, beta, gamma, rankings
+                )
+                print(f"Results saved to:")
+                print(f"  JSON: {json_path}")
+                print(f"  Text: {text_path}")
+
+            print("\n" + "=" * 80)
+
+        logger.info("Retrieval completed successfully!")
+
     except Exception as e:
         logger.error(f"Error during retrieval: {e}", exc_info=True)
         sys.exit(1)
@@ -188,37 +349,8 @@ def retrieve(claim, alpha, beta, gamma, top_k, use_postgres, test):
 # ============================================================================
 # EXPORT COMMAND
 # ============================================================================
-
-@cli.command()
-@click.option('--format', 'export_format', type=click.Choice(['json', 'csv', 'graphml']),
-              default='json', help='Export format')
-@click.option('--output', type=str, default=None,
-              help='Output file path')
-@click.option('--use-postgres', is_flag=True,
-              help='Load graph from PostgreSQL')
-def export(export_format, output, use_postgres):
-    """Export the knowledge graph to various formats."""
-    from fact_check_kg.export import export_main
-
-    logger.info("=" * 60)
-    logger.info(f"EXPORTING GRAPH - FORMAT: {export_format.upper()}")
-    logger.info("=" * 60)
-
-    # Generate output path if not specified
-    if output is None:
-        timestamp = datetime.now().strftime(config.export.timestamp_format)
-        output = f"{config.paths.exports_dir}/knowledge_graph_{timestamp}.{export_format}"
-
-    try:
-        export_main(
-            format=export_format,
-            output=output,
-            use_postgres=use_postgres
-        )
-        logger.info(f"Graph exported to: {output}")
-    except Exception as e:
-        logger.error(f"Error exporting graph: {e}", exc_info=True)
-        sys.exit(1)
+# Note: Export functionality is currently not implemented.
+# The graph can be exported through NetworkX methods directly in Python code.
 
 
 # ============================================================================
@@ -233,15 +365,27 @@ def export(export_format, output, use_postgres):
 def stats(use_postgres, detailed):
     """Display statistics about the knowledge graph."""
     from fact_check_kg.visualize_graph import analyze_graph_stats
+    from fact_check_kg.config import DatabaseConfig
 
     logger.info("=" * 60)
     logger.info("KNOWLEDGE GRAPH STATISTICS")
     logger.info("=" * 60)
 
     try:
+        db_config = None
+        if use_postgres:
+            db_config = DatabaseConfig(
+                host=config.database.host,
+                port=config.database.port,
+                database=config.database.database,
+                user=config.database.user,
+                password=config.database.password
+            )
+
         analyze_graph_stats(
+            graph_path=None,
             use_postgres=use_postgres,
-            detailed=detailed
+            db_config=db_config
         )
     except Exception as e:
         logger.error(f"Error getting statistics: {e}", exc_info=True)
@@ -335,7 +479,9 @@ def init(postgres, dirs):
             config.paths.graphs_dir,
             config.paths.visualizations_dir,
             config.paths.models_dir,
-            config.paths.exports_dir
+            config.paths.exports_dir,
+            "outputs/statistics",
+            "outputs/retrieval_results"
         ]
 
         for directory in directories:

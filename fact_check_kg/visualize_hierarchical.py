@@ -234,7 +234,6 @@ def visualize_hierarchical_entity(
         'CONTAINS': '#616161',
         'HAS_TOPIC': '#ab47bc',
         'MENTIONS': '#66bb6a',
-        'RELATED_TO': '#ff9800',
         'CO_OCCURS': '#ef5350',
         'SEMANTIC_SIM': '#42a5f5'
     }
@@ -280,7 +279,6 @@ def visualize_hierarchical_entity(
             <div><span style="color: #ab47bc;">━</span> HAS_TOPIC</div>
             <div><span style="color: #ef5350;">━</span> CO_OCCURS</div>
             <div><span style="color: #42a5f5;">━</span> SEMANTIC_SIM</div>
-            <div><span style="color: #ff9800;">━</span> RELATED_TO</div>
         </div>
     </div>
     """

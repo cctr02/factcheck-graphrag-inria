@@ -234,10 +234,9 @@ class HybridRetriever:
         """
         Step 3: Entity-based retrieval using graph traversal.
 
-        Three paths:
+        Two paths:
         - Direct: entity → MENTIONS → chunk (score = 1.0)
         - Co-occurrence: entity → CO_OCCURS → entity2 → MENTIONS → chunk (score = w * 0.8)
-        - Via theme: entity → RELATED_TO → theme → HAS_TOPIC → chunk (score = w*p * 0.6)
 
         Args:
             claim: Claim text to verify
@@ -297,28 +296,6 @@ class HybridRetriever:
 
                             # Score with penalty for 2-hop path
                             score = (weight_co / max_co_occur) * 0.8
-                            scores[chunk] = max(scores[chunk], score)
-
-            # PATH 3: Via theme (entity → RELATED_TO → theme → HAS_TOPIC → chunk)
-            for theme in self.graph.neighbors(entity_node):
-                edge_data = self.graph[entity_node][theme]
-
-                if (edge_data.get('edge_type') == 'RELATED_TO' and
-                    self.graph.nodes[theme].get('type') == 'theme'):
-
-                    weight_rel = edge_data.get('weight', 0)
-
-                    # Find chunks via this theme
-                    for chunk in self.graph.neighbors(theme):
-                        edge_data2 = self.graph[theme][chunk]
-
-                        if (edge_data2.get('edge_type') == 'HAS_TOPIC' and
-                            self.graph.nodes[chunk].get('type') == 'chunk'):
-
-                            prob_theme = edge_data2.get('weight', 0)
-
-                            # Score with penalty for 3-hop path
-                            score = (weight_rel * prob_theme) * 0.6
                             scores[chunk] = max(scores[chunk], score)
 
         # Normalize scores

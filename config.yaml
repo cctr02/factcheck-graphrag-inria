@@ -37,7 +37,6 @@ graph_construction:
   # Entity extraction thresholds
   co_occurrence_threshold: 2  # Minimum co-occurrences to create edge
   semantic_similarity_threshold: 0.6  # Minimum similarity for entity edges
-  entity_theme_relation_threshold: 0.5  # Minimum weight for entity-theme edges
 
   # Entity types to extract (spaCy)
   entity_types:
@@ -133,7 +132,6 @@ visualization:
     CONTAINS: "#666666"  # Gray
     HAS_TOPIC: "#ab47bc"  # Purple
     MENTIONS: "#66bb6a"  # Green
-    RELATED_TO: "#ffa726"  # Orange
     CO_OCCURS: "#ef5350"  # Red
     SEMANTIC_SIM: "#42a5f5"  # Blue
 

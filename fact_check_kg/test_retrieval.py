@@ -19,6 +19,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from fact_check_kg.config import RetrievalConfig, GraphConfig, DatabaseConfig
 from fact_check_kg.retrieval import HybridRetriever
 from fact_check_kg.db_connector import GraphDatabaseConnector
+from fact_check_kg.retrieval_results import RetrievalResultsManager
 
 
 def setup_logging(log_level: str = "INFO") -> logging.Logger:
@@ -39,37 +40,74 @@ def setup_logging(log_level: str = "INFO") -> logging.Logger:
     return logging.getLogger("test_retrieval")
 
 
-def display_results(claim: str, results: list, top_n: int = 3):
+def display_results(
+    claim: str,
+    results: list,
+    alpha: float,
+    beta: float,
+    gamma: float,
+    results_manager: RetrievalResultsManager,
+    top_n: int = 5,
+    save_results: bool = True
+):
     """
-    Display retrieval results in a readable format.
+    Display retrieval results with detailed scoring and multiple rankings.
 
     Args:
         claim: The claim that was searched
         results: List of result dictionaries
+        alpha: Semantic weight
+        beta: Thematic weight
+        gamma: Entity weight
+        results_manager: RetrievalResultsManager instance
         top_n: Number of top results to display in detail
+        save_results: Whether to save results to files
     """
+    # Display results in console
+    results_manager.display_results_console(claim, results, top_n=top_n)
+
+    # Generate multiple rankings
+    rankings = results_manager.create_multiple_rankings(results)
+
+    # Display alternative rankings summary
     print("\n" + "=" * 80)
-    print(f"CLAIM: {claim}")
+    print("ALTERNATIVE RANKINGS (Top 3)")
     print("=" * 80)
 
-    if not results:
-        print("No results found.")
-        return
+    for ranking_name, ranking_results in rankings.items():
+        if ranking_name == "by_total_score":
+            continue  # Already shown above
 
-    print(f"\nTop {min(top_n, len(results))} results:\n")
+        print(f"\n{ranking_name.replace('_', ' ').title()}:")
+        for i, result in enumerate(ranking_results[:3], 1):
+            print(f"  {i}. {result['chunk_id']} - Total: {result['score_total']:.4f}")
 
-    for i, result in enumerate(results[:top_n], 1):
-        print(f"\n--- Result #{i} ---")
-        print(f"Document ID: {result['doc_id']}")
-        print(f"Chunk ID: {result['chunk_id']}")
-        print(f"\nScores:")
-        print(f"  Total:  {result['score_total']:.4f}")
-        print(f"  Semantic:  {result['score_sem']:.4f}")
-        print(f"  Thematic:  {result['score_theme']:.4f}")
-        print(f"  Entity:    {result['score_entity']:.4f}")
-        print(f"\nText preview:")
-        text_preview = result['text'][:300] + "..." if len(result['text']) > 300 else result['text']
-        print(f"  {text_preview}")
+    # Generate statistics
+    stats = results_manager.generate_statistics(results)
+    if stats:
+        print("\n" + "=" * 80)
+        print("STATISTICS")
+        print("=" * 80)
+        print(f"\nScore Averages:")
+        for score_type, values in stats["score_statistics"].items():
+            print(f"  {score_type.capitalize()}: {values['mean']:.4f} (min: {values['min']:.4f}, max: {values['max']:.4f})")
+
+        print(f"\nComponent Dominance:")
+        for component, count in stats["component_analysis"].items():
+            percentage = (count / stats["total_results"]) * 100
+            print(f"  {component.capitalize()}: {count} ({percentage:.1f}%)")
+
+    # Save results to files
+    if save_results and results:
+        print("\n" + "=" * 80)
+        print("SAVING RESULTS")
+        print("=" * 80)
+        json_path, text_path = results_manager.save_results(
+            claim, results, alpha, beta, gamma, rankings
+        )
+        print(f"Results saved to:")
+        print(f"  JSON: {json_path}")
+        print(f"  Text: {text_path}")
 
     print("\n" + "=" * 80)
 
@@ -242,6 +280,10 @@ def main():
         logger=logger
     )
 
+    # Initialize results manager
+    logger.info("Initializing results manager...")
+    results_manager = RetrievalResultsManager(logger=logger)
+
     # Test claims
     if args.claim:
         test_claims = [args.claim]
@@ -256,7 +298,16 @@ def main():
     # Run retrieval for each claim
     for claim in test_claims:
         results = retriever.retrieve(claim)
-        display_results(claim, results, top_n=3)
+        display_results(
+            claim=claim,
+            results=results,
+            alpha=retrieval_config.alpha,
+            beta=retrieval_config.beta,
+            gamma=retrieval_config.gamma,
+            results_manager=results_manager,
+            top_n=5,
+            save_results=True
+        )
 
     logger.info("\n" + "=" * 60)
     logger.info("RETRIEVAL TEST COMPLETED")

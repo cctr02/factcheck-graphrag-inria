@@ -6,7 +6,6 @@ This module handles the construction of the multi-level knowledge graph:
 - Level 2: Chunks → Themes (BERTopic)
 - Level 3: Chunks → Entities (spaCy NER)
 - Relations: Entity ↔ Entity (CO_OCCURS, SEMANTIC_SIM)
-- Relations: Entity ↔ Theme (RELATED_TO)
 """
 
 import networkx as nx
@@ -35,7 +34,6 @@ class KnowledgeGraphBuilder:
     - CONTAINS: Document → Chunk
     - HAS_TOPIC: Chunk → Theme (weighted by probability)
     - MENTIONS: Chunk → Entity
-    - RELATED_TO: Entity → Theme (weighted by accumulated probabilities)
     - CO_OCCURS: Entity ↔ Entity (weighted by co-occurrence count)
     - SEMANTIC_SIM: Entity ↔ Entity (weighted by cosine similarity)
     """
@@ -47,7 +45,6 @@ class KnowledgeGraphBuilder:
         entity_types: List[str] = None,
         co_occur_threshold: int = 2,
         semantic_sim_threshold: float = 0.6,
-        entity_related_threshold: float = 0.5,
         logger: Optional[logging.Logger] = None
     ):
         """
@@ -59,7 +56,6 @@ class KnowledgeGraphBuilder:
             entity_types: List of entity types to extract (PERSON, ORG, etc.)
             co_occur_threshold: Minimum co-occurrences to create edge
             semantic_sim_threshold: Minimum similarity to create edge
-            entity_related_threshold: Minimum weight for entity-theme edge
             logger: Optional logger instance
         """
         self.logger = logger or logging.getLogger(__name__)
@@ -75,7 +71,6 @@ class KnowledgeGraphBuilder:
         self.entity_types = entity_types or ['PERSON', 'ORG', 'GPE', 'LOC', 'DATE', 'EVENT', 'NORP']
         self.co_occur_threshold = co_occur_threshold
         self.semantic_sim_threshold = semantic_sim_threshold
-        self.entity_related_threshold = entity_related_threshold
 
         # Graph
         self.graph = nx.Graph()
@@ -284,20 +279,17 @@ Topic label:"""
         self.logger.info("\nStep 4: Extracting entities and adding MENTIONS edges...")
         chunk_to_entities = self._add_entities_and_mentions(chunks)
 
-        # Step 5: Add RELATED_TO edges (Entity ↔ Theme)
-        self.logger.info("\nStep 5: Adding RELATED_TO edges (Entity ↔ Theme)...")
-        self._add_entity_theme_relations(chunk_to_entities, topics, probabilities, chunk_ids)
-
-        # Step 6: Add CO_OCCURS edges (Entity ↔ Entity)
-        self.logger.info("\nStep 6: Adding CO_OCCURS edges (Entity ↔ Entity)...")
+        # Step 5: Add CO_OCCURS edges (Entity ↔ Entity)
+        self.logger.info("\nStep 5: Adding CO_OCCURS edges (Entity ↔ Entity)...")
         self._add_entity_co_occurrences(chunk_to_entities)
 
-        # Step 7: Add SEMANTIC_SIM edges (Entity ↔ Entity)
-        self.logger.info("\nStep 7: Adding SEMANTIC_SIM edges (Entity ↔ Entity)...")
+        # Step 6: Add SEMANTIC_SIM edges (Entity ↔ Entity)
+        self.logger.info("\nStep 6: Adding SEMANTIC_SIM edges (Entity ↔ Entity)...")
         self._add_entity_semantic_similarity()
 
-        # Log statistics
+        # Log statistics and save detailed reports
         self._log_graph_statistics()
+        self._save_statistics_reports(topic_model, topics, chunks)
 
         return self.graph
 
@@ -423,39 +415,6 @@ Topic label:"""
 
         return chunk_to_entities
 
-    def _add_entity_theme_relations(
-        self,
-        chunk_to_entities: Dict[str, Set[str]],
-        topics: List[int],
-        probabilities: np.ndarray,
-        chunk_ids: List[str]
-    ):
-        """Add RELATED_TO edges between entities and themes."""
-        entity_theme_weights = defaultdict(float)
-
-        # Accumulate weights
-        for idx, (chunk_id, topic_id) in enumerate(zip(chunk_ids, topics)):
-            if topic_id == -1:  # Skip outliers
-                continue
-
-            theme_node = f"theme::{topic_id}"
-            prob = probabilities[idx, topic_id] if probabilities.ndim > 1 else probabilities[idx]
-
-            # For each entity in this chunk
-            for entity_node in chunk_to_entities[chunk_id]:
-                pair = (entity_node, theme_node)
-                entity_theme_weights[pair] += float(prob)
-
-        # Add edges above threshold
-        for (entity_node, theme_node), weight in entity_theme_weights.items():
-            if weight >= self.entity_related_threshold:
-                self.graph.add_edge(
-                    entity_node,
-                    theme_node,
-                    edge_type="RELATED_TO",
-                    weight=weight
-                )
-
     def _add_entity_co_occurrences(self, chunk_to_entities: Dict[str, Set[str]]):
         """Add CO_OCCURS edges between entities."""
         co_occur_counter = Counter()
@@ -548,6 +507,173 @@ Topic label:"""
             self.logger.info(f"  {etype}: {count}")
 
         self.logger.info("=" * 60)
+
+    def _save_statistics_reports(
+        self,
+        topic_model: BERTopic,
+        topics: List[int],
+        chunks: List[Dict]
+    ):
+        """
+        Save detailed statistics reports to outputs folder.
+
+        Args:
+            topic_model: Trained BERTopic model
+            topics: List of topic assignments
+            chunks: Original chunks data
+        """
+        import json
+        from pathlib import Path
+        from datetime import datetime
+
+        # Create outputs directory
+        stats_dir = Path("outputs/statistics")
+        stats_dir.mkdir(parents=True, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # 1. General graph statistics
+        general_stats = {
+            "timestamp": timestamp,
+            "total_documents": len(set(c['doc_id'] for c in chunks)),
+            "total_chunks": len(chunks),
+            "total_nodes": self.graph.number_of_nodes(),
+            "total_edges": self.graph.number_of_edges(),
+            "nodes_by_type": {},
+            "edges_by_type": {}
+        }
+
+        # Count nodes by type
+        for node, data in self.graph.nodes(data=True):
+            node_type = data.get('type', 'unknown')
+            general_stats["nodes_by_type"][node_type] = general_stats["nodes_by_type"].get(node_type, 0) + 1
+
+        # Count edges by type
+        for u, v, data in self.graph.edges(data=True):
+            edge_type = data.get('edge_type', 'unknown')
+            general_stats["edges_by_type"][edge_type] = general_stats["edges_by_type"].get(edge_type, 0) + 1
+
+        # Save general statistics
+        with open(stats_dir / f"general_stats_{timestamp}.json", 'w') as f:
+            json.dump(general_stats, f, indent=2)
+        self.logger.info(f"General statistics saved to: {stats_dir}/general_stats_{timestamp}.json")
+
+        # 2. Topic statistics with document counts
+        topic_stats = {
+            "timestamp": timestamp,
+            "total_topics": len(set(topics)) - (1 if -1 in topics else 0),
+            "topics": []
+        }
+
+        unique_topics = set(topics)
+        if -1 in unique_topics:
+            unique_topics.remove(-1)
+
+        for topic_id in sorted(unique_topics):
+            topic_words = topic_model.get_topic(topic_id)
+            if not topic_words:
+                continue
+
+            # Count documents for this topic
+            topic_chunks = [i for i, t in enumerate(topics) if t == topic_id]
+            topic_doc_ids = set(chunks[i]['doc_id'] for i in topic_chunks if i < len(chunks))
+
+            # Get theme label from graph
+            theme_node = f"theme::{topic_id}"
+            theme_label = self.graph.nodes[theme_node].get('label', '') if self.graph.has_node(theme_node) else ''
+
+            topic_info = {
+                "topic_id": topic_id,
+                "label": theme_label,
+                "num_chunks": len(topic_chunks),
+                "num_documents": len(topic_doc_ids),
+                "top_words": [{"word": word, "score": float(score)} for word, score in topic_words[:10]],
+                "keywords": [word for word, score in topic_words[:5]]
+            }
+            topic_stats["topics"].append(topic_info)
+
+        # Save topic statistics
+        with open(stats_dir / f"topic_stats_{timestamp}.json", 'w') as f:
+            json.dump(topic_stats, f, indent=2)
+        self.logger.info(f"Topic statistics saved to: {stats_dir}/topic_stats_{timestamp}.json")
+
+        # 3. Entity statistics
+        entity_stats = {
+            "timestamp": timestamp,
+            "total_entities": 0,
+            "entities_by_type": {},
+            "top_entities_by_degree": []
+        }
+
+        entities = [(n, self.graph.nodes[n], self.graph.degree(n))
+                   for n, d in self.graph.nodes(data=True)
+                   if d.get('type') == 'entity']
+
+        entity_stats["total_entities"] = len(entities)
+
+        # Count by entity type
+        for node, data, degree in entities:
+            entity_type = data.get('entity_type', 'unknown')
+            entity_stats["entities_by_type"][entity_type] = entity_stats["entities_by_type"].get(entity_type, 0) + 1
+
+        # Top entities by degree
+        sorted_entities = sorted(entities, key=lambda x: x[2], reverse=True)[:50]
+        for node, data, degree in sorted_entities:
+            entity_stats["top_entities_by_degree"].append({
+                "entity": data.get('entity_text', ''),
+                "type": data.get('entity_type', ''),
+                "degree": degree
+            })
+
+        # Save entity statistics
+        with open(stats_dir / f"entity_stats_{timestamp}.json", 'w') as f:
+            json.dump(entity_stats, f, indent=2)
+        self.logger.info(f"Entity statistics saved to: {stats_dir}/entity_stats_{timestamp}.json")
+
+        # 4. Create human-readable summary
+        summary = f"""
+KNOWLEDGE GRAPH STATISTICS REPORT
+Generated: {timestamp}
+{'=' * 80}
+
+GENERAL STATISTICS
+-----------------
+Total Documents: {general_stats['total_documents']}
+Total Chunks: {general_stats['total_chunks']}
+Total Nodes: {general_stats['total_nodes']}
+Total Edges: {general_stats['total_edges']}
+
+Nodes by Type:
+"""
+        for node_type, count in general_stats["nodes_by_type"].items():
+            summary += f"  - {node_type}: {count}\n"
+
+        summary += "\nEdges by Type:\n"
+        for edge_type, count in general_stats["edges_by_type"].items():
+            summary += f"  - {edge_type}: {count}\n"
+
+        summary += f"\n\nTOPIC STATISTICS\n{'-' * 17}\n"
+        summary += f"Total Topics: {topic_stats['total_topics']}\n\n"
+
+        for topic in topic_stats["topics"]:
+            summary += f"Topic {topic['topic_id']}: {topic['label']}\n"
+            summary += f"  Chunks: {topic['num_chunks']}, Documents: {topic['num_documents']}\n"
+            summary += f"  Keywords: {', '.join(topic['keywords'])}\n\n"
+
+        summary += f"\nENTITY STATISTICS\n{'-' * 17}\n"
+        summary += f"Total Entities: {entity_stats['total_entities']}\n\n"
+        summary += "Entities by Type:\n"
+        for entity_type, count in entity_stats["entities_by_type"].items():
+            summary += f"  - {entity_type}: {count}\n"
+
+        summary += "\n\nTop 20 Entities by Degree:\n"
+        for i, entity in enumerate(entity_stats["top_entities_by_degree"][:20], 1):
+            summary += f"  {i}. {entity['entity']} ({entity['type']}) - Degree: {entity['degree']}\n"
+
+        # Save summary
+        with open(stats_dir / f"summary_{timestamp}.txt", 'w') as f:
+            f.write(summary)
+        self.logger.info(f"Summary report saved to: {stats_dir}/summary_{timestamp}.txt")
 
     def save_to_postgres(
         self,

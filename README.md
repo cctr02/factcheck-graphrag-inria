@@ -37,15 +37,19 @@ This project implements a fact-checking system using a multi-level knowledge gra
 ### Graph Construction
 
 - **Multi-level**: Documents → Chunks → Themes & Entities
-- **Rich Relations**: CO_OCCURS, SEMANTIC_SIM, RELATED_TO, HAS_TOPIC, MENTIONS
+- **Rich Relations**: CO_OCCURS, SEMANTIC_SIM, HAS_TOPIC, MENTIONS, CONTAINS
 - **Scalable**: PostgreSQL support for large-scale graphs
 - **Configurable**: All parameters via config.yaml
+- **Automatic Statistics**: Comprehensive stats generated after each build
 
 ### Hybrid Retrieval
 
 - **Semantic**: Embedding similarity (alpha = 0.4)
 - **Thematic**: Via BERTopic and graph traversal (beta = 0.3)
 - **Entity-based**: Entity matching and graph paths (gamma = 0.3)
+- **Detailed Scoring**: Score breakdowns showing contribution of each component
+- **Multiple Rankings**: Results ranked by different criteria (semantic, thematic, entity, balance)
+- **Statistical Analysis**: Mean, min, max scores and component dominance analysis
 
 ### Visualizations
 
@@ -75,9 +79,11 @@ Documents (fact-checks)
 Chunks (text segments)
     ↓ HAS_TOPIC          ↓ MENTIONS
 Themes (BERTopic)    Entities (NER)
-    ↓ RELATED_TO         ↓ CO_OCCURS / SEMANTIC_SIM
-    └────────────────────┘
+                         ↓ CO_OCCURS / SEMANTIC_SIM
+                     Entities (related)
 ```
+
+Note: The RELATED_TO edge between entities and themes has been removed as this information is already captured through the HAS_TOPIC relationship from chunks.
 
 ### Node Types
 
@@ -91,9 +97,8 @@ Themes (BERTopic)    Entities (NER)
 1. **CONTAINS**: Document → Chunk
 2. **HAS_TOPIC**: Chunk → Theme (weighted by probability)
 3. **MENTIONS**: Chunk → Entity
-4. **RELATED_TO**: Entity ↔ Theme (weighted by accumulated probabilities)
-5. **CO_OCCURS**: Entity ↔ Entity (weighted by co-occurrence count)
-6. **SEMANTIC_SIM**: Entity ↔ Entity (weighted by cosine similarity)
+4. **CO_OCCURS**: Entity ↔ Entity (weighted by co-occurrence count)
+5. **SEMANTIC_SIM**: Entity ↔ Entity (weighted by cosine similarity)
 
 ## Installation
 
@@ -242,18 +247,31 @@ python cli.py visualize --mode hierarchical --entity "facebook"
 ### Retrieval
 
 ```bash
-# Search with a claim
+# Search with a claim (includes detailed scoring)
 python cli.py retrieve "Trump met Macron in France to discuss NATO"
 
 # Search with predefined test claims
 python cli.py retrieve --test
 
-# Adjust weights
-python cli.py retrieve "Vaccine causes autism" --alpha 0.5 --beta 0.3 --gamma 0.2
+# Adjust weights and display parameters
+python cli.py retrieve "Vaccine causes autism" --alpha 0.5 --beta 0.3 --gamma 0.2 --top-n 10
 
 # Use PostgreSQL
 python cli.py retrieve --use-postgres --test
+
+# Display more results with detailed breakdowns
+python cli.py retrieve "Gaza photo" --top-k 20 --top-n 5
+
+# Disable automatic result saving
+python cli.py retrieve "Election fraud" --no-save-results
 ```
+
+The retrieval command now provides:
+- **Detailed score breakdowns** for each result showing semantic, thematic, and entity contributions
+- **Multiple rankings**: Results sorted by total score, semantic score, thematic score, entity score, balance, and max component
+- **Statistical analysis**: Mean, min, max scores for each component
+- **Component dominance**: Shows which scoring component is dominant in results
+- **Automatic saving**: Results saved to `outputs/retrieval_results/` in JSON and text formats
 
 ### Other Operations
 
@@ -284,15 +302,16 @@ PRL/
 │   ├── config.py              # Legacy config (compatibility)
 │   │
 │   ├── data_loader.py         # Data loading and chunking
-│   ├── graph_builder.py       # Graph construction
+│   ├── graph_builder.py       # Graph construction (with statistics)
 │   ├── db_connector.py        # PostgreSQL connector
 │   │
 │   ├── retrieval.py           # Hybrid retrieval system
+│   ├── retrieval_results.py   # Results manager with detailed scoring
 │   ├── visualize_graph.py     # Standard visualizations
 │   ├── visualize_hierarchical.py  # Hierarchical visualizations
 │   │
 │   ├── build_graph.py         # Build script
-│   ├── test_retrieval.py      # Retrieval test script
+│   ├── test_retrieval.py      # Retrieval test script (enhanced)
 │   ├── inspect_topics.py      # Topic inspection
 │   └── relabel_topics.py      # LLM-based relabeling
 │
@@ -303,7 +322,9 @@ PRL/
 │   ├── graphs/               # Graphs (pickle/gpickle)
 │   ├── visualizations/       # HTML files
 │   ├── models/               # Saved models
-│   └── exports/              # Exports (JSON, CSV, etc.)
+│   ├── exports/              # Exports (JSON, CSV, etc.)
+│   ├── statistics/           # Graph statistics (JSON/TXT)
+│   └── retrieval_results/    # Retrieval results with detailed scoring
 │
 ├── logs/                      # Log files
 │   ├── cli.log
@@ -477,10 +498,11 @@ graph = builder.build_graph(chunks, min_topic_size=15, nr_topics=20)
 builder.save_to_postgres(host="localhost", database="my_kg")
 ```
 
-### Custom Retrieval
+### Custom Retrieval with Detailed Scoring
 
 ```python
 from fact_check_kg.retrieval import HybridRetriever
+from fact_check_kg.retrieval_results import RetrievalResultsManager
 
 # Create retriever
 retriever = HybridRetriever(
@@ -494,16 +516,119 @@ retriever = HybridRetriever(
     top_k=20
 )
 
+# Create results manager for enhanced display
+results_manager = RetrievalResultsManager()
+
 # Search
 results = retriever.retrieve("My custom claim")
 
-# Display results
-for i, result in enumerate(results[:5], 1):
-    print(f"\n{i}. Score: {result['score_total']:.3f}")
-    print(f"   Text: {result['text'][:200]}...")
-    print(f"   Semantic: {result['score_sem']:.3f}")
-    print(f"   Thematic: {result['score_theme']:.3f}")
-    print(f"   Entity: {result['score_entity']:.3f}")
+# Display with detailed breakdowns
+results_manager.display_results_console("My custom claim", results, top_n=5)
+
+# Generate multiple rankings
+rankings = results_manager.create_multiple_rankings(results)
+print("\nTop 3 by semantic score:")
+for i, result in enumerate(rankings['by_semantic_score'][:3], 1):
+    print(f"  {i}. {result['chunk_id']} - Semantic: {result['score_sem']:.3f}")
+
+# Save results with all rankings
+json_path, text_path = results_manager.save_results(
+    "My custom claim", results, alpha=0.5, beta=0.2, gamma=0.3, rankings=rankings
+)
+print(f"Results saved to {json_path}")
+```
+
+## New Features
+
+### Automatic Graph Statistics
+
+When building a graph, comprehensive statistics are automatically generated and saved to `outputs/statistics/`:
+
+**Generated Files:**
+- `general_stats_{timestamp}.json` - Node and edge counts by type
+- `topic_stats_{timestamp}.json` - Topic information with keywords and document counts
+- `entity_stats_{timestamp}.json` - Entity statistics with top entities by degree
+- `summary_{timestamp}.txt` - Human-readable summary report
+
+**Statistics Include:**
+- Total nodes and edges
+- Breakdown by node type (Document, Chunk, Theme, Entity)
+- Breakdown by edge type (CONTAINS, HAS_TOPIC, MENTIONS, CO_OCCURS, SEMANTIC_SIM)
+- Topics with their representative words and document counts
+- Most connected entities
+- Distribution metrics
+
+### Enhanced Retrieval Scoring
+
+The retrieval system now provides detailed score breakdowns and multiple ranking methods:
+
+**Score Breakdown:**
+Each result shows:
+- Total score (weighted combination)
+- Semantic score (embedding similarity)
+- Thematic score (topic matching)
+- Entity score (entity matching)
+- Contribution percentage of each component
+- Dominant component identification
+
+**Multiple Rankings:**
+Results can be sorted by:
+1. **Total Score** - Default weighted combination
+2. **Semantic Score** - Best embedding matches
+3. **Thematic Score** - Best topic matches
+4. **Entity Score** - Best entity matches
+5. **Balance** - Most balanced across all components
+6. **Max Component** - Highest individual component score
+
+**Statistical Analysis:**
+- Mean, min, max, median for each score type
+- Component dominance analysis (which component dominates results)
+- Score distribution insights
+
+**Output Formats:**
+- Console display with colored output
+- JSON format for programmatic use
+- Text format for human review
+- Automatic saving to `outputs/retrieval_results/`
+
+### Example Output
+
+```
+CLAIM: Photo from Gaza 2008 shared on Facebook claiming Kashmir violence
+================================================================================
+
+Top 5 Results:
+
+--- Result #1 ---
+Chunk: chunk_doc_1_2
+Document: doc_1
+
+Scores:
+  Total:     0.7234  [DOMINANT: Semantic (52.3%)]
+  Semantic:  0.8123  (contribution: 52.3%)
+  Thematic:  0.6892  (contribution: 28.6%)
+  Entity:    0.5687  (contribution: 19.1%)
+
+Explanation:
+  - Semantic: High similarity (0.81) - text closely matches query embedding
+  - Thematic: Moderate match (0.69) - shares similar topics
+  - Entity: Moderate match (0.57) - some common entities (Gaza, Facebook)
+
+Text preview:
+  A photo from the 2008 Gaza conflict was shared on Facebook with misleading...
+
+STATISTICS
+================================================================================
+Score Averages:
+  Total: 0.6234 (min: 0.4123, max: 0.7234)
+  Semantic: 0.7123 (min: 0.5234, max: 0.8123)
+  Thematic: 0.5892 (min: 0.3456, max: 0.6892)
+  Entity: 0.5123 (min: 0.2789, max: 0.5687)
+
+Component Dominance:
+  Semantic: 7 (70.0%)
+  Thematic: 2 (20.0%)
+  Entity: 1 (10.0%)
 ```
 
 ## Performance

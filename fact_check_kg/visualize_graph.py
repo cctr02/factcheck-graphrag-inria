@@ -135,7 +135,6 @@ def visualize_full_graph(
         'CONTAINS': '#666666',
         'HAS_TOPIC': '#ab47bc',
         'MENTIONS': '#66bb6a',
-        'RELATED_TO': '#ffa726',
         'CO_OCCURS': '#ef5350',
         'SEMANTIC_SIM': '#42a5f5'
     }
@@ -252,7 +251,6 @@ def visualize_entity_subgraph(
         'CONTAINS': '#666666',
         'HAS_TOPIC': '#ab47bc',
         'MENTIONS': '#66bb6a',
-        'RELATED_TO': '#ffa726',
         'CO_OCCURS': '#ef5350',
         'SEMANTIC_SIM': '#42a5f5'
     }

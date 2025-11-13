@@ -50,6 +50,8 @@ outputs/graphs/*.pkl
 outputs/visualizations/*.html
 outputs/exports/*
 outputs/models/*
+outputs/statistics/*
+outputs/retrieval_results/*
 
 # Cache
 .cache/

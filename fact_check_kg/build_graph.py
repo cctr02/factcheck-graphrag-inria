@@ -14,7 +14,7 @@ import argparse
 # Add parent directory to path
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
-from fact_check_kg.config import GraphConfig, DatabaseConfig
+from fact_check_kg.config_loader import get_config
 from fact_check_kg.data_loader import load_and_chunk_documents
 from fact_check_kg.graph_builder import KnowledgeGraphBuilder
 
