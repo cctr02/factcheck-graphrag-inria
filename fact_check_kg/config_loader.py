@@ -39,7 +39,6 @@ class GraphConstructionConfig:
     nr_topics: Optional[int]
     co_occurrence_threshold: int
     semantic_similarity_threshold: float
-    entity_theme_relation_threshold: float
     entity_types: List[str]
 
 

@@ -445,7 +445,7 @@ def config_cmd(show, validate):
         try:
             # Attempt to load config
             test_config = get_config()
-            logger.info("✓ Configuration is valid!")
+            logger.info("[OK] Configuration is valid!")
             logger.info(f"  - Paths: OK")
             logger.info(f"  - Graph construction: OK")
             logger.info(f"  - Models: OK")
@@ -453,7 +453,7 @@ def config_cmd(show, validate):
             logger.info(f"  - Retrieval: OK")
             logger.info(f"  - Visualization: OK")
         except Exception as e:
-            logger.error(f"✗ Configuration is invalid: {e}")
+            logger.error(f"[FAIL] Configuration is invalid: {e}")
             sys.exit(1)
 
 
@@ -486,7 +486,7 @@ def init(postgres, dirs):
 
         for directory in directories:
             Path(directory).mkdir(parents=True, exist_ok=True)
-            logger.info(f"✓ Created directory: {directory}")
+            logger.info(f"[OK] Created directory: {directory}")
 
     if postgres:
         from fact_check_kg.db_connector import GraphDatabaseConnector
@@ -500,10 +500,10 @@ def init(postgres, dirs):
         try:
             db.connect()
             db.create_tables()
-            logger.info("✓ PostgreSQL database initialized")
+            logger.info("[OK] PostgreSQL database initialized")
             db.disconnect()
         except Exception as e:
-            logger.error(f"✗ Failed to initialize database: {e}")
+            logger.error(f"[FAIL] Failed to initialize database: {e}")
             sys.exit(1)
 
     logger.info("=" * 60)
