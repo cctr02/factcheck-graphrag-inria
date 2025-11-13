@@ -10,6 +10,9 @@ import sys
 import logging
 import pickle
 import argparse
+import json
+from datetime import datetime
+from pathlib import Path
 
 # Add parent directory to path
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
@@ -175,36 +178,90 @@ def main():
     # Step 4: Save graph and models
     logger.info("\n### STEP 4: Saving graph and models ###")
 
+    # Generate timestamp for unique graph identification
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # Ensure output directories exist
+    graphs_dir = Path(config.paths.graphs_dir)
+    graphs_dir.mkdir(parents=True, exist_ok=True)
+
+    # Get edge counts from the graph
+    edge_type_counts = {}
+    for _, _, data in graph.edges(data=True):
+        edge_type = data.get('type', 'unknown')
+        edge_type_counts[edge_type] = edge_type_counts.get(edge_type, 0) + 1
+
+    # Create metadata
+    metadata = {
+        "timestamp": timestamp,
+        "created_at": datetime.now().isoformat(),
+        "max_documents": args.max_docs,
+        "chunk_size": args.chunk_size,
+        "chunk_overlap": args.chunk_overlap,
+        "num_nodes": graph.number_of_nodes(),
+        "num_edges": graph.number_of_edges(),
+        "num_documents": n_docs,
+        "num_chunks": len(chunks),
+        "edge_types": edge_type_counts
+    }
+
     if args.use_postgres:
+        # Create database with timestamp
+        db_name = f"{args.db_name}_{timestamp}"
+        logger.info(f"Creating PostgreSQL database: {db_name}")
+
         # Save to PostgreSQL
-        logger.info("Saving graph to PostgreSQL database...")
         builder.save_to_postgres(
             host=args.db_host,
             port=args.db_port,
-            database=args.db_name,
+            database=db_name,
             user=args.db_user,
             password=args.db_password,
             clear_existing=True
         )
 
-        # Still save topic model as pickle for retrieval
-        output_dir = os.path.dirname(__file__)
-        topic_model_path = os.path.join(output_dir, 'topic_model.pkl')
+        metadata["storage_type"] = "postgresql"
+        metadata["database_name"] = db_name
+        metadata["database_host"] = args.db_host
+
+        # Save topic model in models directory
+        models_dir = Path(config.paths.models_dir)
+        models_dir.mkdir(parents=True, exist_ok=True)
+        topic_model_path = models_dir / f"topic_model_{timestamp}.pkl"
         with open(topic_model_path, 'wb') as f:
             pickle.dump(builder.topic_model, f)
         logger.info(f"Topic model saved to: {topic_model_path}")
+        metadata["topic_model_path"] = str(topic_model_path)
+
     else:
-        # Save graph as pickle (legacy mode)
-        output_path = os.path.join(os.path.dirname(__file__), args.output)
+        # Save graph as pickle in outputs/graphs
+        graph_filename = f"graph_{timestamp}.gpickle"
+        output_path = graphs_dir / graph_filename
+
         with open(output_path, 'wb') as f:
             pickle.dump(graph, f)
         logger.info(f"Graph saved to: {output_path}")
 
-        # Save topic model (for retrieval)
-        topic_model_path = output_path.replace('.gpickle', '_topic_model.pkl')
+        metadata["storage_type"] = "pickle"
+        metadata["graph_path"] = str(output_path)
+
+        # Save topic model with same timestamp
+        topic_model_filename = f"topic_model_{timestamp}.pkl"
+        topic_model_path = graphs_dir / topic_model_filename
         with open(topic_model_path, 'wb') as f:
             pickle.dump(builder.topic_model, f)
         logger.info(f"Topic model saved to: {topic_model_path}")
+        metadata["topic_model_path"] = str(topic_model_path)
+
+    # Save metadata
+    metadata_path = graphs_dir / f"metadata_{timestamp}.json"
+    with open(metadata_path, 'w') as f:
+        json.dump(metadata, indent=2, fp=f)
+    logger.info(f"Metadata saved to: {metadata_path}")
+
+    # Save graph ID for easy reference
+    logger.info(f"\nGraph ID: {timestamp}")
+    logger.info(f"To use this graph later, specify: --graph-id {timestamp}")
 
     logger.info("\n" + "=" * 60)
     logger.info("GRAPH BUILDING COMPLETED SUCCESSFULLY")

@@ -400,44 +400,85 @@ def retrieve(claim, alpha, beta, gamma, top_k, use_postgres, test, top_n, save_r
 
 
 # ============================================================================
+# LIST-GRAPHS COMMAND
+# ============================================================================
+
+@cli.command('list-graphs')
+def list_graphs():
+    """List all available knowledge graphs in the system."""
+    from fact_check_kg.graph_manager import display_available_graphs
+
+    display_available_graphs()
+
+
+# ============================================================================
 # STATS COMMAND
 # ============================================================================
 
 @cli.command()
+@click.option('--graph-id', type=str, default=None,
+              help='Graph ID (timestamp) to analyze. Use "latest" for most recent graph or omit to use latest.')
 @click.option('--use-postgres', is_flag=True,
-              help='Load graph from PostgreSQL')
+              help='Load graph from PostgreSQL (deprecated - use --graph-id)')
 @click.option('--detailed', is_flag=True,
               help='Show detailed statistics')
-def stats(use_postgres, detailed):
+def stats(graph_id, use_postgres, detailed):
     """Display statistics about the knowledge graph."""
     from fact_check_kg.visualize_graph import analyze_graph_stats
     from fact_check_kg.config import DatabaseConfig
+    from fact_check_kg.graph_manager import get_latest_graph_id, load_graph_by_id
+    import pickle
 
     logger.info("=" * 60)
     logger.info("KNOWLEDGE GRAPH STATISTICS")
     logger.info("=" * 60)
 
     try:
-        db_config = None
-        graph_path = None
+        # Determine which graph to use
+        if not graph_id or graph_id == "latest":
+            graph_id = get_latest_graph_id()
+            if not graph_id:
+                logger.error("No graphs found in the system. Please build a graph first with 'build' command.")
+                sys.exit(1)
+            logger.info(f"Using latest graph: {graph_id}")
 
-        if use_postgres:
-            db_config = DatabaseConfig(
-                host=config.database.host,
-                port=config.database.port,
-                database=config.database.database,
-                user=config.database.user,
-                password=config.database.password
-            )
-        else:
-            # Use default graph path if not using postgres
-            graph_path = "fact_check_kg/knowledge_graph.gpickle"
+        # Load graph by ID
+        graph, topic_model, metadata = load_graph_by_id(graph_id)
 
-        analyze_graph_stats(
-            graph_path=graph_path,
-            use_postgres=use_postgres,
-            db_config=db_config
-        )
+        logger.info(f"Loaded graph: {metadata['timestamp']}")
+        logger.info(f"Created: {metadata['created_at']}")
+        logger.info(f"Storage: {metadata['storage_type']}")
+
+        # Display stats (reuse visualize_graph analyze function logic inline)
+        print("\n" + "=" * 60)
+        print("GRAPH STATISTICS")
+        print("=" * 60)
+
+        print(f"\nTotal nodes: {graph.number_of_nodes()}")
+        print(f"Total edges: {graph.number_of_edges()}")
+
+        # Nodes by type
+        node_types = {}
+        for node, data in graph.nodes(data=True):
+            node_type = data.get('type', 'unknown')
+            node_types[node_type] = node_types.get(node_type, 0) + 1
+
+        print("\nNodes by type:")
+        for node_type, count in sorted(node_types.items()):
+            print(f"  {node_type}: {count}")
+
+        # Edges by type
+        edge_types = {}
+        for _, _, data in graph.edges(data=True):
+            edge_type = data.get('type', 'unknown')
+            edge_types[edge_type] = edge_types.get(edge_type, 0) + 1
+
+        print("\nEdges by type:")
+        for edge_type, count in sorted(edge_types.items()):
+            print(f"  {edge_type}: {count}")
+
+        print("\n" + "=" * 60)
+
     except Exception as e:
         logger.error(f"Error getting statistics: {e}", exc_info=True)
         sys.exit(1)

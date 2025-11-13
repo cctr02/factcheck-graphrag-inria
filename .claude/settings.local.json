@@ -9,7 +9,8 @@
       "Bash(timeout 180 uv run python:*)",
       "Bash(timeout 60 uv run python:*)",
       "Bash(timeout 30 uv run python:*)",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "Bash(timeout 120 uv run:*)"
     ],
     "deny": [],
     "ask": []
