@@ -216,17 +216,3 @@ performance:
   # Caching
   enable_cache: true
   cache_dir: ".cache"
-
-# ============================================================================
-# TESTING CONFIGURATION
-# ============================================================================
-testing:
-  # Test claims for retrieval
-  test_claims:
-    - "Photo from Gaza 2008 shared on Facebook claiming Kashmir violence"
-    - "Vaccine causes autism"
-    - "Trump met Macron in France to discuss NATO"
-
-  # Test parameters
-  test_max_docs: 50
-  test_chunk_size: 300

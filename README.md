@@ -48,8 +48,8 @@ topics, probabilities = topic_model.fit_transform(chunk_texts)
 **Label generation**: Themes are labeled by an LLM (Ollama) based on extracted keywords:
 
 ```python
-# Top 5 keywords of the topic
-keywords = topic_model.get_topic(topic_id)[:5]
+# Top 10 keywords of the topic
+keywords = topic_model.get_topic(topic_id)[:10]
 # LLM prompt to generate concise label
 label = llm_generate_topic_label(keywords)
 ```
@@ -196,46 +196,6 @@ weight_CO_OCCURS(e1, e2) = count(e1, e2) × (1 / √(freq(e1) × freq(e2)))
 
 ---
 
-#### **SEMANTIC_SIM**: Entity ↔ Entity / Theme ↔ Theme
-
-Links semantically similar entities (or themes) via their embeddings.
-
-**For entities**:
-
-```python
-# Embeddings of entity names
-embeddings = SentenceTransformer.encode([entity_text1, entity_text2, ...])
-
-# Cosine similarity
-sim = cosine_similarity(embedding1, embedding2) = embedding1 · embedding2
-
-# Edge if sim > threshold (default: 0.6)
-if sim > semantic_similarity_threshold:
-    weight_SEMANTIC_SIM = sim
-```
-
-**For themes**:
-
-```python
-# Representation = concatenation of top 5 keywords
-theme_repr = " ".join(topic_keywords[:5])
-
-# Embeddings then cosine similarity
-sim = cosine_similarity(theme_embedding1, theme_embedding2)
-```
-
-**Formula**:
-```
-weight_SEMANTIC_SIM(n1, n2) = cos(emb(n1), emb(n2)) = (emb(n1) · emb(n2)) / (||emb(n1)|| × ||emb(n2)||)
-```
-
-With normalized embeddings: `||emb|| = 1`, thus:
-```
-weight_SEMANTIC_SIM(n1, n2) = emb(n1) · emb(n2)
-```
-
----
-
 #### **CO_PRESENCE**: Theme ↔ Theme
 
 Links themes that appear together in the same chunks (via HAS_TOPIC edges).
@@ -264,9 +224,57 @@ weight_CO_PRESENCE(t1, t2) = count(t1, t2) × (1 / √(freq(t1) × freq(t2)))
 
 ---
 
+#### **SEMANTIC_SIM**: Entity ↔ Entity / Theme ↔ Theme
+
+Links semantically similar entities (or themes) via their embeddings.
+
+**For entities**:
+
+```python
+# Embeddings of entity names
+embeddings = SentenceTransformer.encode([entity_text1, entity_text2, ...])
+
+# Cosine similarity
+sim = cosine_similarity(embedding1, embedding2) = embedding1 · embedding2
+
+# Edge if sim > threshold (default: 0.6)
+if sim > semantic_similarity_threshold:
+    weight_SEMANTIC_SIM = sim
+```
+
+**For themes**:
+
+```python
+# Representation = concatenation of top 10 keywords
+theme_repr = " ".join(topic_keywords[:10])
+
+# Embeddings then cosine similarity
+sim = cosine_similarity(theme_embedding1, theme_embedding2)
+```
+
+**Formula**:
+```
+weight_SEMANTIC_SIM(n1, n2) = cos(emb(n1), emb(n2)) = (emb(n1) · emb(n2)) / (||emb(n1)|| × ||emb(n2)||)
+```
+
+With normalized embeddings: `||emb|| = 1`, thus:
+```
+weight_SEMANTIC_SIM(n1, n2) = emb(n1) · emb(n2)
+```
+
+---
+
 ## 2. Graph Retrieval
 
 The system uses **hybrid retrieval** combining 4 complementary strategies, fused by weighted average.
+
+**Strategy organization**:
+- **Strategies 1-2**: Direct comparison methods (no graph traversal)
+  - Strategy 1: Semantic similarity via embeddings
+  - Strategy 2: Topic distribution similarity via Jensen-Shannon divergence
+- **Strategies 3-4**: Graph-based methods (with BFS traversal)
+  - Strategy 3: Thematic retrieval via theme graph traversal
+  - Strategy 4: Entity-based retrieval via entity graph traversal
 
 ### 2.1 Strategy 1: Semantic Retrieval
 
@@ -297,7 +305,56 @@ score_sem(chunk) = normalize(cos(emb(claim), emb(chunk)))
 
 ---
 
-### 2.2 Strategy 2: Thematic Retrieval
+### 2.2 Strategy 2: Topic Distribution Retrieval
+
+Based on similarity between topic probability distributions (Jensen-Shannon divergence).
+
+**Process**:
+
+```python
+# 1. Get the topic distribution of the claim
+claim_topic_dist = BERTopic.transform(claim)  # Probability vector
+
+# 2. Get distributions for all chunks (pre-computed)
+chunk_topic_dists = [BERTopic.transform(chunk) for chunk in chunks]
+
+# 3. Compute Jensen-Shannon divergence
+for chunk, chunk_dist in zip(chunks, chunk_topic_dists):
+    js_divergence = jensen_shannon(claim_topic_dist, chunk_dist)
+
+    # Convert to similarity (divergence ∈ [0, 1])
+    similarity = 1 - js_divergence
+    score_topic_dist[chunk] = similarity
+
+# 4. Normalize
+score_topic_dist(chunk) = normalize(similarity)
+```
+
+**Jensen-Shannon Divergence Formula**:
+
+```
+JS(P || Q) = (1/2) × KL(P || M) + (1/2) × KL(Q || M)
+```
+
+where:
+- `M = (P + Q) / 2` (average distribution)
+- `KL(P || Q) = ∑_i P(i) × log(P(i) / Q(i))` (Kullback-Leibler divergence)
+
+**Conversion to similarity**:
+```
+score_topic_dist(chunk) = normalize(1 - JS(P_claim || P_chunk))
+```
+
+**Properties**:
+- Symmetric: `JS(P || Q) = JS(Q || P)`
+- Bounded: `JS ∈ [0, 1]`
+- `JS = 0` if distributions are identical
+
+**Output**: Dictionary `{chunk_id: score_topic_dist}`.
+
+---
+
+### 2.3 Strategy 3: Thematic Retrieval
 
 Based on BERTopic topics and relevance propagation through the theme graph.
 
@@ -349,7 +406,7 @@ where `P(theme|chunk)` is the HAS_TOPIC edge weight (BERTopic probability).
 
 ---
 
-### 2.3 Strategy 3: Entity-based Retrieval
+### 2.4 Strategy 4: Entity-based Retrieval
 
 Based on entity extraction from the claim and relevance propagation through the entity graph.
 
@@ -399,55 +456,6 @@ score_entity(chunk) = normalize(∑_{entity} relevance(entity) × TF-IDF(entity,
 
 ---
 
-### 2.4 Strategy 4: Topic Distribution Retrieval
-
-Based on similarity between topic probability distributions (Jensen-Shannon divergence).
-
-**Process**:
-
-```python
-# 1. Get the topic distribution of the claim
-claim_topic_dist = BERTopic.transform(claim)  # Probability vector
-
-# 2. Get distributions for all chunks (pre-computed)
-chunk_topic_dists = [BERTopic.transform(chunk) for chunk in chunks]
-
-# 3. Compute Jensen-Shannon divergence
-for chunk, chunk_dist in zip(chunks, chunk_topic_dists):
-    js_divergence = jensen_shannon(claim_topic_dist, chunk_dist)
-
-    # Convert to similarity (divergence ∈ [0, 1])
-    similarity = 1 - js_divergence
-    score_topic_dist[chunk] = similarity
-
-# 4. Normalize
-score_topic_dist(chunk) = normalize(similarity)
-```
-
-**Jensen-Shannon Divergence Formula**:
-
-```
-JS(P || Q) = (1/2) × KL(P || M) + (1/2) × KL(Q || M)
-```
-
-where:
-- `M = (P + Q) / 2` (average distribution)
-- `KL(P || Q) = ∑_i P(i) × log(P(i) / Q(i))` (Kullback-Leibler divergence)
-
-**Conversion to similarity**:
-```
-score_topic_dist(chunk) = normalize(1 - JS(P_claim || P_chunk))
-```
-
-**Properties**:
-- Symmetric: `JS(P || Q) = JS(Q || P)`
-- Bounded: `JS ∈ [0, 1]`
-- `JS = 0` if distributions are identical
-
-**Output**: Dictionary `{chunk_id: score_topic_dist}`.
-
----
-
 ### 2.5 Score Fusion
 
 The 4 scores are combined by **weighted average** with configurable weights.
@@ -456,18 +464,18 @@ The 4 scores are combined by **weighted average** with configurable weights.
 
 ```
 score_final(chunk) = α × score_sem(chunk)
-                   + β × score_theme(chunk)
-                   + γ × score_entity(chunk)
-                   + δ × score_topic_dist(chunk)
+                   + β × score_topic_dist(chunk)
+                   + γ × score_theme(chunk)
+                   + δ × score_entity(chunk)
 ```
 
 **Constraint**: `α + β + γ + δ = 1.0`
 
 **Default weights**:
 - `α = 0.3` (semantic)
-- `β = 0.2` (thematic)
-- `γ = 0.3` (entities)
-- `δ = 0.2` (topic distribution)
+- `β = 0.2` (topic distribution)
+- `γ = 0.2` (thematic)
+- `δ = 0.3` (entities)
 
 **Fusion process**:
 
@@ -479,19 +487,19 @@ all_chunks = set(S1) ∪ set(S2) ∪ set(S3) ∪ set(S4)
 results = []
 for chunk in all_chunks:
     score_sem = S1.get(chunk, 0)
-    score_theme = S2.get(chunk, 0)
-    score_entity = S3.get(chunk, 0)
-    score_topic_dist = S4.get(chunk, 0)
+    score_topic_dist = S2.get(chunk, 0)
+    score_theme = S3.get(chunk, 0)
+    score_entity = S4.get(chunk, 0)
 
-    score_final = α×score_sem + β×score_theme + γ×score_entity + δ×score_topic_dist
+    score_final = α×score_sem + β×score_topic_dist + γ×score_theme + δ×score_entity
 
     results.append({
         'chunk_id': chunk,
         'score_total': score_final,
         'score_sem': score_sem,
+        'score_topic_dist': score_topic_dist,
         'score_theme': score_theme,
-        'score_entity': score_entity,
-        'score_topic_dist': score_topic_dist
+        'score_entity': score_entity
     })
 
 # Sort by final score (descending)
@@ -578,19 +586,12 @@ graph_construction:
   semantic_similarity_threshold: 0.6
 
 retrieval:
-  alpha: 0.3  # semantic weight
-  beta: 0.2   # thematic weight
-  gamma: 0.3  # entity weight
-  delta: 0.2  # topic distribution weight
+  alpha: 0.3  # semantic weight (strategy 1)
+  beta: 0.2   # topic distribution weight (strategy 2)
+  gamma: 0.2  # thematic weight (strategy 3)
+  delta: 0.3  # entity weight (strategy 4)
   entity_relevance_threshold: 0.1
   theme_relevance_threshold: 0.1
 ```
 
 ---
-
-## 6. References
-
-- **BERTopic**: [Grootendorst, 2022](https://github.com/MaartenGr/BERTopic)
-- **SentenceTransformers**: [Reimers & Gurevych, 2019](https://arxiv.org/abs/1908.10084)
-- **spaCy**: [Honnibal & Montani, 2017](https://spacy.io)
-- **Jensen-Shannon Divergence**: [Lin, 1991](https://ieeexplore.ieee.org/document/61115)

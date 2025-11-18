@@ -214,13 +214,11 @@ def visualize(mode, entity, max_nodes, output, use_postgres, graph_file):
               help='Graph ID (timestamp) to use (e.g., 20251117_213022). If not specified, uses latest or default.')
 @click.option('--use-postgres', is_flag=True,
               help='Load graph from PostgreSQL')
-@click.option('--test', is_flag=True,
-              help='Run with test claims from config')
 @click.option('--top-n', type=int, default=5,
               help='Number of top results to display in detail (default: 5)')
 @click.option('--save-results/--no-save-results', default=True,
               help='Save results to files (default: True)')
-def retrieve(claim, alpha, beta, gamma, delta, top_k, graph_id, use_postgres, test, top_n, save_results):
+def retrieve(claim, alpha, beta, gamma, delta, top_k, graph_id, use_postgres, top_n, save_results):
     """Retrieve relevant chunks for a fact-checking claim with detailed scoring."""
     import pickle
     import spacy
@@ -240,14 +238,12 @@ def retrieve(claim, alpha, beta, gamma, delta, top_k, graph_id, use_postgres, te
     delta = delta or config.retrieval.delta
     top_k = top_k or config.retrieval.top_k
 
-    # Get claims
-    if test:
-        claims = config.testing.test_claims
-    elif claim:
-        claims = [claim]
-    else:
-        logger.error("Please provide a claim or use --test flag")
+    # Get claim
+    if not claim:
+        logger.error("Please provide a claim")
         sys.exit(1)
+
+    claims = [claim]
 
     try:
         # Load graph

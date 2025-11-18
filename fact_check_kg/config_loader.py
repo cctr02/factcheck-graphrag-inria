@@ -193,7 +193,12 @@ class Config:
             self.logging = LoggingConfig(**self._raw_config['logging'])
             self.export = ExportConfig(**self._raw_config['export'])
             self.performance = PerformanceConfig(**self._raw_config['performance'])
-            self.testing = TestingConfig(**self._raw_config['testing'])
+
+            # Testing config is optional
+            if 'testing' in self._raw_config:
+                self.testing = TestingConfig(**self._raw_config['testing'])
+            else:
+                self.testing = None
         except KeyError as e:
             raise ConfigError(f"Missing required configuration key: {e}")
         except TypeError as e:
