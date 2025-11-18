@@ -5,6 +5,22 @@ This module handles all PostgreSQL operations for storing and retrieving
 the knowledge graph as edges in a relational table.
 """
 
+import os
+import sys
+
+# Fix encoding issues on Windows before importing psycopg2
+if sys.platform == 'win32':
+    # Set locale to C (ASCII) to avoid UTF-8 decoding errors with system paths
+    import locale
+    try:
+        locale.setlocale(locale.LC_ALL, 'C')
+    except:
+        pass
+    # Set environment variables for PostgreSQL client
+    os.environ['LC_ALL'] = 'C'
+    os.environ['LANG'] = 'C'
+    os.environ['PGCLIENTENCODING'] = 'UTF8'
+
 import psycopg2
 from psycopg2.extras import execute_batch
 import networkx as nx
@@ -30,6 +46,7 @@ class GraphDatabaseConnector:
         database: str = "knowledge_graph",
         user: str = "postgres",
         password: str = "postgres",
+        graph_id: Optional[str] = None,
         logger: Optional[logging.Logger] = None
     ):
         """
@@ -41,6 +58,7 @@ class GraphDatabaseConnector:
             database: Database name
             user: Username
             password: Password
+            graph_id: Optional graph ID (timestamp) for versioned tables
             logger: Optional logger instance
         """
         self.host = host
@@ -48,22 +66,55 @@ class GraphDatabaseConnector:
         self.database = database
         self.user = user
         self.password = password
+        self.graph_id = graph_id
         self.logger = logger or logging.getLogger(__name__)
 
         self.conn = None
         self.cursor = None
 
+        # Table names (with optional graph_id suffix for versioning)
+        if graph_id:
+            self.graph_table = f"graph_{graph_id}"
+            self.nodes_table = f"nodes_{graph_id}"
+        else:
+            self.graph_table = "graph"
+            self.nodes_table = "nodes"
+
     def connect(self):
         """Establish connection to PostgreSQL database."""
         try:
-            self.conn = psycopg2.connect(
-                host=self.host,
-                port=self.port,
-                database=self.database,
-                user=self.user,
-                password=self.password
-            )
+            # Clean environment variables that might contain non-UTF8 characters
+            env_backup = {}
+            problematic_vars = ['APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP', 'PGPASSFILE', 'PGSYSCONFDIR']
+
+            for var in problematic_vars:
+                if var in os.environ:
+                    env_backup[var] = os.environ[var]
+                    del os.environ[var]
+
+            try:
+                # Set PostgreSQL encoding
+                os.environ['PGCLIENTENCODING'] = 'UTF8'
+
+                # Try connection with explicit parameters (no DSN parsing)
+                self.conn = psycopg2.connect(
+                    host=self.host,
+                    port=self.port,
+                    database=self.database,
+                    user=self.user,
+                    password=self.password,
+                    options='-c client_encoding=UTF8'
+                )
+            finally:
+                # Restore environment variables
+                for var, value in env_backup.items():
+                    os.environ[var] = value
+
             self.cursor = self.conn.cursor()
+
+            # Set connection encoding explicitly after connection
+            self.conn.set_client_encoding('UTF8')
+
             self.logger.info(f"Connected to PostgreSQL database: {self.database}")
         except Exception as e:
             self.logger.error(f"Failed to connect to PostgreSQL: {e}")
@@ -79,8 +130,8 @@ class GraphDatabaseConnector:
 
     def create_tables(self):
         """Create the graph table if it doesn't exist."""
-        create_graph_table = """
-        CREATE TABLE IF NOT EXISTS graph (
+        create_graph_table = f"""
+        CREATE TABLE IF NOT EXISTS {self.graph_table} (
             id SERIAL PRIMARY KEY,
             source TEXT NOT NULL,
             predicate TEXT NOT NULL,
@@ -91,16 +142,16 @@ class GraphDatabaseConnector:
         """
 
         # Create indexes for better query performance
-        create_indexes = """
-        CREATE INDEX IF NOT EXISTS idx_graph_source ON graph(source);
-        CREATE INDEX IF NOT EXISTS idx_graph_target ON graph(target);
-        CREATE INDEX IF NOT EXISTS idx_graph_predicate ON graph(predicate);
-        CREATE INDEX IF NOT EXISTS idx_graph_source_target ON graph(source, target);
+        create_indexes = f"""
+        CREATE INDEX IF NOT EXISTS idx_{self.graph_table}_source ON {self.graph_table}(source);
+        CREATE INDEX IF NOT EXISTS idx_{self.graph_table}_target ON {self.graph_table}(target);
+        CREATE INDEX IF NOT EXISTS idx_{self.graph_table}_predicate ON {self.graph_table}(predicate);
+        CREATE INDEX IF NOT EXISTS idx_{self.graph_table}_source_target ON {self.graph_table}(source, target);
         """
 
         # Create node attributes table for storing node metadata
-        create_node_table = """
-        CREATE TABLE IF NOT EXISTS nodes (
+        create_node_table = f"""
+        CREATE TABLE IF NOT EXISTS {self.nodes_table} (
             node_id TEXT PRIMARY KEY,
             node_type TEXT,
             attributes JSONB,
@@ -108,8 +159,19 @@ class GraphDatabaseConnector:
         );
         """
 
-        create_node_index = """
-        CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(node_type);
+        create_node_index = f"""
+        CREATE INDEX IF NOT EXISTS idx_{self.nodes_table}_type ON {self.nodes_table}(node_type);
+        """
+
+        # Create metadata table (only once, not versioned)
+        create_metadata_table = """
+        CREATE TABLE IF NOT EXISTS graph_metadata (
+            graph_id TEXT PRIMARY KEY,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            num_nodes INTEGER,
+            num_edges INTEGER,
+            metadata JSONB
+        );
         """
 
         try:
@@ -117,8 +179,9 @@ class GraphDatabaseConnector:
             self.cursor.execute(create_indexes)
             self.cursor.execute(create_node_table)
             self.cursor.execute(create_node_index)
+            self.cursor.execute(create_metadata_table)
             self.conn.commit()
-            self.logger.info("Graph tables created successfully")
+            self.logger.info(f"Graph tables created successfully: {self.graph_table}, {self.nodes_table}")
         except Exception as e:
             self.conn.rollback()
             self.logger.error(f"Failed to create tables: {e}")
@@ -127,21 +190,22 @@ class GraphDatabaseConnector:
     def clear_graph(self):
         """Clear all data from graph and nodes tables."""
         try:
-            self.cursor.execute("DELETE FROM graph")
-            self.cursor.execute("DELETE FROM nodes")
+            self.cursor.execute(f"DELETE FROM {self.graph_table}")
+            self.cursor.execute(f"DELETE FROM {self.nodes_table}")
             self.conn.commit()
-            self.logger.info("Graph tables cleared")
+            self.logger.info(f"Graph tables cleared: {self.graph_table}, {self.nodes_table}")
         except Exception as e:
             self.conn.rollback()
             self.logger.error(f"Failed to clear tables: {e}")
             raise
 
-    def save_graph(self, graph: nx.Graph):
+    def save_graph(self, graph: nx.Graph, metadata: dict = None):
         """
         Save a NetworkX graph to PostgreSQL.
 
         Args:
             graph: NetworkX graph to save
+            metadata: Optional metadata dictionary to store
         """
         self.logger.info("Saving graph to PostgreSQL...")
 
@@ -171,9 +235,9 @@ class GraphDatabaseConnector:
 
         try:
             # Insert nodes in batches
-            self.logger.info(f"Inserting {len(node_data)} nodes...")
-            insert_node_query = """
-            INSERT INTO nodes (node_id, node_type, attributes)
+            self.logger.info(f"Inserting {len(node_data)} nodes into {self.nodes_table}...")
+            insert_node_query = f"""
+            INSERT INTO {self.nodes_table} (node_id, node_type, attributes)
             VALUES (%s, %s, %s)
             ON CONFLICT (node_id) DO UPDATE SET
                 node_type = EXCLUDED.node_type,
@@ -182,12 +246,28 @@ class GraphDatabaseConnector:
             execute_batch(self.cursor, insert_node_query, node_data, page_size=1000)
 
             # Insert edges in batches
-            self.logger.info(f"Inserting {len(edge_data)} edges...")
-            insert_edge_query = """
-            INSERT INTO graph (source, predicate, target, weight)
+            self.logger.info(f"Inserting {len(edge_data)} edges into {self.graph_table}...")
+            insert_edge_query = f"""
+            INSERT INTO {self.graph_table} (source, predicate, target, weight)
             VALUES (%s, %s, %s, %s)
             """
             execute_batch(self.cursor, insert_edge_query, edge_data, page_size=1000)
+
+            # Insert metadata if graph_id is provided
+            if self.graph_id and metadata:
+                self.logger.info(f"Inserting metadata for graph {self.graph_id}...")
+                insert_metadata_query = """
+                INSERT INTO graph_metadata (graph_id, num_nodes, num_edges, metadata)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (graph_id) DO UPDATE SET
+                    num_nodes = EXCLUDED.num_nodes,
+                    num_edges = EXCLUDED.num_edges,
+                    metadata = EXCLUDED.metadata
+                """
+                self.cursor.execute(
+                    insert_metadata_query,
+                    (self.graph_id, len(node_data), len(edge_data), psycopg2.extras.Json(metadata))
+                )
 
             self.conn.commit()
             self.logger.info(f"Graph saved successfully: {len(node_data)} nodes, {len(edge_data)} edges")
@@ -204,13 +284,13 @@ class GraphDatabaseConnector:
         Returns:
             NetworkX graph reconstructed from database
         """
-        self.logger.info("Loading graph from PostgreSQL...")
+        self.logger.info(f"Loading graph from PostgreSQL (tables: {self.nodes_table}, {self.graph_table})...")
 
         graph = nx.Graph()
 
         try:
             # Load nodes
-            self.cursor.execute("SELECT node_id, node_type, attributes FROM nodes")
+            self.cursor.execute(f"SELECT node_id, node_type, attributes FROM {self.nodes_table}")
             nodes = self.cursor.fetchall()
 
             self.logger.info(f"Loading {len(nodes)} nodes...")
@@ -218,7 +298,7 @@ class GraphDatabaseConnector:
                 graph.add_node(node_id, **attributes)
 
             # Load edges
-            self.cursor.execute("SELECT source, predicate, target, weight FROM graph")
+            self.cursor.execute(f"SELECT source, predicate, target, weight FROM {self.graph_table}")
             edges = self.cursor.fetchall()
 
             self.logger.info(f"Loading {len(edges)} edges...")
@@ -243,17 +323,17 @@ class GraphDatabaseConnector:
             stats = {}
 
             # Node counts
-            self.cursor.execute("SELECT COUNT(*) FROM nodes")
+            self.cursor.execute(f"SELECT COUNT(*) FROM {self.nodes_table}")
             stats['total_nodes'] = self.cursor.fetchone()[0]
 
-            self.cursor.execute("SELECT node_type, COUNT(*) FROM nodes GROUP BY node_type")
+            self.cursor.execute(f"SELECT node_type, COUNT(*) FROM {self.nodes_table} GROUP BY node_type")
             stats['nodes_by_type'] = dict(self.cursor.fetchall())
 
             # Edge counts
-            self.cursor.execute("SELECT COUNT(*) FROM graph")
+            self.cursor.execute(f"SELECT COUNT(*) FROM {self.graph_table}")
             stats['total_edges'] = self.cursor.fetchone()[0]
 
-            self.cursor.execute("SELECT predicate, COUNT(*) FROM graph GROUP BY predicate")
+            self.cursor.execute(f"SELECT predicate, COUNT(*) FROM {self.graph_table} GROUP BY predicate")
             stats['edges_by_type'] = dict(self.cursor.fetchall())
 
             return stats
@@ -261,6 +341,56 @@ class GraphDatabaseConnector:
         except Exception as e:
             self.logger.error(f"Failed to get statistics: {e}")
             raise
+
+    @staticmethod
+    def list_available_graphs(
+        host: str = "localhost",
+        port: int = 5432,
+        database: str = "knowledge_graph",
+        user: str = "postgres",
+        password: str = "postgres"
+    ) -> List[dict]:
+        """
+        List all available graphs in the database.
+
+        Returns:
+            List of dictionaries with graph metadata
+        """
+        conn = None
+        try:
+            conn = psycopg2.connect(
+                host=host,
+                port=port,
+                database=database,
+                user=user,
+                password=password
+            )
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                SELECT graph_id, created_at, num_nodes, num_edges, metadata
+                FROM graph_metadata
+                ORDER BY created_at DESC
+            """)
+
+            results = []
+            for graph_id, created_at, num_nodes, num_edges, metadata in cursor.fetchall():
+                results.append({
+                    'graph_id': graph_id,
+                    'created_at': created_at,
+                    'num_nodes': num_nodes,
+                    'num_edges': num_edges,
+                    'metadata': metadata
+                })
+
+            cursor.close()
+            return results
+
+        except Exception as e:
+            raise
+        finally:
+            if conn:
+                conn.close()
 
     def query_neighbors(
         self,
@@ -281,21 +411,21 @@ class GraphDatabaseConnector:
         """
         try:
             if edge_type:
-                query = """
-                SELECT target, predicate, weight FROM graph
+                query = f"""
+                SELECT target, predicate, weight FROM {self.graph_table}
                 WHERE source = %s AND predicate = %s
                 UNION
-                SELECT source, predicate, weight FROM graph
+                SELECT source, predicate, weight FROM {self.graph_table}
                 WHERE target = %s AND predicate = %s
                 LIMIT %s
                 """
                 self.cursor.execute(query, (node_id, edge_type, node_id, edge_type, max_neighbors))
             else:
-                query = """
-                SELECT target, predicate, weight FROM graph
+                query = f"""
+                SELECT target, predicate, weight FROM {self.graph_table}
                 WHERE source = %s
                 UNION
-                SELECT source, predicate, weight FROM graph
+                SELECT source, predicate, weight FROM {self.graph_table}
                 WHERE target = %s
                 LIMIT %s
                 """

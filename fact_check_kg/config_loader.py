@@ -39,6 +39,7 @@ class GraphConstructionConfig:
     nr_topics: Optional[int]
     co_occurrence_threshold: int
     semantic_similarity_threshold: float
+    topic_probability_threshold: float
     entity_types: List[str]
 
 
@@ -73,15 +74,18 @@ class RetrievalConfig:
     alpha: float
     beta: float
     gamma: float
+    delta: float
     top_k: int
     theme_threshold: float
+    entity_relevance_threshold: float
+    theme_relevance_threshold: float
     direct_path_weight: float
     co_occurrence_path_weight: float
     theme_path_weight: float
 
     def __post_init__(self):
         """Validate that weights sum to 1.0."""
-        total = self.alpha + self.beta + self.gamma
+        total = self.alpha + self.beta + self.gamma + self.delta
         if abs(total - 1.0) > 0.01:
             raise ConfigError(f"Retrieval weights must sum to 1.0, got {total}")
 

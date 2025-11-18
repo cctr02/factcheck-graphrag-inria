@@ -63,9 +63,9 @@ outputs/retrieval_results/*
 *.sqlite3
 
 # Large data files (keep directory structure)
-data/*.csv
-data/*.json
-data/*.parquet
+*.csv
+*.json
+
 
 # Jupyter
 .ipynb_checkpoints/
@@ -83,9 +83,5 @@ docs/_build/
 # OS
 Thumbs.db
 
-# Project specific - keep factcheckbureau
-factcheckbureau/
-remove/
-note.md
-journal.md
+# Project specific
 uv.lock

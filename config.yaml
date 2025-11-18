@@ -20,6 +20,15 @@ paths:
   logs_dir: "logs"
 
 # ============================================================================
+# GRAPH SELECTION
+# ============================================================================
+active_graph:
+  # Graph ID to use by default (timestamp format: YYYYMMDD_HHMMSS)
+  # Set to "latest" to always use the most recent graph
+  # Set to specific timestamp like "20251113_104456" to use a specific graph
+  graph_id: "latest"
+
+# ============================================================================
 # GRAPH CONSTRUCTION PARAMETERS
 # ============================================================================
 graph_construction:
@@ -33,6 +42,7 @@ graph_construction:
   # Topic modeling (BERTopic)
   min_topic_size: 10  # Minimum size for a topic
   nr_topics: null  # Number of topics (null = auto-detect)
+  topic_probability_threshold: 0.15  # Minimum probability to create HAS_TOPIC edge
 
   # Entity extraction thresholds
   co_occurrence_threshold: 2  # Minimum co-occurrences to create edge
@@ -88,9 +98,10 @@ database:
 # ============================================================================
 retrieval:
   # Weight parameters for hybrid retrieval (must sum to 1.0)
-  alpha: 0.4  # Weight for semantic similarity
-  beta: 0.3  # Weight for thematic similarity
-  gamma: 0.3  # Weight for entity-based similarity
+  alpha: 0.3  # Weight for semantic similarity (embedding-based)
+  beta: 0.2  # Weight for thematic similarity (topic graph traversal)
+  gamma: 0.3  # Weight for entity-based similarity (entity graph traversal)
+  delta: 0.2  # Weight for topic distribution similarity (Jensen-Shannon divergence)
 
   # Retrieval parameters
   top_k: 10  # Number of results to return
@@ -100,6 +111,10 @@ retrieval:
   direct_path_weight: 1.0  # Entity -> Chunk (direct mention)
   co_occurrence_path_weight: 0.8  # Entity -> Co-occurring Entity -> Chunk
   theme_path_weight: 0.6  # Entity -> Theme -> Chunk
+
+  # Relevance propagation thresholds (for graph traversal)
+  entity_relevance_threshold: 0.1  # Minimum relevance to continue entity graph traversal
+  theme_relevance_threshold: 0.1  # Minimum relevance to continue theme graph traversal
 
 # ============================================================================
 # VISUALIZATION CONFIGURATION

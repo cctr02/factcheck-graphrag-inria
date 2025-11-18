@@ -14,12 +14,34 @@ import argparse
 from collections import defaultdict
 import os
 import sys
+import re
+from pathlib import Path
 
 # Add parent directory to path
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
 from fact_check_kg.db_connector import GraphDatabaseConnector
 from fact_check_kg.config import DatabaseConfig
+
+
+def extract_timestamp_from_path(file_path: str) -> str:
+    """
+    Extract timestamp from file path.
+
+    Args:
+        file_path: Path to graph file
+
+    Returns:
+        Timestamp string (e.g., "20251117_213022") or empty string if not found
+    """
+    if not file_path:
+        return ""
+
+    # Look for timestamp pattern: YYYYMMDD_HHMMSS
+    match = re.search(r'(\d{8}_\d{6})', file_path)
+    if match:
+        return match.group(1)
+    return ""
 
 
 def load_graph_from_source(graph_path: str = None, use_postgres: bool = False, db_config: DatabaseConfig = None) -> nx.Graph:
@@ -62,7 +84,7 @@ def load_graph_from_source(graph_path: str = None, use_postgres: bool = False, d
 
 def visualize_full_graph(
     graph_path: str = None,
-    output_path: str = "graph_full.html",
+    output_path: str = None,
     max_nodes: int = 200,
     use_postgres: bool = False,
     db_config: DatabaseConfig = None
@@ -72,12 +94,23 @@ def visualize_full_graph(
 
     Args:
         graph_path: Path to .gpickle file (if not using postgres)
-        output_path: Output HTML file
+        output_path: Output HTML file (auto-generated with timestamp if not provided)
         max_nodes: Maximum nodes to display (for readability)
         use_postgres: Whether to load from PostgreSQL
         db_config: Database configuration
     """
     G = load_graph_from_source(graph_path, use_postgres, db_config)
+
+    # Auto-generate output path with timestamp if not provided
+    if output_path is None:
+        timestamp = extract_timestamp_from_path(graph_path) if graph_path else ""
+        if timestamp:
+            output_path = f"outputs/visualizations/graph_full_{timestamp}.html"
+        else:
+            output_path = "outputs/visualizations/graph_full.html"
+
+    # Ensure output directory exists
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
     print(f"Graph loaded: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
 
@@ -93,9 +126,12 @@ def visualize_full_graph(
 
     print(f"Visualizing {G_viz.number_of_nodes()} nodes, {G_viz.number_of_edges()} edges...")
 
-    # Create pyvis network
+    # Create pyvis network with better font settings
     net = Network(height="900px", width="100%", bgcolor="#222222", font_color="white")
     net.barnes_hut(gravity=-8000, central_gravity=0.3, spring_length=100)
+
+    # Show controls first before setting custom options
+    net.show_buttons(filter_=['physics'])
 
     # Color mapping by type
     color_map = {
@@ -127,7 +163,8 @@ def visualize_full_graph(
             label=label,
             color=color_map.get(node_type, 'gray'),
             size=size,
-            title=f"{node_type}: {node}<br>Degree: {degree}"
+            title=f"{node_type}: {node}<br>Degree: {degree}",
+            font={'size': 16, 'face': 'arial'}
         )
 
     # Add edges with colors by type
@@ -147,22 +184,88 @@ def visualize_full_graph(
             edge[0],
             edge[1],
             title=f"{edge_type} (weight: {weight:.2f})",
+            label=f"{weight:.2f}",  # Display weight on edge
             color=edge_color_map.get(edge_type, 'gray'),
             width=min(weight * 2, 5)
         )
 
-    # Show controls
-    net.show_buttons(filter_=['physics'])
+    # Add legend
+    legend_html = """
+    <div style="position: fixed; top: 10px; right: 10px; background-color: rgba(34, 34, 34, 0.9);
+                padding: 15px; border-radius: 8px; border: 2px solid #666; font-family: Arial;
+                color: white; z-index: 1000; max-width: 250px;">
+        <h3 style="margin-top: 0; color: #fff; border-bottom: 2px solid #666; padding-bottom: 5px;">Legend</h3>
+
+        <h4 style="margin: 10px 0 5px 0; color: #aaa;">Node Types:</h4>
+        <div style="margin: 5px 0;">
+            <span style="display: inline-block; width: 15px; height: 15px; background-color: #0277bd;
+                        border-radius: 50%; margin-right: 8px;"></span>
+            <span>Document</span>
+        </div>
+        <div style="margin: 5px 0;">
+            <span style="display: inline-block; width: 15px; height: 15px; background-color: #fbc02d;
+                        border-radius: 50%; margin-right: 8px;"></span>
+            <span>Chunk</span>
+        </div>
+        <div style="margin: 5px 0;">
+            <span style="display: inline-block; width: 15px; height: 15px; background-color: #7b1fa2;
+                        border-radius: 50%; margin-right: 8px;"></span>
+            <span>Theme</span>
+        </div>
+        <div style="margin: 5px 0;">
+            <span style="display: inline-block; width: 15px; height: 15px; background-color: #388e3c;
+                        border-radius: 50%; margin-right: 8px;"></span>
+            <span>Entity</span>
+        </div>
+
+        <h4 style="margin: 15px 0 5px 0; color: #aaa;">Edge Types:</h4>
+        <div style="margin: 5px 0;">
+            <span style="display: inline-block; width: 25px; height: 3px; background-color: #666666;
+                        margin-right: 8px; vertical-align: middle;"></span>
+            <span>CONTAINS</span>
+        </div>
+        <div style="margin: 5px 0;">
+            <span style="display: inline-block; width: 25px; height: 3px; background-color: #ab47bc;
+                        margin-right: 8px; vertical-align: middle;"></span>
+            <span>HAS_TOPIC</span>
+        </div>
+        <div style="margin: 5px 0;">
+            <span style="display: inline-block; width: 25px; height: 3px; background-color: #66bb6a;
+                        margin-right: 8px; vertical-align: middle;"></span>
+            <span>MENTIONS</span>
+        </div>
+        <div style="margin: 5px 0;">
+            <span style="display: inline-block; width: 25px; height: 3px; background-color: #ef5350;
+                        margin-right: 8px; vertical-align: middle;"></span>
+            <span>CO_OCCURS</span>
+        </div>
+        <div style="margin: 5px 0;">
+            <span style="display: inline-block; width: 25px; height: 3px; background-color: #42a5f5;
+                        margin-right: 8px; vertical-align: middle;"></span>
+            <span>SEMANTIC_SIM</span>
+        </div>
+    </div>
+    """
 
     # Save
     net.save_graph(output_path)
+
+    # Inject legend into HTML
+    with open(output_path, 'r', encoding='utf-8') as f:
+        html_content = f.read()
+
+    # Insert legend just before </body>
+    html_content = html_content.replace('</body>', f'{legend_html}</body>')
+
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(html_content)
     print(f"\nVisualization saved to: {output_path}")
     print(f"Open in browser to explore!")
 
 
 def visualize_entity_subgraph(
     entity_name: str,
-    output_path: str = "graph_entity.html",
+    output_path: str = None,
     max_neighbors: int = 50,
     graph_path: str = None,
     use_postgres: bool = False,
@@ -173,13 +276,24 @@ def visualize_entity_subgraph(
 
     Args:
         entity_name: Entity to center on (e.g., "gaza", "facebook")
-        output_path: Output HTML file
+        output_path: Output HTML file (auto-generated with timestamp if not provided)
         max_neighbors: Max neighbors to include
         graph_path: Path to .gpickle file (if not using postgres)
         use_postgres: Whether to load from PostgreSQL
         db_config: Database configuration
     """
     G = load_graph_from_source(graph_path, use_postgres, db_config)
+
+    # Auto-generate output path with timestamp if not provided
+    if output_path is None:
+        timestamp = extract_timestamp_from_path(graph_path) if graph_path else ""
+        if timestamp:
+            output_path = f"outputs/visualizations/graph_entity_{entity_name}_{timestamp}.html"
+        else:
+            output_path = f"outputs/visualizations/graph_entity_{entity_name}.html"
+
+    # Ensure output directory exists
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
     # Find entity node
     entity_nodes = [
@@ -206,9 +320,12 @@ def visualize_entity_subgraph(
     G_viz = G.subgraph(subgraph_nodes)
     print(f"Subgraph: {G_viz.number_of_nodes()} nodes, {G_viz.number_of_edges()} edges")
 
-    # Create network
+    # Create network with better font settings
     net = Network(height="900px", width="100%", bgcolor="#222222", font_color="white")
     net.barnes_hut()
+
+    # Show controls first
+    net.show_buttons(filter_=['physics'])
 
     # Color mapping
     color_map = {
@@ -223,19 +340,24 @@ def visualize_entity_subgraph(
         node_data = G_viz.nodes[node]
         node_type = node_data.get('type', 'unknown')
 
+        # Don't truncate labels for subgraphs - show full text
         if node_type == 'entity':
             label = node_data.get('entity_text', node.split('::')[-1])
         elif node_type == 'theme':
             label = node_data.get('label', f"theme_{node.split('::')[-1]}")
+        elif node_type == 'chunk':
+            # For chunks, show a slightly shorter preview but not too truncated
+            chunk_id = node.split('::')[-1]
+            label = f"Chunk {chunk_id[:10]}"
         else:
-            label = node.split('::')[-1][:20]
+            label = node.split('::')[-1]
 
         # Highlight central entity
         if node == entity_node:
-            size = 40
+            size = 50
             color = '#ff0000'  # Red for central node
         else:
-            size = 20
+            size = 25
             color = color_map.get(node_type, 'gray')
 
         net.add_node(
@@ -243,7 +365,8 @@ def visualize_entity_subgraph(
             label=label,
             color=color,
             size=size,
-            title=f"{node_type}: {node}"
+            title=f"{node_type}: {node}",
+            font={'size': 20, 'face': 'arial'}  # Larger font for subgraph
         )
 
     # Add edges
@@ -263,11 +386,87 @@ def visualize_entity_subgraph(
             edge[0],
             edge[1],
             title=f"{edge_type} (weight: {weight:.2f})",
-            color=edge_color_map.get(edge_type, 'gray')
+            label=f"{weight:.2f}",  # Display weight on edge
+            color=edge_color_map.get(edge_type, 'gray'),
+            width=min(weight * 2, 5)
         )
 
-    net.show_buttons(filter_=['physics'])
+    # Add legend
+    legend_html = """
+    <div style="position: fixed; top: 10px; right: 10px; background-color: rgba(34, 34, 34, 0.9);
+                padding: 15px; border-radius: 8px; border: 2px solid #666; font-family: Arial;
+                color: white; z-index: 1000; max-width: 250px;">
+        <h3 style="margin-top: 0; color: #fff; border-bottom: 2px solid #666; padding-bottom: 5px;">Legend</h3>
+
+        <h4 style="margin: 10px 0 5px 0; color: #aaa;">Node Types:</h4>
+        <div style="margin: 5px 0;">
+            <span style="display: inline-block; width: 15px; height: 15px; background-color: #0277bd;
+                        border-radius: 50%; margin-right: 8px;"></span>
+            <span>Document</span>
+        </div>
+        <div style="margin: 5px 0;">
+            <span style="display: inline-block; width: 15px; height: 15px; background-color: #fbc02d;
+                        border-radius: 50%; margin-right: 8px;"></span>
+            <span>Chunk</span>
+        </div>
+        <div style="margin: 5px 0;">
+            <span style="display: inline-block; width: 15px; height: 15px; background-color: #7b1fa2;
+                        border-radius: 50%; margin-right: 8px;"></span>
+            <span>Theme</span>
+        </div>
+        <div style="margin: 5px 0;">
+            <span style="display: inline-block; width: 15px; height: 15px; background-color: #388e3c;
+                        border-radius: 50%; margin-right: 8px;"></span>
+            <span>Entity</span>
+        </div>
+        <div style="margin: 5px 0;">
+            <span style="display: inline-block; width: 15px; height: 15px; background-color: #ff0000;
+                        border-radius: 50%; margin-right: 8px;"></span>
+            <span>Central Entity</span>
+        </div>
+
+        <h4 style="margin: 15px 0 5px 0; color: #aaa;">Edge Types:</h4>
+        <div style="margin: 5px 0;">
+            <span style="display: inline-block; width: 25px; height: 3px; background-color: #666666;
+                        margin-right: 8px; vertical-align: middle;"></span>
+            <span>CONTAINS</span>
+        </div>
+        <div style="margin: 5px 0;">
+            <span style="display: inline-block; width: 25px; height: 3px; background-color: #ab47bc;
+                        margin-right: 8px; vertical-align: middle;"></span>
+            <span>HAS_TOPIC</span>
+        </div>
+        <div style="margin: 5px 0;">
+            <span style="display: inline-block; width: 25px; height: 3px; background-color: #66bb6a;
+                        margin-right: 8px; vertical-align: middle;"></span>
+            <span>MENTIONS</span>
+        </div>
+        <div style="margin: 5px 0;">
+            <span style="display: inline-block; width: 25px; height: 3px; background-color: #ef5350;
+                        margin-right: 8px; vertical-align: middle;"></span>
+            <span>CO_OCCURS</span>
+        </div>
+        <div style="margin: 5px 0;">
+            <span style="display: inline-block; width: 25px; height: 3px; background-color: #42a5f5;
+                        margin-right: 8px; vertical-align: middle;"></span>
+            <span>SEMANTIC_SIM</span>
+        </div>
+    </div>
+    """
+
+    # Save
     net.save_graph(output_path)
+
+    # Inject legend into HTML
+    with open(output_path, 'r', encoding='utf-8') as f:
+        html_content = f.read()
+
+    # Insert legend just before </body>
+    html_content = html_content.replace('</body>', f'{legend_html}</body>')
+
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(html_content)
+
     print(f"\nVisualization saved to: {output_path}")
 
 
@@ -418,12 +617,12 @@ def main():
         analyze_graph_stats(args.graph, args.use_postgres, db_config)
 
     elif args.mode == "full":
-        output = args.output or "graph_full.html"
-        visualize_full_graph(args.graph, output, args.max_nodes, args.use_postgres, db_config)
+        # Pass None if output not specified - will auto-generate with timestamp
+        visualize_full_graph(args.graph, args.output, args.max_nodes, args.use_postgres, db_config)
 
     elif args.mode == "entity":
-        output = args.output or f"graph_entity_{args.entity}.html"
-        visualize_entity_subgraph(args.entity, output, 50, args.graph, args.use_postgres, db_config)
+        # Pass None if output not specified - will auto-generate with timestamp
+        visualize_entity_subgraph(args.entity, args.output, 50, args.graph, args.use_postgres, db_config)
 
 
 if __name__ == "__main__":

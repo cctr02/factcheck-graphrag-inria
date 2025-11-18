@@ -110,12 +110,6 @@ def main():
         default="postgres",
         help="PostgreSQL password"
     )
-    parser.add_argument(
-        "--use-postgres",
-        action="store_true",
-        help="Save to PostgreSQL instead of pickle file"
-    )
-
     args = parser.parse_args()
 
     # Load configuration
@@ -164,6 +158,7 @@ def main():
         entity_types=config.graph_construction.entity_types,
         co_occur_threshold=config.graph_construction.co_occurrence_threshold,
         semantic_sim_threshold=config.graph_construction.semantic_similarity_threshold,
+        topic_prob_threshold=config.graph_construction.topic_probability_threshold,
         logger=logger
     )
 
@@ -191,10 +186,30 @@ def main():
         edge_type = data.get('type', 'unknown')
         edge_type_counts[edge_type] = edge_type_counts.get(edge_type, 0) + 1
 
-    # Create metadata
+    # DUAL STORAGE: Save to BOTH pickle and PostgreSQL
+    logger.info("Saving graph to BOTH pickle and PostgreSQL...")
+
+    # 1. Save graph as pickle in outputs/graphs
+    graph_filename = f"graph_{timestamp}.gpickle"
+    pickle_path = graphs_dir / graph_filename
+
+    with open(pickle_path, 'wb') as f:
+        pickle.dump(graph, f)
+    logger.info(f"Graph (pickle) saved to: {pickle_path}")
+
+    # 2. Save topic model in outputs/graphs
+    topic_model_filename = f"topic_model_{timestamp}.pkl"
+    topic_model_path = graphs_dir / topic_model_filename
+    with open(topic_model_path, 'wb') as f:
+        pickle.dump(builder.topic_model, f)
+    logger.info(f"Topic model saved to: {topic_model_path}")
+
+    # 3. Create metadata
     metadata = {
         "timestamp": timestamp,
         "created_at": datetime.now().isoformat(),
+        "pickle_path": str(pickle_path),
+        "topic_model_path": str(topic_model_path),
         "max_documents": args.max_docs,
         "chunk_size": args.chunk_size,
         "chunk_overlap": args.chunk_overlap,
@@ -205,55 +220,29 @@ def main():
         "edge_types": edge_type_counts
     }
 
-    if args.use_postgres:
-        # Create database with timestamp
-        db_name = f"{args.db_name}_{timestamp}"
-        logger.info(f"Creating PostgreSQL database: {db_name}")
-
-        # Save to PostgreSQL
+    # 4. Save to PostgreSQL with timestamped tables (optional - continues if fails)
+    try:
+        logger.info(f"Saving to PostgreSQL with graph_id: {timestamp}")
         builder.save_to_postgres(
+            graph_id=timestamp,
             host=args.db_host,
             port=args.db_port,
-            database=db_name,
+            database=args.db_name,
             user=args.db_user,
             password=args.db_password,
-            clear_existing=True
+            metadata=metadata
         )
-
-        metadata["storage_type"] = "postgresql"
-        metadata["database_name"] = db_name
-        metadata["database_host"] = args.db_host
-
-        # Save topic model in models directory
-        models_dir = Path(config.paths.models_dir)
-        models_dir.mkdir(parents=True, exist_ok=True)
-        topic_model_path = models_dir / f"topic_model_{timestamp}.pkl"
-        with open(topic_model_path, 'wb') as f:
-            pickle.dump(builder.topic_model, f)
-        logger.info(f"Topic model saved to: {topic_model_path}")
-        metadata["topic_model_path"] = str(topic_model_path)
-
-    else:
-        # Save graph as pickle in outputs/graphs
-        graph_filename = f"graph_{timestamp}.gpickle"
-        output_path = graphs_dir / graph_filename
-
-        with open(output_path, 'wb') as f:
-            pickle.dump(graph, f)
-        logger.info(f"Graph saved to: {output_path}")
-
+        logger.info(f"Graph (PostgreSQL) saved successfully with graph_id: {timestamp}")
+        metadata["storage_type"] = "dual"
+        metadata["postgres_database"] = args.db_name
+        metadata["postgres_host"] = args.db_host
+        metadata["postgres_graph_id"] = timestamp
+    except Exception as e:
+        logger.warning(f"Failed to save to PostgreSQL: {e}")
+        logger.warning("Continuing with pickle-only storage...")
         metadata["storage_type"] = "pickle"
-        metadata["graph_path"] = str(output_path)
 
-        # Save topic model with same timestamp
-        topic_model_filename = f"topic_model_{timestamp}.pkl"
-        topic_model_path = graphs_dir / topic_model_filename
-        with open(topic_model_path, 'wb') as f:
-            pickle.dump(builder.topic_model, f)
-        logger.info(f"Topic model saved to: {topic_model_path}")
-        metadata["topic_model_path"] = str(topic_model_path)
-
-    # Save metadata
+    # 5. Save metadata to JSON file
     metadata_path = graphs_dir / f"metadata_{timestamp}.json"
     with open(metadata_path, 'w') as f:
         json.dump(metadata, indent=2, fp=f)

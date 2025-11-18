@@ -206,8 +206,12 @@ def visualize(mode, entity, max_nodes, output, use_postgres, graph_file):
               help=f'Weight for thematic score (default: {config.retrieval.beta})')
 @click.option('--gamma', type=float, default=None,
               help=f'Weight for entity score (default: {config.retrieval.gamma})')
+@click.option('--delta', type=float, default=None,
+              help=f'Weight for topic distribution score (default: {config.retrieval.delta})')
 @click.option('--top-k', type=int, default=None,
               help=f'Number of results (default: {config.retrieval.top_k})')
+@click.option('--graph-id', type=str, default=None,
+              help='Graph ID (timestamp) to use (e.g., 20251117_213022). If not specified, uses latest or default.')
 @click.option('--use-postgres', is_flag=True,
               help='Load graph from PostgreSQL')
 @click.option('--test', is_flag=True,
@@ -216,7 +220,7 @@ def visualize(mode, entity, max_nodes, output, use_postgres, graph_file):
               help='Number of top results to display in detail (default: 5)')
 @click.option('--save-results/--no-save-results', default=True,
               help='Save results to files (default: True)')
-def retrieve(claim, alpha, beta, gamma, top_k, use_postgres, test, top_n, save_results):
+def retrieve(claim, alpha, beta, gamma, delta, top_k, graph_id, use_postgres, test, top_n, save_results):
     """Retrieve relevant chunks for a fact-checking claim with detailed scoring."""
     import pickle
     import spacy
@@ -233,6 +237,7 @@ def retrieve(claim, alpha, beta, gamma, top_k, use_postgres, test, top_n, save_r
     alpha = alpha or config.retrieval.alpha
     beta = beta or config.retrieval.beta
     gamma = gamma or config.retrieval.gamma
+    delta = delta or config.retrieval.delta
     top_k = top_k or config.retrieval.top_k
 
     # Get claims
@@ -254,6 +259,7 @@ def retrieve(claim, alpha, beta, gamma, top_k, use_postgres, test, top_n, save_r
                 database=config.database.database,
                 user=config.database.user,
                 password=config.database.password,
+                graph_id=graph_id,  # Use specified graph_id
                 logger=logger
             )
             try:
@@ -261,18 +267,31 @@ def retrieve(claim, alpha, beta, gamma, top_k, use_postgres, test, top_n, save_r
                 graph = db.load_graph()
             finally:
                 db.disconnect()
-            logger.info(f"Graph loaded from PostgreSQL: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
 
-            # Load topic model
-            topic_model_path = Path("fact_check_kg/topic_model.pkl")
+            graph_id_str = f" (graph_id: {graph_id})" if graph_id else ""
+            logger.info(f"Graph loaded from PostgreSQL{graph_id_str}: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
+
+            # Load topic model with graph_id if specified
+            if graph_id:
+                topic_model_path = Path(f"{config.paths.graphs_dir}/topic_model_{graph_id}.pkl")
+            else:
+                topic_model_path = Path(f"{config.paths.graphs_dir}/topic_model.pkl")
+
             with open(topic_model_path, 'rb') as f:
                 topic_model = pickle.load(f)
         else:
-            # Try multiple locations for the graph file
-            possible_paths = [
-                Path("fact_check_kg/knowledge_graph.gpickle"),  # Default build location
-                Path(f"{config.paths.graphs_dir}/knowledge_graph.gpickle"),  # Config location
-            ]
+            # Build list of possible paths based on graph_id
+            if graph_id:
+                # If graph_id is specified, look for that specific graph
+                possible_paths = [
+                    Path(f"{config.paths.graphs_dir}/graph_{graph_id}.gpickle"),
+                ]
+            else:
+                # Try default names
+                possible_paths = [
+                    Path(f"{config.paths.graphs_dir}/knowledge_graph.gpickle"),  # Default name
+                    Path("fact_check_kg/knowledge_graph.gpickle"),  # Legacy location
+                ]
 
             graph_path = None
             for path in possible_paths:
@@ -281,18 +300,26 @@ def retrieve(claim, alpha, beta, gamma, top_k, use_postgres, test, top_n, save_r
                     break
 
             if not graph_path:
-                logger.error("No graph file found. Please run 'build' command first.")
+                if graph_id:
+                    logger.error(f"Graph file not found for graph_id: {graph_id}")
+                else:
+                    logger.error("No graph file found. Please run 'build' command first or specify --graph-id.")
                 sys.exit(1)
 
             with open(graph_path, 'rb') as f:
                 graph = pickle.load(f)
             logger.info(f"Graph loaded from {graph_path}: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
 
-            # Load topic model (try both naming conventions)
-            topic_model_paths = [
-                graph_path.parent / "topic_model.pkl",  # New naming
-                graph_path.parent / "knowledge_graph_topic_model.pkl",  # Legacy naming
-            ]
+            # Load topic model with matching graph_id if available
+            if graph_id:
+                topic_model_paths = [
+                    Path(f"{config.paths.graphs_dir}/topic_model_{graph_id}.pkl"),
+                ]
+            else:
+                topic_model_paths = [
+                    graph_path.parent / "topic_model.pkl",  # Default naming
+                    graph_path.parent / "knowledge_graph_topic_model.pkl",  # Legacy naming
+                ]
 
             topic_model_path = None
             for path in topic_model_paths:
@@ -324,8 +351,11 @@ def retrieve(claim, alpha, beta, gamma, top_k, use_postgres, test, top_n, save_r
             alpha=alpha,
             beta=beta,
             gamma=gamma,
+            delta=delta,
             top_k=top_k,
             theme_threshold=config.retrieval.theme_threshold,
+            entity_relevance_threshold=config.retrieval.entity_relevance_threshold,
+            theme_relevance_threshold=config.retrieval.theme_relevance_threshold,
             logger=logger
         )
 

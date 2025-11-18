@@ -312,7 +312,7 @@ class RetrievalResultsManager:
         # Generate text report
         text_report = self._generate_text_report(formatted, rankings)
         text_path = self.results_dir / f"results_{timestamp}.txt"
-        with open(text_path, 'w') as f:
+        with open(text_path, 'w', encoding='utf-8') as f:
             f.write(text_report)
 
         self.logger.info(f"Results saved to:")

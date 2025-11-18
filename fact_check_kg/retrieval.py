@@ -5,6 +5,7 @@ This module implements a hybrid retrieval strategy combining:
 1. Semantic retrieval (embedding similarity)
 2. Thematic retrieval (via topic model and graph traversal)
 3. Entity-based retrieval (via entity extraction and graph traversal)
+4. Topic distribution retrieval (via Jensen-Shannon divergence)
 """
 
 import networkx as nx
@@ -14,6 +15,7 @@ from typing import List, Dict, Tuple, Optional, Set
 from collections import defaultdict
 from sentence_transformers import SentenceTransformer
 from bertopic import BERTopic
+from scipy.spatial.distance import jensenshannon
 import logging
 
 
@@ -21,12 +23,13 @@ class HybridRetriever:
     """
     Hybrid retrieval system for fact-checking claims.
 
-    Combines three retrieval strategies:
+    Combines four retrieval strategies:
     - Semantic: Direct embedding similarity
     - Thematic: Topic classification + graph traversal
     - Entity: Entity extraction + graph traversal (3 paths)
+    - Topic Distribution: Jensen-Shannon divergence between topic distributions
 
-    The final score is a weighted combination of all three.
+    The final score is a weighted combination of all four.
     """
 
     def __init__(
@@ -36,11 +39,14 @@ class HybridRetriever:
         embedding_model: SentenceTransformer,
         nlp: spacy.Language,
         entity_types: List[str],
-        alpha: float = 0.4,
-        beta: float = 0.3,
+        alpha: float = 0.3,
+        beta: float = 0.2,
         gamma: float = 0.3,
+        delta: float = 0.2,
         top_k: int = 10,
         theme_threshold: float = 0.1,
+        entity_relevance_threshold: float = 0.1,
+        theme_relevance_threshold: float = 0.1,
         logger: Optional[logging.Logger] = None
     ):
         """
@@ -52,11 +58,14 @@ class HybridRetriever:
             embedding_model: SentenceTransformer model
             nlp: spaCy model for entity extraction
             entity_types: List of entity types to extract
-            alpha: Weight for semantic score (default: 0.4)
-            beta: Weight for thematic score (default: 0.3)
+            alpha: Weight for semantic score (default: 0.3)
+            beta: Weight for thematic score (default: 0.2)
             gamma: Weight for entity score (default: 0.3)
+            delta: Weight for topic distribution score (default: 0.2)
             top_k: Number of chunks to return
             theme_threshold: Minimum confidence for theme detection
+            entity_relevance_threshold: Minimum relevance to continue entity traversal
+            theme_relevance_threshold: Minimum relevance to continue theme traversal
             logger: Optional logger instance
         """
         self.graph = graph
@@ -65,20 +74,24 @@ class HybridRetriever:
         self.nlp = nlp
         self.entity_types = entity_types
 
-        # Weights
+        # Weights (should sum to 1.0)
         self.alpha = alpha
         self.beta = beta
         self.gamma = gamma
+        self.delta = delta
 
         # Parameters
         self.top_k = top_k
         self.theme_threshold = theme_threshold
+        self.entity_relevance_threshold = entity_relevance_threshold
+        self.theme_relevance_threshold = theme_relevance_threshold
 
         self.logger = logger or logging.getLogger(__name__)
 
-        # Pre-compute chunk embeddings for efficiency
-        self.logger.info("Pre-computing chunk embeddings...")
+        # Pre-compute chunk embeddings and topic distributions for efficiency
+        self.logger.info("Pre-computing chunk embeddings and topic distributions...")
         self._precompute_chunk_embeddings()
+        self._precompute_chunk_topic_distributions()
 
     def _precompute_chunk_embeddings(self):
         """Pre-compute embeddings for all chunks in the graph."""
@@ -100,6 +113,23 @@ class HybridRetriever:
 
         self.logger.info(f"Pre-computed embeddings for {len(self.chunk_nodes)} chunks")
 
+    def _precompute_chunk_topic_distributions(self):
+        """Pre-compute topic probability distributions for all chunks."""
+        # Get topic distributions from BERTopic
+        _, chunk_topic_probs = self.topic_model.transform(self.chunk_texts)
+
+        # Store as numpy array for efficient computation
+        self.chunk_topic_distributions = chunk_topic_probs
+
+        # Create mapping from chunk_id to distribution index
+        self.chunk_to_dist_idx = {
+            chunk_id: idx
+            for idx, chunk_id in enumerate(self.chunk_nodes)
+        }
+
+        self.logger.info(f"Pre-computed topic distributions for {len(self.chunk_nodes)} chunks")
+        self.logger.info(f"Number of topics: {chunk_topic_probs.shape[1]}")
+
     def extract_entities(self, text: str) -> List[Tuple[str, str]]:
         """
         Extract entities from text (same as in graph_builder).
@@ -120,6 +150,133 @@ class HybridRetriever:
                     entities.append((entity_text, ent.label_))
 
         return entities
+
+    def _propagate_relevance_entities(
+        self,
+        seed_entities: List[str],
+        relevance_threshold: float
+    ) -> Dict[str, float]:
+        """
+        Propagate relevance through entity graph using BFS.
+
+        Args:
+            seed_entities: List of entity node IDs to start from
+            relevance_threshold: Minimum relevance to continue traversal
+
+        Returns:
+            Dictionary mapping entity_node to final relevance score
+        """
+        from collections import deque
+
+        # Entity relevance scores
+        entity_relevance = {}
+        for entity in seed_entities:
+            entity_relevance[entity] = 1.0  # Seed entities start with relevance 1.0
+
+        # BFS queue: (entity_node, current_relevance)
+        queue = deque([(entity, 1.0) for entity in seed_entities])
+        visited = set(seed_entities)
+
+        while queue:
+            current_entity, current_relevance = queue.popleft()
+
+            # Explore neighbors (other entities connected via CO_OCCURS or SEMANTIC_SIM)
+            for neighbor in self.graph.neighbors(current_entity):
+                if self.graph.nodes[neighbor].get('type') != 'entity':
+                    continue  # Skip non-entity nodes
+
+                edge_data = self.graph[current_entity][neighbor]
+                edge_type = edge_data.get('edge_type')
+
+                if edge_type not in ['CO_OCCURS', 'SEMANTIC_SIM']:
+                    continue  # Only traverse entity-entity edges
+
+                # Get edge weight
+                edge_weight = edge_data.get('weight', 0)
+
+                # Calculate propagated relevance
+                propagated_relevance = current_relevance * edge_weight
+
+                # Only continue if above threshold
+                if propagated_relevance < relevance_threshold:
+                    continue
+
+                # Update relevance (take maximum if entity already visited)
+                if neighbor not in entity_relevance:
+                    entity_relevance[neighbor] = propagated_relevance
+                else:
+                    entity_relevance[neighbor] = max(entity_relevance[neighbor], propagated_relevance)
+
+                # Add to queue if not visited yet
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append((neighbor, propagated_relevance))
+
+        return entity_relevance
+
+    def _propagate_relevance_themes(
+        self,
+        seed_themes: List[Tuple[str, float]],
+        relevance_threshold: float
+    ) -> Dict[str, float]:
+        """
+        Propagate relevance through theme graph using BFS.
+
+        Args:
+            seed_themes: List of (theme_node, initial_probability) tuples
+            relevance_threshold: Minimum relevance to continue traversal
+
+        Returns:
+            Dictionary mapping theme_node to final relevance score
+        """
+        from collections import deque
+
+        # Theme relevance scores
+        theme_relevance = {}
+        queue = deque()
+        visited = set()
+
+        for theme_node, initial_prob in seed_themes:
+            theme_relevance[theme_node] = initial_prob
+            queue.append((theme_node, initial_prob))
+            visited.add(theme_node)
+
+        while queue:
+            current_theme, current_relevance = queue.popleft()
+
+            # Explore neighbors (other themes connected via CO_PRESENCE or SEMANTIC_SIM)
+            for neighbor in self.graph.neighbors(current_theme):
+                if self.graph.nodes[neighbor].get('type') != 'theme':
+                    continue  # Skip non-theme nodes
+
+                edge_data = self.graph[current_theme][neighbor]
+                edge_type = edge_data.get('edge_type')
+
+                if edge_type not in ['CO_PRESENCE', 'SEMANTIC_SIM']:
+                    continue  # Only traverse theme-theme edges
+
+                # Get edge weight
+                edge_weight = edge_data.get('weight', 0)
+
+                # Calculate propagated relevance
+                propagated_relevance = current_relevance * edge_weight
+
+                # Only continue if above threshold
+                if propagated_relevance < relevance_threshold:
+                    continue
+
+                # Update relevance (take maximum if theme already visited)
+                if neighbor not in theme_relevance:
+                    theme_relevance[neighbor] = propagated_relevance
+                else:
+                    theme_relevance[neighbor] = max(theme_relevance[neighbor], propagated_relevance)
+
+                # Add to queue if not visited yet
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append((neighbor, propagated_relevance))
+
+        return theme_relevance
 
     def retrieve_semantic(self, claim: str) -> Dict[str, float]:
         """
@@ -164,7 +321,10 @@ class HybridRetriever:
 
     def retrieve_thematic(self, claim: str) -> Dict[str, float]:
         """
-        Step 2: Thematic retrieval using topic model and graph traversal.
+        Step 2: Thematic retrieval using topic model and graph traversal with relevance propagation.
+
+        Uses BFS to propagate relevance through theme graph (CO_PRESENCE, SEMANTIC_SIM edges),
+        then scores chunks based on theme relevance weighted by probabilities from HAS_TOPIC edges.
 
         Args:
             claim: Claim text to verify
@@ -189,16 +349,34 @@ class HybridRetriever:
             theme_label = self.graph.nodes.get(f"theme::{idx}", {}).get('label', f'topic_{idx}')
             self.logger.info(f"  Theme {idx} ({theme_label}): {prob:.3f}")
 
-        # Traverse graph via themes
+        # Build seed theme list with initial probabilities
+        seed_themes = []
+        for theme_id, prob in detected_themes:
+            theme_node = f"theme::{theme_id}"
+            if self.graph.has_node(theme_node):
+                seed_themes.append((theme_node, prob))
+            else:
+                self.logger.debug(f"Theme not in graph: {theme_node}")
+
+        if not seed_themes:
+            self.logger.warning("No themes from claim found in graph")
+            return {}
+
+        self.logger.info(f"Found {len(seed_themes)} seed themes in graph")
+
+        # Propagate relevance through theme graph
+        theme_relevance = self._propagate_relevance_themes(
+            seed_themes=seed_themes,
+            relevance_threshold=self.theme_relevance_threshold
+        )
+
+        self.logger.info(f"Relevance propagated to {len(theme_relevance)} themes")
+
+        # Score chunks based on theme relevance and HAS_TOPIC edge weights (probabilities)
         scores = defaultdict(float)
 
-        for theme_id, confidence_claim in detected_themes:
-            theme_node = f"theme::{theme_id}"
-
-            if not self.graph.has_node(theme_node):
-                continue
-
-            # Find chunks connected to this theme
+        for theme_node, relevance in theme_relevance.items():
+            # Find chunks connected via HAS_TOPIC edges
             for neighbor in self.graph.neighbors(theme_node):
                 edge_data = self.graph[theme_node][neighbor]
 
@@ -206,13 +384,14 @@ class HybridRetriever:
                 if (edge_data.get('edge_type') == 'HAS_TOPIC' and
                     self.graph.nodes[neighbor].get('type') == 'chunk'):
 
-                    prob_chunk = edge_data['weight']
+                    # Get probability weight from HAS_TOPIC edge
+                    prob_weight = edge_data.get('weight', 0.0)
 
-                    # Score = confidence in claim × probability in chunk
-                    score = confidence_claim * prob_chunk
+                    # Chunk score = theme relevance × HAS_TOPIC probability
+                    chunk_score = relevance * prob_weight
 
-                    # Accumulate (if chunk has multiple matching themes)
-                    scores[neighbor] += score
+                    # Accumulate scores (chunks can be associated with multiple themes)
+                    scores[neighbor] += chunk_score
 
         # Normalize scores
         if scores:
@@ -232,11 +411,10 @@ class HybridRetriever:
 
     def retrieve_entity(self, claim: str) -> Dict[str, float]:
         """
-        Step 3: Entity-based retrieval using graph traversal.
+        Step 3: Entity-based retrieval using graph traversal with relevance propagation.
 
-        Two paths:
-        - Direct: entity → MENTIONS → chunk (score = 1.0)
-        - Co-occurrence: entity → CO_OCCURS → entity2 → MENTIONS → chunk (score = w * 0.8)
+        Uses BFS to propagate relevance through entity graph (CO_OCCURS, SEMANTIC_SIM edges),
+        then scores chunks based on entity relevance weighted by TF-IDF from MENTIONS edges.
 
         Args:
             claim: Claim text to verify
@@ -253,50 +431,48 @@ class HybridRetriever:
         for ent_text, ent_type in entities_claim:
             self.logger.info(f"  {ent_type}: {ent_text}")
 
-        scores = defaultdict(float)
-
-        # Get max co-occur weight for normalization
-        max_co_occur = 1
-        for u, v, d in self.graph.edges(data=True):
-            if d.get('edge_type') == 'CO_OCCURS':
-                max_co_occur = max(max_co_occur, d.get('weight', 1))
-
+        # Build seed entity list (only entities present in graph)
+        seed_entities = []
         for entity_text, entity_type in entities_claim:
             entity_node = f"entity::{entity_type}::{entity_text}"
-
-            if not self.graph.has_node(entity_node):
+            if self.graph.has_node(entity_node):
+                seed_entities.append(entity_node)
+            else:
                 self.logger.debug(f"Entity not in graph: {entity_node}")
-                continue
 
-            # PATH 1: Direct (entity → MENTIONS → chunk)
+        if not seed_entities:
+            self.logger.warning("No entities from claim found in graph")
+            return {}
+
+        self.logger.info(f"Found {len(seed_entities)} seed entities in graph")
+
+        # Propagate relevance through entity graph
+        entity_relevance = self._propagate_relevance_entities(
+            seed_entities=seed_entities,
+            relevance_threshold=self.entity_relevance_threshold
+        )
+
+        self.logger.info(f"Relevance propagated to {len(entity_relevance)} entities")
+
+        # Score chunks based on entity relevance and MENTIONS edge weights (TF-IDF)
+        scores = defaultdict(float)
+
+        for entity_node, relevance in entity_relevance.items():
+            # Find chunks connected via MENTIONS edges
             for neighbor in self.graph.neighbors(entity_node):
                 edge_data = self.graph[entity_node][neighbor]
 
                 if (edge_data.get('edge_type') == 'MENTIONS' and
                     self.graph.nodes[neighbor].get('type') == 'chunk'):
 
-                    # Direct match: maximum score
-                    scores[neighbor] = max(scores[neighbor], 1.0)
+                    # Get TF-IDF weight from MENTIONS edge
+                    tf_idf_weight = edge_data.get('weight', 1.0)
 
-            # PATH 2: Via co-occurrence (entity → CO_OCCURS → entity2 → MENTIONS → chunk)
-            for co_entity in self.graph.neighbors(entity_node):
-                edge_data = self.graph[entity_node][co_entity]
+                    # Chunk score = entity relevance × TF-IDF weight
+                    chunk_score = relevance * tf_idf_weight
 
-                if (edge_data.get('edge_type') == 'CO_OCCURS' and
-                    self.graph.nodes[co_entity].get('type') == 'entity'):
-
-                    weight_co = edge_data.get('weight', 1)
-
-                    # Find chunks mentioning co-entity
-                    for chunk in self.graph.neighbors(co_entity):
-                        edge_data2 = self.graph[co_entity][chunk]
-
-                        if (edge_data2.get('edge_type') == 'MENTIONS' and
-                            self.graph.nodes[chunk].get('type') == 'chunk'):
-
-                            # Score with penalty for 2-hop path
-                            score = (weight_co / max_co_occur) * 0.8
-                            scores[chunk] = max(scores[chunk], score)
+                    # Accumulate scores (chunks can be mentioned by multiple entities)
+                    scores[neighbor] += chunk_score
 
         # Normalize scores
         if scores:
@@ -314,9 +490,70 @@ class HybridRetriever:
 
         return dict(scores)
 
+    def retrieve_topic_distribution(self, claim: str) -> Dict[str, float]:
+        """
+        Step 4: Topic distribution similarity using Jensen-Shannon divergence.
+
+        Compares the topic probability distribution of the claim with each chunk's
+        topic distribution. Uses Jensen-Shannon divergence (symmetric, bounded [0,1]).
+
+        Args:
+            claim: Claim text to verify
+
+        Returns:
+            Dictionary mapping chunk_id to distribution similarity score (normalized)
+        """
+        self.logger.info("\n--- Step 4: Topic Distribution Retrieval ---")
+
+        # Get topic distribution for claim
+        _, claim_topic_probs = self.topic_model.transform([claim])
+        claim_distribution = claim_topic_probs[0]
+
+        self.logger.info(f"Claim topic distribution shape: {claim_distribution.shape}")
+
+        # Show top topics in claim
+        top_topics = np.argsort(claim_distribution)[-5:][::-1]
+        self.logger.info("Top 5 topics in claim:")
+        for topic_id in top_topics:
+            if claim_distribution[topic_id] > 0.01:
+                theme_label = self.graph.nodes.get(f"theme::{topic_id}", {}).get('label', f'topic_{topic_id}')
+                self.logger.info(f"  Topic {topic_id} ({theme_label}): {claim_distribution[topic_id]:.3f}")
+
+        # Compute Jensen-Shannon divergence for each chunk
+        scores = {}
+        for chunk_id, dist_idx in self.chunk_to_dist_idx.items():
+            chunk_distribution = self.chunk_topic_distributions[dist_idx]
+
+            # Jensen-Shannon divergence (returns value in [0, 1])
+            # Lower divergence = more similar distributions
+            js_divergence = jensenshannon(claim_distribution, chunk_distribution)
+
+            # Convert to similarity score (1 - divergence)
+            # So higher score = more similar
+            similarity = 1.0 - js_divergence
+
+            scores[chunk_id] = float(similarity)
+
+        # Normalize scores (min-max normalization)
+        if scores:
+            min_score = min(scores.values())
+            max_score = max(scores.values())
+            if max_score > min_score:
+                scores = {
+                    k: (v - min_score) / (max_score - min_score)
+                    for k, v in scores.items()
+                }
+
+        self.logger.info(f"Found {len(scores)} chunks with topic distribution scores")
+        if scores:
+            self.logger.info(f"Top score: {max(scores.values()):.3f}")
+            self.logger.info(f"Mean score: {np.mean(list(scores.values())):.3f}")
+
+        return scores
+
     def retrieve(self, claim: str) -> List[Dict]:
         """
-        Hybrid retrieval: combine all three strategies.
+        Hybrid retrieval: combine all four strategies.
 
         Args:
             claim: Claim text to verify
@@ -330,6 +567,7 @@ class HybridRetriever:
             - score_sem: float (semantic score)
             - score_theme: float (thematic score)
             - score_entity: float (entity score)
+            - score_topic_dist: float (topic distribution score)
         """
         self.logger.info("\n" + "=" * 60)
         self.logger.info(f"RETRIEVAL FOR CLAIM: {claim}")
@@ -344,24 +582,29 @@ class HybridRetriever:
         # Step 3: Entity retrieval
         S3 = self.retrieve_entity(claim)
 
+        # Step 4: Topic distribution retrieval
+        S4 = self.retrieve_topic_distribution(claim)
+
         # Fusion: combine scores
-        all_chunks = set(S1.keys()) | set(S2.keys()) | set(S3.keys())
+        all_chunks = set(S1.keys()) | set(S2.keys()) | set(S3.keys()) | set(S4.keys())
 
         self.logger.info("\n--- Fusion ---")
         self.logger.info(f"Total unique chunks: {len(all_chunks)}")
-        self.logger.info(f"Weights: alpha={self.alpha}, beta={self.beta}, gamma={self.gamma}")
+        self.logger.info(f"Weights: alpha={self.alpha}, beta={self.beta}, gamma={self.gamma}, delta={self.delta}")
 
         results = []
         for chunk_id in all_chunks:
             score_sem = S1.get(chunk_id, 0)
             score_theme = S2.get(chunk_id, 0)
             score_entity = S3.get(chunk_id, 0)
+            score_topic_dist = S4.get(chunk_id, 0)
 
             # Final weighted score
             final_score = (
                 self.alpha * score_sem +
                 self.beta * score_theme +
-                self.gamma * score_entity
+                self.gamma * score_entity +
+                self.delta * score_topic_dist
             )
 
             # Get document ID
@@ -375,7 +618,8 @@ class HybridRetriever:
                 'score_total': final_score,
                 'score_sem': score_sem,
                 'score_theme': score_theme,
-                'score_entity': score_entity
+                'score_entity': score_entity,
+                'score_topic_dist': score_topic_dist
             })
 
         # Sort by total score
@@ -391,8 +635,17 @@ class HybridRetriever:
                 f"Total: {result['score_total']:.3f} | "
                 f"Sem: {result['score_sem']:.3f} | "
                 f"Theme: {result['score_theme']:.3f} | "
-                f"Entity: {result['score_entity']:.3f}"
+                f"Entity: {result['score_entity']:.3f} | "
+                f"TopicDist: {result['score_topic_dist']:.3f}"
             )
+
+        # Display text previews of top 3 results
+        self.logger.info("\nText previews of top 3 results:")
+        for i, result in enumerate(top_results[:3], 1):
+            text_preview = result['text'][:150].replace('\n', ' ')
+            if len(result['text']) > 150:
+                text_preview += "..."
+            self.logger.info(f"{i}. [{result['chunk_id']}] {text_preview}")
 
         self.logger.info("=" * 60)
 

@@ -79,14 +79,41 @@ def load_graph_by_id(graph_id: str) -> Tuple[object, object, Dict]:
         metadata = json.load(f)
 
     # Load based on storage type
-    if metadata["storage_type"] == "postgresql":
-        # Load from PostgreSQL
+    storage_type = metadata["storage_type"]
+
+    if storage_type == "dual":
+        # Dual storage: prefer pickle for faster loading, fallback to PostgreSQL
+        try:
+            # Try loading from pickle first (faster)
+            pickle_path = Path(metadata["pickle_path"])
+            with open(pickle_path, 'rb') as f:
+                graph = pickle.load(f)
+        except Exception as e:
+            logging.warning(f"Could not load from pickle, trying PostgreSQL: {e}")
+            # Fallback to PostgreSQL
+            from fact_check_kg.db_connector import GraphDatabaseConnector
+
+            db = GraphDatabaseConnector(
+                host=metadata["postgres_host"],
+                port=config.database.port,
+                database=metadata["postgres_database"],
+                user=config.database.user,
+                password=config.database.password
+            )
+            try:
+                db.connect()
+                graph = db.load_graph()
+            finally:
+                db.disconnect()
+
+    elif storage_type == "postgresql":
+        # Load from PostgreSQL only
         from fact_check_kg.db_connector import GraphDatabaseConnector
 
         db = GraphDatabaseConnector(
-            host=metadata["database_host"],
+            host=metadata.get("database_host", metadata.get("postgres_host")),
             port=config.database.port,
-            database=metadata["database_name"],
+            database=metadata.get("database_name", metadata.get("postgres_database")),
             user=config.database.user,
             password=config.database.password
         )
@@ -97,21 +124,16 @@ def load_graph_by_id(graph_id: str) -> Tuple[object, object, Dict]:
         finally:
             db.disconnect()
 
-        # Load topic model
-        topic_model_path = Path(metadata["topic_model_path"])
-        with open(topic_model_path, 'rb') as f:
-            topic_model = pickle.load(f)
-
     else:  # pickle
-        # Load graph from pickle
-        graph_path = Path(metadata["graph_path"])
+        # Load graph from pickle only
+        graph_path = Path(metadata.get("graph_path", metadata.get("pickle_path")))
         with open(graph_path, 'rb') as f:
             graph = pickle.load(f)
 
-        # Load topic model
-        topic_model_path = Path(metadata["topic_model_path"])
-        with open(topic_model_path, 'rb') as f:
-            topic_model = pickle.load(f)
+    # Load topic model (same for all storage types)
+    topic_model_path = Path(metadata["topic_model_path"])
+    with open(topic_model_path, 'rb') as f:
+        topic_model = pickle.load(f)
 
     return graph, topic_model, metadata
 
@@ -135,10 +157,13 @@ def display_available_graphs():
         print(f"   Documents: {graph['num_documents']}, Chunks: {graph['num_chunks']}")
         print(f"   Nodes: {graph['num_nodes']}, Edges: {graph['num_edges']}")
 
-        if graph['storage_type'] == 'postgresql':
-            print(f"   Database: {graph['database_name']}")
+        if graph['storage_type'] == 'dual':
+            print(f"   Pickle: {Path(graph['pickle_path']).name}")
+            print(f"   PostgreSQL: {graph['postgres_database']}")
+        elif graph['storage_type'] == 'postgresql':
+            print(f"   Database: {graph.get('database_name', graph.get('postgres_database'))}")
         else:
-            print(f"   File: {Path(graph['graph_path']).name}")
+            print(f"   File: {Path(graph.get('graph_path', graph.get('pickle_path'))).name}")
 
     print("\n" + "=" * 80)
     print(f"\nTotal: {len(graphs)} graph(s)")

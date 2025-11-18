@@ -46,6 +46,7 @@ class KnowledgeGraphBuilder:
         entity_types: List[str] = None,
         co_occur_threshold: int = 2,
         semantic_sim_threshold: float = 0.6,
+        topic_prob_threshold: float = 0.15,
         logger: Optional[logging.Logger] = None
     ):
         """
@@ -57,6 +58,7 @@ class KnowledgeGraphBuilder:
             entity_types: List of entity types to extract (PERSON, ORG, etc.)
             co_occur_threshold: Minimum co-occurrences to create edge
             semantic_sim_threshold: Minimum similarity to create edge
+            topic_prob_threshold: Minimum probability to create HAS_TOPIC edge
             logger: Optional logger instance
         """
         self.logger = logger or logging.getLogger(__name__)
@@ -72,6 +74,7 @@ class KnowledgeGraphBuilder:
         self.entity_types = entity_types or ['PERSON', 'ORG', 'GPE', 'LOC', 'DATE', 'EVENT', 'NORP']
         self.co_occur_threshold = co_occur_threshold
         self.semantic_sim_threshold = semantic_sim_threshold
+        self.topic_prob_threshold = topic_prob_threshold
 
         # Graph
         self.graph = nx.Graph()
@@ -288,6 +291,14 @@ Topic label:"""
         self.logger.info("\nStep 6: Adding SEMANTIC_SIM edges (Entity ↔ Entity)...")
         self._add_entity_semantic_similarity()
 
+        # Step 7: Add SEMANTIC_SIM edges (Theme ↔ Theme)
+        self.logger.info("\nStep 7: Adding SEMANTIC_SIM edges (Theme ↔ Theme)...")
+        self._add_theme_semantic_similarity(topic_model)
+
+        # Step 8: Add CO_PRESENCE edges (Theme ↔ Theme)
+        self.logger.info("\nStep 8: Adding CO_PRESENCE edges (Theme ↔ Theme)...")
+        self._add_theme_co_presence(chunk_ids)
+
         # Log statistics and save detailed reports
         self._log_graph_statistics()
         self._save_statistics_reports(topic_model, topics, chunks)
@@ -338,7 +349,8 @@ Topic label:"""
         if -1 in unique_topics:
             unique_topics.remove(-1)
 
-        for topic_id in unique_topics:
+        # Step 1: Create theme nodes
+        for topic_id in tqdm(unique_topics, desc="Creating theme nodes", disable=self.logger.level > logging.INFO):
             # Get topic words
             topic_words = topic_model.get_topic(topic_id)
 
@@ -358,85 +370,184 @@ Topic label:"""
                 keywords=[w for w, s in topic_words[:10]]
             )
 
-        # Add HAS_TOPIC edges
-        for idx, (chunk_id, topic_id) in enumerate(zip(chunk_ids, topics)):
-            if topic_id == -1:  # Skip outliers
+        # Step 2: Add HAS_TOPIC edges for all topics above threshold
+        edges_added = 0
+        for idx, chunk_id in enumerate(tqdm(chunk_ids, desc="Adding HAS_TOPIC edges", disable=self.logger.level > logging.INFO)):
+            # For each chunk, check ALL topics
+            if probabilities.ndim > 1:
+                # probabilities shape: (n_chunks, n_topics)
+                chunk_probs = probabilities[idx]
+            else:
+                # If only 1D array, skip (shouldn't happen with calculate_probabilities=True)
                 continue
 
-            theme_node = f"theme::{topic_id}"
+            # Iterate through all topics
+            for topic_id in unique_topics:
+                # Get probability for this chunk-topic pair
+                prob = chunk_probs[topic_id]
 
-            # Get probability for this chunk-topic pair
-            prob = probabilities[idx, topic_id] if probabilities.ndim > 1 else probabilities[idx]
+                # Only create edge if probability is above threshold
+                if prob >= self.topic_prob_threshold:
+                    theme_node = f"theme::{topic_id}"
 
-            # Add edge with probability weight
-            self.graph.add_edge(
-                chunk_id,
-                theme_node,
-                edge_type="HAS_TOPIC",
-                weight=float(prob)
-            )
+                    # Add edge with probability weight
+                    self.graph.add_edge(
+                        chunk_id,
+                        theme_node,
+                        edge_type="HAS_TOPIC",
+                        weight=float(prob)
+                    )
+                    edges_added += 1
+
+        self.logger.info(f"Added {edges_added} HAS_TOPIC edges (threshold: {self.topic_prob_threshold})")
 
     def _add_entities_and_mentions(self, chunks: List[Dict]) -> Dict[str, Set[str]]:
         """
-        Extract entities and add MENTIONS edges.
+        Extract entities and add MENTIONS edges with TF-IDF weights.
 
         Returns:
             Dictionary mapping chunk_id to set of entity nodes
         """
         chunk_to_entities = defaultdict(set)
+        # Track entity mentions: {entity_node: {chunk_id: count}}
+        entity_mentions_in_chunks = defaultdict(lambda: defaultdict(int))
 
-        for chunk in chunks:
+        # Step 1: Extract all entities and count term frequency (TF)
+        for chunk in tqdm(chunks, desc="Extracting entities", disable=self.logger.level > logging.INFO):
             chunk_id = chunk['chunk_id']
             text = chunk['text']
 
             # Extract entities
             entities = self.extract_entities(text)
 
+            # Count entity occurrences in this chunk (for TF)
+            entity_counts = defaultdict(int)
             for entity_text, entity_type in entities:
                 entity_node = f"entity::{entity_type}::{entity_text}"
+                entity_counts[entity_node] += 1
+                chunk_to_entities[chunk_id].add(entity_node)
 
-                # Add entity node (if not exists)
-                if not self.graph.has_node(entity_node):
-                    self.graph.add_node(
-                        entity_node,
-                        type="entity",
-                        entity_type=entity_type,
-                        entity_text=entity_text
-                    )
+            # Store counts
+            for entity_node, count in entity_counts.items():
+                entity_mentions_in_chunks[entity_node][chunk_id] = count
 
-                # Add MENTIONS edge
+        # Step 2: Calculate IDF (Inverse Document Frequency)
+        total_chunks = len(chunks)
+        entity_idf = {}
+
+        for entity_node, chunks_with_entity in entity_mentions_in_chunks.items():
+            # IDF = log(total_chunks / number of chunks containing this entity)
+            idf = np.log(total_chunks / len(chunks_with_entity))
+            entity_idf[entity_node] = idf
+
+        # Step 3: Add entity nodes and MENTIONS edges with TF-IDF weights
+        for entity_node in tqdm(entity_mentions_in_chunks.keys(), desc="Adding entities and MENTIONS edges", disable=self.logger.level > logging.INFO):
+            # Extract entity info from node name
+            parts = entity_node.split("::")
+            entity_type = parts[1]
+            entity_text = "::".join(parts[2:])  # Handle entity text with "::"
+
+            # Add entity node (if not exists)
+            if not self.graph.has_node(entity_node):
+                self.graph.add_node(
+                    entity_node,
+                    type="entity",
+                    entity_type=entity_type,
+                    entity_text=entity_text
+                )
+
+            # Add MENTIONS edges with TF-IDF weight
+            idf = entity_idf[entity_node]
+            for chunk_id, tf in entity_mentions_in_chunks[entity_node].items():
+                # TF-IDF = TF * IDF
+                tf_idf = tf * idf
+
                 self.graph.add_edge(
                     chunk_id,
                     entity_node,
-                    edge_type="MENTIONS"
+                    edge_type="MENTIONS",
+                    weight=float(tf_idf),
+                    tf=int(tf),
+                    idf=float(idf)
                 )
-
-                # Track for later processing
-                chunk_to_entities[chunk_id].add(entity_node)
 
         return chunk_to_entities
 
     def _add_entity_co_occurrences(self, chunk_to_entities: Dict[str, Set[str]]):
-        """Add CO_OCCURS edges between entities."""
-        co_occur_counter = Counter()
+        """
+        Add CO_OCCURS edges between entities with sophisticated weighting.
 
-        # Count co-occurrences
+        Weight calculation:
+        - Raw co-occurrence count (higher = stronger relationship)
+        - Normalized by entity global frequencies to penalize omnipresent entities
+        - Formula: weight = co_occur_count * (1 / sqrt(freq(e1) * freq(e2)))
+
+        This ensures:
+        - Frequent co-occurrences get high weights
+        - But entities that appear everywhere get penalized
+        """
+        co_occur_counter = Counter()
+        entity_document_frequency = Counter()
+
+        # Step 1: Count co-occurrences and entity frequencies across documents
+        doc_to_entities = defaultdict(set)
+
+        # Group chunks by document
         for chunk_id, entities in chunk_to_entities.items():
+            # Extract doc_id from chunk_id (format: "chunk::doc_id::chunk_idx")
+            doc_id = chunk_id.split("::")[1]
+            doc_to_entities[doc_id].update(entities)
+
+        # Count entity frequencies at document level
+        for doc_id, entities in doc_to_entities.items():
+            for entity in entities:
+                entity_document_frequency[entity] += 1
+
+        # Count co-occurrences at document level (not chunk level)
+        for doc_id, entities in tqdm(doc_to_entities.items(), desc="Counting entity co-occurrences by document", disable=self.logger.level > logging.INFO):
             entities_list = list(entities)
             for i in range(len(entities_list)):
                 for j in range(i + 1, len(entities_list)):
                     pair = tuple(sorted([entities_list[i], entities_list[j]]))
                     co_occur_counter[pair] += 1
 
-        # Add edges above threshold
-        for (entity1, entity2), count in co_occur_counter.items():
-            if count >= self.co_occur_threshold:
+        # Step 2: Calculate weights
+        if not co_occur_counter:
+            self.logger.warning("No entity co-occurrences found")
+            return
+
+        max_co_occur = max(co_occur_counter.values())
+
+        # Add edges above threshold with weighted score
+        edges_added = 0
+        for (entity1, entity2), co_occur_count in tqdm(co_occur_counter.items(), desc="Adding CO_OCCURS edges", disable=self.logger.level > logging.INFO):
+            if co_occur_count >= self.co_occur_threshold:
+                # Entity frequencies (number of documents they appear in)
+                freq1 = entity_document_frequency[entity1]
+                freq2 = entity_document_frequency[entity2]
+
+                # Inverse frequency weight (penalize entities that appear everywhere)
+                # Using sqrt to soften the penalty
+                inv_freq_weight = 1.0 / np.sqrt(freq1 * freq2)
+
+                # Final weight: co-occurrence count weighted by entity rarity
+                # High co-occurrence = high weight
+                # But penalized if entities appear in too many documents
+                weight = co_occur_count * inv_freq_weight
+
                 self.graph.add_edge(
                     entity1,
                     entity2,
                     edge_type="CO_OCCURS",
-                    weight=count
+                    weight=float(weight),
+                    co_occur_count=int(co_occur_count),
+                    entity1_freq=int(freq1),
+                    entity2_freq=int(freq2),
+                    inv_freq_weight=float(inv_freq_weight)
                 )
+                edges_added += 1
+
+        self.logger.info(f"Added {edges_added} CO_OCCURS edges (threshold: {self.co_occur_threshold}, max_co_occur: {max_co_occur})")
 
     def _add_entity_semantic_similarity(self):
         """Add SEMANTIC_SIM edges between entities based on embeddings."""
@@ -469,7 +580,7 @@ Topic label:"""
 
         # Add edges above threshold
         edge_count = 0
-        for i in range(len(entity_nodes)):
+        for i in tqdm(range(len(entity_nodes)), desc="Adding SEMANTIC_SIM edges", disable=self.logger.level > logging.INFO):
             for j in range(i + 1, len(entity_nodes)):
                 sim = similarity_matrix[i, j]
                 if sim >= self.semantic_sim_threshold:
@@ -481,7 +592,128 @@ Topic label:"""
                     )
                     edge_count += 1
 
-        self.logger.info(f"Added {edge_count} SEMANTIC_SIM edges")
+        self.logger.info(f"Added {edge_count} SEMANTIC_SIM edges (threshold: {self.semantic_sim_threshold})")
+
+    def _add_theme_semantic_similarity(self, topic_model: BERTopic):
+        """Add SEMANTIC_SIM edges between themes based on topic word embeddings."""
+        # Get all theme nodes
+        theme_nodes = [
+            n for n, d in self.graph.nodes(data=True)
+            if d.get('type') == 'theme'
+        ]
+
+        if len(theme_nodes) < 2:
+            self.logger.warning("Less than 2 themes, skipping theme similarity")
+            return
+
+        # For each theme, create a representation from top keywords
+        theme_representations = []
+        for theme_node in theme_nodes:
+            topic_id = self.graph.nodes[theme_node]['topic_id']
+            topic_words = topic_model.get_topic(topic_id)
+
+            if not topic_words:
+                # Fallback: use label
+                theme_representations.append(self.graph.nodes[theme_node].get('label', ''))
+            else:
+                # Concatenate top 5 keywords
+                keywords = [word for word, _ in topic_words[:5]]
+                theme_representations.append(' '.join(keywords))
+
+        # Embed theme representations
+        self.logger.info(f"Embedding {len(theme_representations)} themes...")
+        theme_embeddings = self.embedding_model.encode(
+            theme_representations,
+            show_progress_bar=False,
+            normalize_embeddings=True
+        )
+
+        # Compute similarity matrix
+        similarity_matrix = np.matmul(theme_embeddings, theme_embeddings.T)
+        np.fill_diagonal(similarity_matrix, 0)  # Ignore self-similarity
+
+        # Add edges above threshold (use same threshold as entities for consistency)
+        edge_count = 0
+        for i in tqdm(range(len(theme_nodes)), desc="Adding theme SEMANTIC_SIM edges", disable=self.logger.level > logging.INFO):
+            for j in range(i + 1, len(theme_nodes)):
+                sim = similarity_matrix[i, j]
+                if sim >= self.semantic_sim_threshold:
+                    self.graph.add_edge(
+                        theme_nodes[i],
+                        theme_nodes[j],
+                        edge_type="SEMANTIC_SIM",
+                        weight=float(sim)
+                    )
+                    edge_count += 1
+
+        self.logger.info(f"Added {edge_count} theme SEMANTIC_SIM edges (threshold: {self.semantic_sim_threshold})")
+
+    def _add_theme_co_presence(self, chunk_ids: List[str]):
+        """
+        Add CO_PRESENCE edges between themes based on co-occurrence in chunks.
+
+        Similar to entity CO_OCCURS but for themes that appear together in chunks.
+        Uses same weighting strategy: co_presence_count * (1 / sqrt(freq1 * freq2))
+        """
+        theme_co_presence_counter = Counter()
+        theme_chunk_frequency = Counter()
+
+        # Get all chunks and their connected themes
+        chunk_to_themes = defaultdict(set)
+
+        for chunk_id in tqdm(chunk_ids, desc="Collecting chunk-theme pairs", disable=self.logger.level > logging.INFO):
+            # Find all themes connected to this chunk via HAS_TOPIC edges
+            if not self.graph.has_node(chunk_id):
+                continue
+
+            for neighbor in self.graph.neighbors(chunk_id):
+                edge_data = self.graph[chunk_id][neighbor]
+                if (edge_data.get('edge_type') == 'HAS_TOPIC' and
+                    self.graph.nodes[neighbor].get('type') == 'theme'):
+                    chunk_to_themes[chunk_id].add(neighbor)
+                    theme_chunk_frequency[neighbor] += 1
+
+        # Count co-presences
+        for chunk_id, themes in tqdm(chunk_to_themes.items(), desc="Counting theme co-presences", disable=self.logger.level > logging.INFO):
+            themes_list = list(themes)
+            for i in range(len(themes_list)):
+                for j in range(i + 1, len(themes_list)):
+                    pair = tuple(sorted([themes_list[i], themes_list[j]]))
+                    theme_co_presence_counter[pair] += 1
+
+        # Calculate weights and add edges
+        if not theme_co_presence_counter:
+            self.logger.warning("No theme co-presences found")
+            return
+
+        max_co_presence = max(theme_co_presence_counter.values())
+        edges_added = 0
+
+        for (theme1, theme2), co_presence_count in tqdm(theme_co_presence_counter.items(), desc="Adding CO_PRESENCE edges", disable=self.logger.level > logging.INFO):
+            if co_presence_count >= self.co_occur_threshold:  # Use same threshold
+                # Theme frequencies (number of chunks they appear in)
+                freq1 = theme_chunk_frequency[theme1]
+                freq2 = theme_chunk_frequency[theme2]
+
+                # Inverse frequency weight
+                inv_freq_weight = 1.0 / np.sqrt(freq1 * freq2)
+
+                # Final weight
+                weight = co_presence_count * inv_freq_weight
+
+                self.graph.add_edge(
+                    theme1,
+                    theme2,
+                    edge_type="CO_PRESENCE",
+                    weight=float(weight),
+                    co_presence_count=int(co_presence_count),
+                    theme1_freq=int(freq1),
+                    theme2_freq=int(freq2),
+                    inv_freq_weight=float(inv_freq_weight)
+                )
+                edges_added += 1
+
+        self.logger.info(f"Added {edges_added} CO_PRESENCE edges (threshold: {self.co_occur_threshold}, max_co_presence: {max_co_presence})")
 
     def _log_graph_statistics(self):
         """Log detailed graph statistics."""
@@ -678,35 +910,38 @@ Nodes by Type:
 
     def save_to_postgres(
         self,
+        graph_id: str,
         host: str = "localhost",
         port: int = 5432,
         database: str = "knowledge_graph",
         user: str = "postgres",
         password: str = "postgres",
-        clear_existing: bool = True
+        metadata: dict = None
     ):
         """
-        Save the graph to PostgreSQL database.
+        Save the graph to PostgreSQL database with timestamped tables.
 
         Args:
+            graph_id: Graph ID (timestamp) for creating versioned tables
             host: PostgreSQL host
             port: PostgreSQL port
             database: Database name
             user: Username
             password: Password
-            clear_existing: Whether to clear existing data before saving
+            metadata: Optional metadata dictionary to store
         """
         self.logger.info("\n" + "=" * 60)
-        self.logger.info("SAVING GRAPH TO POSTGRESQL")
+        self.logger.info(f"SAVING GRAPH TO POSTGRESQL (Graph ID: {graph_id})")
         self.logger.info("=" * 60)
 
-        # Initialize database connector
+        # Initialize database connector with graph_id
         db = GraphDatabaseConnector(
             host=host,
             port=port,
             database=database,
             user=user,
             password=password,
+            graph_id=graph_id,
             logger=self.logger
         )
 
@@ -717,15 +952,12 @@ Nodes by Type:
             # Create tables if they don't exist
             db.create_tables()
 
-            # Clear existing data if requested
-            if clear_existing:
-                db.clear_graph()
-
-            # Save the graph
-            db.save_graph(self.graph)
+            # Save the graph with metadata
+            db.save_graph(self.graph, metadata=metadata)
 
             self.logger.info("=" * 60)
-            self.logger.info("GRAPH SAVED SUCCESSFULLY TO POSTGRESQL")
+            self.logger.info(f"GRAPH SAVED SUCCESSFULLY TO POSTGRESQL")
+            self.logger.info(f"Tables: {db.graph_table}, {db.nodes_table}")
             self.logger.info("=" * 60)
 
         except Exception as e:

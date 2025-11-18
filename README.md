@@ -1,715 +1,596 @@
-# Knowledge Graph Fact-Checking System
+# Knowledge Graph for Fact-Checking
 
-A comprehensive fact-checking system based on knowledge graphs, using machine learning and natural language processing to verify claims against a database of fact-checks.
+Système de fact-checking basé sur un graphe de connaissances multi-niveaux combinant modélisation de topics (BERTopic), extraction d'entités (spaCy) et retrieval hybride.
 
-## Table of Contents
+---
 
-- [Overview](#overview)
-- [Features](#features)
-- [Architecture](#architecture)
-- [Installation](#installation)
-- [Configuration](#configuration)
-- [Usage](#usage)
-- [Project Structure](#project-structure)
-- [Documentation](#documentation)
-- [Development](#development)
-- [Contributing](#contributing)
+## 1. Construction du Graph
 
-## Overview
+Le graphe de connaissances est construit en plusieurs étapes, créant un réseau multi-niveaux reliant documents, chunks, thèmes et entités.
 
-This project implements a fact-checking system using a multi-level knowledge graph to analyze and verify claims. The system combines several techniques:
+### 1.1 Construction des Nœuds
 
-- **Named Entity Recognition** (spaCy) to identify people, places, organizations
-- **Topic Modeling** (BERTopic) to discover themes in documents
-- **Semantic Embeddings** (SentenceTransformers) for textual similarity
-- **Knowledge Graph** (NetworkX) to model relationships
-- **PostgreSQL Database** for scalable storage
+#### **Documents et Chunks**
 
-### Use Cases
+Les documents sont découpés en chunks avec chevauchement pour préserver le contexte :
 
-- Automatic verification of claims against existing fact-checks
-- Discovery of patterns in misinformation
-- Analysis of narrative propagation
-- Identification of recurring entities and themes in fake news
+```python
+# Chunking avec overlap
+chunk_size = 500  # caractères
+chunk_overlap = 100  # caractères
 
-## Features
+chunks = chunk_text(document, chunk_size=500, overlap=100)
+```
 
-### Graph Construction
+**Format des nœuds** :
+- Document : `doc::{doc_id}`
+- Chunk : `chunk::{doc_id}::{chunk_idx}`
 
-- **Multi-level**: Documents → Chunks → Themes & Entities
-- **Rich Relations**: CO_OCCURS, SEMANTIC_SIM, HAS_TOPIC, MENTIONS, CONTAINS
-- **Scalable**: PostgreSQL support for large-scale graphs
-- **Configurable**: All parameters via config.yaml
-- **Automatic Statistics**: Comprehensive stats generated after each build
+Chaque chunk contient :
+- `text` : le contenu textuel
+- `doc_id` : référence au document parent
+- `chunk_idx` : index du chunk dans le document
 
-### Hybrid Retrieval
+#### **Thèmes (Topics)**
 
-- **Semantic**: Embedding similarity (alpha = 0.4)
-- **Thematic**: Via BERTopic and graph traversal (beta = 0.3)
-- **Entity-based**: Entity matching and graph paths (gamma = 0.3)
-- **Detailed Scoring**: Score breakdowns showing contribution of each component
-- **Multiple Rankings**: Results ranked by different criteria (semantic, thematic, entity, balance)
-- **Statistical Analysis**: Mean, min, max scores and component dominance analysis
+Les thèmes sont découverts automatiquement via **BERTopic** :
 
-### Visualizations
+```python
+# Entraînement du modèle de topics
+topic_model = BERTopic(
+    min_topic_size=10,
+    nr_topics=None  # détection automatique
+)
 
-- **Full Graph**: Filterable overview
-- **Entity-Centered**: Local exploration
-- **Hierarchical**: Organization by levels
-- **Detailed Statistics**: Metrics and analytics
+topics, probabilities = topic_model.fit_transform(chunk_texts)
+```
 
-### Unified CLI
+**Génération des labels** : Les thèmes sont labellisés par un LLM (Ollama) basé sur les mots-clés extraits :
 
-Command-line interface for all operations:
+```python
+# Top 5 keywords du topic
+keywords = topic_model.get_topic(topic_id)[:5]
+# Prompt LLM pour générer un label concis
+label = llm_generate_topic_label(keywords)
+```
+
+**Format des nœuds** :
+- Thème : `theme::{topic_id}`
+
+Attributs :
+- `topic_id` : ID du topic BERTopic
+- `label` : label généré par LLM
+- `keywords` : liste des mots-clés principaux
+
+#### **Entités**
+
+Les entités sont extraites via **spaCy NER** (Named Entity Recognition) :
+
+```python
+# Extraction des entités
+nlp = spacy.load("en_core_web_sm")
+doc = nlp(text)
+
+entities = []
+for ent in doc.ents:
+    if ent.label_ in ['PERSON', 'ORG', 'GPE', 'LOC', 'DATE', 'EVENT', 'NORP']:
+        entities.append((ent.text.lower(), ent.label_))
+```
+
+**Types d'entités extraites** :
+- `PERSON` : personnes (réelles ou fictives)
+- `ORG` : organisations, entreprises
+- `GPE` : entités géopolitiques (pays, villes)
+- `LOC` : lieux non-GPE (montagnes, océans)
+- `DATE` : dates et périodes temporelles
+- `EVENT` : événements nommés (guerres, catastrophes)
+- `NORP` : nationalités, groupes religieux ou politiques
+
+**Format des nœuds** :
+- Entité : `entity::{entity_type}::{entity_text}`
+
+---
+
+### 1.2 Construction des Arêtes
+
+#### **CONTAINS** : Document → Chunk
+
+Arête simple reliant chaque document à ses chunks.
+
+```
+Poids : 1.0 (non pondéré)
+```
+
+---
+
+#### **HAS_TOPIC** : Chunk → Thème
+
+Relie chaque chunk aux thèmes détectés par BERTopic, avec un seuil de probabilité.
+
+**Calcul du poids** :
+
+```python
+# Probabilité BERTopic pour chaque topic
+topic_probs = topic_model.transform([chunk_text])[1][0]
+
+# Création d'arêtes uniquement si prob > threshold
+for topic_id, prob in enumerate(topic_probs):
+    if prob > topic_probability_threshold:  # défaut: 0.15
+        graph.add_edge(
+            chunk_id,
+            f"theme::{topic_id}",
+            edge_type="HAS_TOPIC",
+            weight=prob  # Probabilité BERTopic
+        )
+```
+
+**Formule** :
+```
+weight_HAS_TOPIC = P(topic|chunk)
+```
+
+où `P(topic|chunk)` est la probabilité BERTopic que le chunk appartienne au topic.
+
+---
+
+#### **MENTIONS** : Chunk → Entité
+
+Relie les chunks aux entités qu'ils mentionnent, pondéré par **TF-IDF**.
+
+**Calcul du poids** :
+
+```python
+# TF (Term Frequency) : nombre d'occurrences de l'entité dans le chunk
+TF(entity, chunk) = count(entity in chunk)
+
+# IDF (Inverse Document Frequency) : rareté de l'entité
+IDF(entity) = log(total_chunks / chunks_containing_entity)
+
+# TF-IDF final
+weight_MENTIONS = TF(entity, chunk) × IDF(entity)
+```
+
+**Formule** :
+```
+weight_MENTIONS(chunk, entity) = TF(entity, chunk) × log(N / df(entity))
+```
+
+où :
+- `N` = nombre total de chunks
+- `df(entity)` = nombre de chunks contenant l'entité
+
+**Avantage** : Les entités rares (haute valeur informative) reçoivent des poids plus élevés.
+
+---
+
+#### **CO_OCCURS** : Entité ↔ Entité
+
+Relie les entités qui apparaissent ensemble dans les mêmes documents.
+
+**Calcul du poids** :
+
+```python
+# Co-occurrence au niveau document (pas chunk)
+co_occur_count = nombre de documents contenant (entity1 ET entity2)
+
+# Fréquences des entités
+freq1 = nombre de documents contenant entity1
+freq2 = nombre de documents contenant entity2
+
+# Poids inversement proportionnel à la fréquence
+inv_freq_weight = 1 / sqrt(freq1 × freq2)
+
+# Poids final
+weight_CO_OCCURS = co_occur_count × inv_freq_weight
+```
+
+**Formule** :
+```
+weight_CO_OCCURS(e1, e2) = count(e1, e2) × (1 / √(freq(e1) × freq(e2)))
+```
+
+**Intuition** :
+- Les entités qui co-apparaissent fréquemment ont un poids élevé
+- **Mais** les entités omniprésentes sont pénalisées (diviseur)
+- Exemple : "Trump" et "France" co-apparaissent rarement → poids élevé si co-occurrence détectée
+
+---
+
+#### **SEMANTIC_SIM** : Entité ↔ Entité / Thème ↔ Thème
+
+Relie les entités (ou thèmes) sémantiquement similaires via leurs embeddings.
+
+**Pour les entités** :
+
+```python
+# Embeddings des noms d'entités
+embeddings = SentenceTransformer.encode([entity_text1, entity_text2, ...])
+
+# Similarité cosinus
+sim = cosine_similarity(embedding1, embedding2) = embedding1 · embedding2
+
+# Arête si sim > threshold (défaut: 0.6)
+if sim > semantic_similarity_threshold:
+    weight_SEMANTIC_SIM = sim
+```
+
+**Pour les thèmes** :
+
+```python
+# Représentation = concaténation des top 5 keywords
+theme_repr = " ".join(topic_keywords[:5])
+
+# Embeddings puis similarité cosinus
+sim = cosine_similarity(theme_embedding1, theme_embedding2)
+```
+
+**Formule** :
+```
+weight_SEMANTIC_SIM(n1, n2) = cos(emb(n1), emb(n2)) = (emb(n1) · emb(n2)) / (||emb(n1)|| × ||emb(n2)||)
+```
+
+Avec normalisation des embeddings : `||emb|| = 1`, donc :
+```
+weight_SEMANTIC_SIM(n1, n2) = emb(n1) · emb(n2)
+```
+
+---
+
+#### **CO_PRESENCE** : Thème ↔ Thème
+
+Relie les thèmes qui apparaissent ensemble dans les mêmes chunks (via arêtes HAS_TOPIC).
+
+**Calcul du poids** :
+
+```python
+# Co-présence au niveau chunk
+co_presence_count = nombre de chunks contenant (theme1 ET theme2)
+
+# Fréquences des thèmes
+freq1 = nombre de chunks contenant theme1
+freq2 = nombre de chunks contenant theme2
+
+# Poids inversement proportionnel à la fréquence
+inv_freq_weight = 1 / sqrt(freq1 × freq2)
+
+# Poids final (même formule que CO_OCCURS)
+weight_CO_PRESENCE = co_presence_count × inv_freq_weight
+```
+
+**Formule** :
+```
+weight_CO_PRESENCE(t1, t2) = count(t1, t2) × (1 / √(freq(t1) × freq(t2)))
+```
+
+---
+
+## 2. Retrieval du Graph
+
+Le système utilise un **retrieval hybride** combinant 4 stratégies complémentaires, fusionnées par moyenne pondérée.
+
+### 2.1 Stratégie 1 : Retrieval Sémantique
+
+Basé sur la similarité d'embeddings entre le claim et les chunks.
+
+**Processus** :
+
+```python
+# 1. Encoder le claim
+claim_embedding = SentenceTransformer.encode(claim)
+
+# 2. Encoder tous les chunks (pré-calculé)
+chunk_embeddings = SentenceTransformer.encode(all_chunks)
+
+# 3. Calculer similarités cosinus
+similarities = chunk_embeddings @ claim_embedding
+
+# 4. Normaliser (min-max)
+score_sem(chunk) = (sim(chunk) - min_sim) / (max_sim - min_sim)
+```
+
+**Formule** :
+```
+score_sem(chunk) = normalize(cos(emb(claim), emb(chunk)))
+```
+
+**Sortie** : Dictionnaire `{chunk_id: score_sem}` avec scores normalisés `[0, 1]`.
+
+---
+
+### 2.2 Stratégie 2 : Retrieval Thématique
+
+Basé sur les topics BERTopic et la propagation de pertinence dans le graphe de thèmes.
+
+**Processus** :
+
+```python
+# 1. Classifier le claim en topics
+topic_probs = BERTopic.transform(claim)
+
+# 2. Sélectionner les thèmes pertinents (prob > threshold)
+seed_themes = [(theme_id, prob) for theme_id, prob in topic_probs if prob > 0.1]
+
+# 3. Propager la pertinence dans le graphe de thèmes (BFS)
+for theme, relevance in BFS(seed_themes):
+    for neighbor_theme in graph.neighbors(theme):
+        edge_weight = graph[theme][neighbor_theme]['weight']  # CO_PRESENCE ou SEMANTIC_SIM
+        propagated_relevance = relevance × edge_weight
+        if propagated_relevance > threshold:
+            update_relevance(neighbor_theme, propagated_relevance)
+
+# 4. Scorer les chunks via arêtes HAS_TOPIC
+for theme, relevance in theme_relevance.items():
+    for chunk in chunks_with_HAS_TOPIC_to(theme):
+        prob_weight = graph[chunk][theme]['weight']  # Probabilité BERTopic
+        score_theme[chunk] += relevance × prob_weight
+
+# 5. Normaliser
+score_theme(chunk) = normalize(score_theme[chunk])
+```
+
+**Formules** :
+
+1. **Propagation de pertinence** (BFS dans le graphe de thèmes) :
+```
+relevance(theme_neighbor) = max(
+    current_relevance(theme_neighbor),
+    relevance(theme_current) × weight_edge(theme_current, theme_neighbor)
+)
+```
+
+2. **Score final du chunk** :
+```
+score_theme(chunk) = normalize(∑_{theme} relevance(theme) × P(theme|chunk))
+```
+
+où `P(theme|chunk)` est le poids de l'arête HAS_TOPIC (probabilité BERTopic).
+
+**Sortie** : Dictionnaire `{chunk_id: score_theme}`.
+
+---
+
+### 2.3 Stratégie 3 : Retrieval par Entités
+
+Basé sur l'extraction d'entités du claim et la propagation de pertinence dans le graphe d'entités.
+
+**Processus** :
+
+```python
+# 1. Extraire les entités du claim
+entities_claim = spaCy.extract_entities(claim)
+
+# 2. Trouver les entités correspondantes dans le graphe
+seed_entities = [entity_node for entity_text in entities_claim if entity_node in graph]
+
+# 3. Propager la pertinence dans le graphe d'entités (BFS)
+for entity, relevance in BFS(seed_entities):
+    for neighbor_entity in graph.neighbors(entity):
+        edge_weight = graph[entity][neighbor_entity]['weight']  # CO_OCCURS ou SEMANTIC_SIM
+        propagated_relevance = relevance × edge_weight
+        if propagated_relevance > threshold:
+            update_relevance(neighbor_entity, propagated_relevance)
+
+# 4. Scorer les chunks via arêtes MENTIONS
+for entity, relevance in entity_relevance.items():
+    for chunk in chunks_with_MENTIONS_to(entity):
+        tf_idf_weight = graph[chunk][entity]['weight']  # TF-IDF
+        score_entity[chunk] += relevance × tf_idf_weight
+
+# 5. Normaliser
+score_entity(chunk) = normalize(score_entity[chunk])
+```
+
+**Formules** :
+
+1. **Propagation de pertinence** (BFS dans le graphe d'entités) :
+```
+relevance(entity_neighbor) = max(
+    current_relevance(entity_neighbor),
+    relevance(entity_current) × weight_edge(entity_current, entity_neighbor)
+)
+```
+
+2. **Score final du chunk** :
+```
+score_entity(chunk) = normalize(∑_{entity} relevance(entity) × TF-IDF(entity, chunk))
+```
+
+**Sortie** : Dictionnaire `{chunk_id: score_entity}`.
+
+---
+
+### 2.4 Stratégie 4 : Retrieval par Distribution de Topics
+
+Basé sur la similarité entre les distributions de probabilités de topics (Jensen-Shannon divergence).
+
+**Processus** :
+
+```python
+# 1. Obtenir la distribution de topics du claim
+claim_topic_dist = BERTopic.transform(claim)  # Vecteur de probabilités
+
+# 2. Obtenir les distributions de tous les chunks (pré-calculées)
+chunk_topic_dists = [BERTopic.transform(chunk) for chunk in chunks]
+
+# 3. Calculer la divergence de Jensen-Shannon
+for chunk, chunk_dist in zip(chunks, chunk_topic_dists):
+    js_divergence = jensen_shannon(claim_topic_dist, chunk_dist)
+
+    # Convertir en similarité (divergence ∈ [0, 1])
+    similarity = 1 - js_divergence
+    score_topic_dist[chunk] = similarity
+
+# 4. Normaliser
+score_topic_dist(chunk) = normalize(similarity)
+```
+
+**Formule de Jensen-Shannon Divergence** :
+
+```
+JS(P || Q) = (1/2) × KL(P || M) + (1/2) × KL(Q || M)
+```
+
+où :
+- `M = (P + Q) / 2` (distribution moyenne)
+- `KL(P || Q) = ∑_i P(i) × log(P(i) / Q(i))` (divergence de Kullback-Leibler)
+
+**Conversion en similarité** :
+```
+score_topic_dist(chunk) = normalize(1 - JS(P_claim || P_chunk))
+```
+
+**Propriétés** :
+- Symétrique : `JS(P || Q) = JS(Q || P)`
+- Bornée : `JS ∈ [0, 1]`
+- `JS = 0` si distributions identiques
+
+**Sortie** : Dictionnaire `{chunk_id: score_topic_dist}`.
+
+---
+
+### 2.5 Fusion des Scores
+
+Les 4 scores sont combinés par **moyenne pondérée** avec poids configurables.
+
+**Formule de fusion** :
+
+```
+score_final(chunk) = α × score_sem(chunk)
+                   + β × score_theme(chunk)
+                   + γ × score_entity(chunk)
+                   + δ × score_topic_dist(chunk)
+```
+
+**Contrainte** : `α + β + γ + δ = 1.0`
+
+**Poids par défaut** :
+- `α = 0.3` (sémantique)
+- `β = 0.2` (thématique)
+- `γ = 0.3` (entités)
+- `δ = 0.2` (distribution de topics)
+
+**Processus de fusion** :
+
+```python
+# Union de tous les chunks trouvés par les 4 stratégies
+all_chunks = set(S1) ∪ set(S2) ∪ set(S3) ∪ set(S4)
+
+# Pour chaque chunk, calculer le score final
+results = []
+for chunk in all_chunks:
+    score_sem = S1.get(chunk, 0)
+    score_theme = S2.get(chunk, 0)
+    score_entity = S3.get(chunk, 0)
+    score_topic_dist = S4.get(chunk, 0)
+
+    score_final = α×score_sem + β×score_theme + γ×score_entity + δ×score_topic_dist
+
+    results.append({
+        'chunk_id': chunk,
+        'score_total': score_final,
+        'score_sem': score_sem,
+        'score_theme': score_theme,
+        'score_entity': score_entity,
+        'score_topic_dist': score_topic_dist
+    })
+
+# Trier par score final décroissant
+results.sort(key=lambda x: x['score_total'], reverse=True)
+
+# Retourner top-K
+return results[:top_k]
+```
+
+**Sortie finale** : Liste des `top_k` chunks les plus pertinents avec leurs scores détaillés.
+
+---
+
+## 3. Architecture Technique
+
+### Modèles utilisés
+
+- **Embeddings** : `all-MiniLM-L6-v2` (SentenceTransformers)
+- **NER** : `en_core_web_sm` (spaCy)
+- **Topic Modeling** : BERTopic
+- **LLM** : `llama3.1:latest` (Ollama) pour les labels de topics
+
+### Stockage
+
+- **Graph** : NetworkX (pickle) + PostgreSQL (tables versionnées)
+- **Topic Model** : pickle (.pkl)
+- **Metadata** : JSON
+
+### Format des tables PostgreSQL
+
+**Table `graph_{timestamp}`** (edges) :
+- `source` : nœud source
+- `predicate` : type d'arête (CONTAINS, HAS_TOPIC, etc.)
+- `target` : nœud cible
+- `weight` : poids de l'arête
+
+**Table `nodes_{timestamp}`** (nodes) :
+- `node_id` : identifiant unique
+- `node_type` : type (document, chunk, theme, entity)
+- `attributes` : JSONB avec tous les attributs
+
+**Table `graph_metadata`** :
+- `graph_id` : timestamp de création
+- `num_nodes` : nombre de nœuds
+- `num_edges` : nombre d'arêtes
+- `metadata` : JSONB avec configuration
+
+---
+
+## 4. Utilisation
+
+### Construction d'un graph
+
 ```bash
-python cli.py build      # Build the graph
-python cli.py visualize  # Visualize the graph
-python cli.py retrieve   # Search for chunks
-python cli.py stats      # Display statistics
-python cli.py relabel    # Relabel themes with LLM
-```
-
-## Architecture
-
-### Knowledge Graph Structure
-
-```
-Documents (fact-checks)
-    ↓ CONTAINS
-Chunks (text segments)
-    ↓ HAS_TOPIC          ↓ MENTIONS
-Themes (BERTopic)    Entities (NER)
-                         ↓ CO_OCCURS / SEMANTIC_SIM
-                     Entities (related)
-```
-
-Note: The RELATED_TO edge between entities and themes has been removed as this information is already captured through the HAS_TOPIC relationship from chunks.
-
-### Node Types
-
-1. **Document**: A complete fact-check
-2. **Chunk**: Text segment (500 characters by default)
-3. **Theme**: Theme discovered by BERTopic
-4. **Entity**: Named entity (PERSON, ORG, GPE, etc.)
-
-### Edge Types
-
-1. **CONTAINS**: Document → Chunk
-2. **HAS_TOPIC**: Chunk → Theme (weighted by probability)
-3. **MENTIONS**: Chunk → Entity
-4. **CO_OCCURS**: Entity ↔ Entity (weighted by co-occurrence count)
-5. **SEMANTIC_SIM**: Entity ↔ Entity (weighted by cosine similarity)
-
-## Installation
-
-### Prerequisites
-
-- Python 3.8+
-- PostgreSQL 12+ (optional, for scalable storage)
-- Ollama (optional, for LLM-based theme relabeling)
-
-### Quick Install
-
-```bash
-# Clone repository
-git clone https://github.com/yourusername/PRL.git
-cd PRL
-
-# Create virtual environment
-python -m venv .venv
-source .venv/bin/activate  # Linux/Mac
-# or
-.venv\Scripts\activate  # Windows
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Download spaCy models
-python -m spacy download en_core_web_sm
-
-# Initialize structure
-python cli.py init --dirs
-
-# (Optional) Initialize PostgreSQL
-python cli.py init --postgres
-```
-
-### PostgreSQL Installation
-
-```bash
-# Install PostgreSQL
-# Ubuntu/Debian
-sudo apt-get install postgresql postgresql-contrib
-
-# macOS with Homebrew
-brew install postgresql
-
-# Windows: Download from https://www.postgresql.org/download/
-
-# Create database
-createdb knowledge_graph
-
-# Update config.yaml with your connection parameters
-# database:
-#   host: localhost
-#   port: 5432
-#   database: knowledge_graph
-#   user: postgres
-#   password: your_password
-```
-
-## Configuration
-
-All parameters are centralized in `config.yaml`:
-
-```yaml
-# Paths
-paths:
-  data_dir: "data"
-  outputs_dir: "outputs"
-  logs_dir: "logs"
-
-# Graph construction
-graph_construction:
-  max_documents: 100
-  chunk_size: 500
-  chunk_overlap: 100
-  min_topic_size: 10
-
-# Models
-models:
-  embedding_model: "all-MiniLM-L6-v2"
-  ner_model: "en_core_web_sm"
-
-# Retrieval
-retrieval:
-  alpha: 0.4  # Semantic weight
-  beta: 0.3   # Thematic weight
-  gamma: 0.3  # Entity weight
-  top_k: 10
-
-# Database
-database:
-  host: "localhost"
-  port: 5432
-  database: "knowledge_graph"
-```
-
-See [config.yaml](config.yaml) for all available parameters.
-
-## Usage
-
-### Quick Start
-
-```bash
-# 1. Build the graph
-python cli.py build --max-docs 100
-
-# 2. Visualize the graph
-python cli.py visualize --mode stats
-
-# 3. Search for a claim
-python cli.py retrieve "Photo from Gaza shared on Facebook"
-
-# 4. Export the graph
-python cli.py export --format json
-```
-
-### Graph Construction
-
-```bash
-# Build with pickle (default mode)
-python cli.py build --max-docs 100 --chunk-size 500
-
-# Build with PostgreSQL
-python cli.py build --use-postgres --max-docs 1000
-
-# Build with detailed logs
-python cli.py build --log-level DEBUG
-```
-
-### Visualization
-
-```bash
-# Graph statistics
-python cli.py visualize --mode stats
-
-# Full graph view
-python cli.py visualize --mode full --max-nodes 200
-
-# Entity-centered view
-python cli.py visualize --mode entity --entity "gaza"
-
-# Hierarchical view
-python cli.py visualize --mode hierarchical --entity "facebook"
+uv run python cli.py build --max-docs 100
 ```
 
 ### Retrieval
 
 ```bash
-# Search with a claim (includes detailed scoring)
-python cli.py retrieve "Trump met Macron in France to discuss NATO"
-
-# Search with predefined test claims
-python cli.py retrieve --test
-
-# Adjust weights and display parameters
-python cli.py retrieve "Vaccine causes autism" --alpha 0.5 --beta 0.3 --gamma 0.2 --top-n 10
-
-# Use PostgreSQL
-python cli.py retrieve --use-postgres --test
-
-# Display more results with detailed breakdowns
-python cli.py retrieve "Gaza photo" --top-k 20 --top-n 5
-
-# Disable automatic result saving
-python cli.py retrieve "Election fraud" --no-save-results
+uv run python cli.py retrieve "Trump met Macron in France" --top-k 10 --graph-id 20251118_150602
 ```
 
-The retrieval command now provides:
-- **Detailed score breakdowns** for each result showing semantic, thematic, and entity contributions
-- **Multiple rankings**: Results sorted by total score, semantic score, thematic score, entity score, balance, and max component
-- **Statistical analysis**: Mean, min, max scores for each component
-- **Component dominance**: Shows which scoring component is dominant in results
-- **Automatic saving**: Results saved to `outputs/retrieval_results/` in JSON and text formats
-
-### Other Operations
+### Visualisation
 
 ```bash
-# Relabel themes with LLM (requires Ollama)
-python cli.py relabel --use-postgres
+# Visualisation complète
+uv run python cli.py visualize --mode full --graph-id 20251118_150602
 
-# Show configuration
-python cli.py config --show
-
-# Validate configuration
-python cli.py config --validate
+# Sous-graphe centré sur une entité
+uv run python cli.py visualize --mode entity --entity "trump" --graph-id 20251118_150602
 ```
-
-## Project Structure
-
-```
-PRL/
-├── cli.py                      # Centralized CLI
-├── config.yaml                 # Main configuration
-├── README.md                   # This file
-├── requirements.txt            # Python dependencies
-│
-├── fact_check_kg/             # Main package
-│   ├── __init__.py
-│   ├── logger.py              # Logging system
-│   ├── config_loader.py       # Configuration loader
-│   ├── config.py              # Legacy config (compatibility)
-│   │
-│   ├── data_loader.py         # Data loading and chunking
-│   ├── graph_builder.py       # Graph construction (with statistics)
-│   ├── db_connector.py        # PostgreSQL connector
-│   │
-│   ├── retrieval.py           # Hybrid retrieval system
-│   ├── retrieval_results.py   # Results manager with detailed scoring
-│   ├── visualize_graph.py     # Standard visualizations
-│   ├── visualize_hierarchical.py  # Hierarchical visualizations
-│   │
-│   ├── build_graph.py         # Build script
-│   ├── test_retrieval.py      # Retrieval test script (enhanced)
-│   ├── inspect_topics.py      # Topic inspection
-│   └── relabel_topics.py      # LLM-based relabeling
-│
-├── data/                      # Data files
-│   └── english_fact_checks.csv
-│
-├── outputs/                   # Generated outputs
-│   ├── graphs/               # Graphs (pickle/gpickle)
-│   ├── visualizations/       # HTML files
-│   ├── models/               # Saved models
-│   ├── exports/              # Exports (JSON, CSV, etc.)
-│   ├── statistics/           # Graph statistics (JSON/TXT)
-│   └── retrieval_results/    # Retrieval results with detailed scoring
-│
-├── logs/                      # Log files
-│   ├── cli.log
-│   ├── graph_builder.log
-│   └── retrieval.log
-│
-├── docs/                     # Documentation
-│   ├── QUICKSTART.md
-│   ├── ARCHITECTURE.md
-│   ├── POSTGRES_MIGRATION.md
-│   └── VISUALIZATION_GUIDE.md
-│
-├── factcheckbureau/          # External code (unchanged)
-│
-└── utils/                    # Utilities
-    ├── helpers.py
-    ├── io_utils.py
-    └── logger.py
-```
-
-## Documentation
-
-### Main Modules
-
-#### graph_builder.py
-
-Builds the multi-level graph:
-
-```python
-from fact_check_kg.graph_builder import KnowledgeGraphBuilder
-from fact_check_kg.config_loader import get_config
-
-config = get_config()
-builder = KnowledgeGraphBuilder(
-    embedding_model=config.models.embedding_model,
-    ner_model=config.models.ner_model
-)
-
-graph = builder.build_graph(chunks)
-builder.save_to_postgres()  # or save as pickle
-```
-
-#### retrieval.py
-
-Hybrid retrieval system:
-
-```python
-from fact_check_kg.retrieval import HybridRetriever
-
-retriever = HybridRetriever(
-    graph=graph,
-    topic_model=topic_model,
-    embedding_model=embedding_model,
-    nlp=nlp,
-    alpha=0.4, beta=0.3, gamma=0.3
-)
-
-results = retriever.retrieve("Your claim here")
-```
-
-#### logger.py
-
-Centralized logging system:
-
-```python
-from fact_check_kg.logger import get_logger, log_section
-
-logger = get_logger(__name__)
-log_section(logger, "PROCESSING STARTED")
-logger.info("Processing data...")
-```
-
-### Storage Formats
-
-#### Pickle (NetworkX)
-
-- Format: `.gpickle`
-- Advantages: Fast, simple
-- Disadvantages: Doesn't scale, single file
-
-#### PostgreSQL
-
-- Tables: `graph` (edges), `nodes` (attributes)
-- Advantages: Scalable, SQL queries, concurrent access
-- Disadvantages: More complex setup
-
-```sql
--- Edge table
-CREATE TABLE graph (
-    source TEXT,
-    predicate TEXT,
-    target TEXT,
-    weight FLOAT
-);
-
--- Node table
-CREATE TABLE nodes (
-    node_id TEXT PRIMARY KEY,
-    node_type TEXT,
-    attributes JSONB
-);
-```
-
-## Development
-
-### Testing
-
-```bash
-# Unit tests
-pytest tests/
-
-# Integration tests
-python cli.py build --max-docs 10
-python cli.py retrieve --test
-
-# Validation
-python cli.py config --validate
-```
-
-### Adding Features
-
-1. Modify `config.yaml` if needed
-2. Add code in `fact_check_kg/`
-3. Add command in `cli.py` if relevant
-4. Update documentation
-5. Test with `pytest`
-
-### Logging
-
-All modules use the centralized logging system:
-
-```python
-from fact_check_kg.logger import get_logger
-
-logger = get_logger(__name__)
-logger.info("Info message")
-logger.debug("Debug message")
-logger.error("Error message")
-```
-
-Logs are saved in `logs/` with automatic rotation.
-
-## Advanced Examples
-
-### Build Custom Graph
-
-```python
-from fact_check_kg.config_loader import get_config
-from fact_check_kg.graph_builder import KnowledgeGraphBuilder
-from fact_check_kg.data_loader import load_and_chunk_documents
-
-config = get_config()
-
-# Load data
-chunks, n_docs = load_and_chunk_documents(
-    csv_path=config.paths.csv_file,
-    chunk_size=300,
-    chunk_overlap=50,
-    max_docs=50
-)
-
-# Build graph
-builder = KnowledgeGraphBuilder(
-    embedding_model="all-MiniLM-L6-v2",
-    ner_model="en_core_web_lg",  # More powerful model
-    co_occur_threshold=3,
-    semantic_sim_threshold=0.7
-)
-
-graph = builder.build_graph(chunks, min_topic_size=15, nr_topics=20)
-builder.save_to_postgres(host="localhost", database="my_kg")
-```
-
-### Custom Retrieval with Detailed Scoring
-
-```python
-from fact_check_kg.retrieval import HybridRetriever
-from fact_check_kg.retrieval_results import RetrievalResultsManager
-
-# Create retriever
-retriever = HybridRetriever(
-    graph=graph,
-    topic_model=topic_model,
-    embedding_model=embedding_model,
-    nlp=nlp,
-    alpha=0.5,  # More weight on semantic
-    beta=0.2,
-    gamma=0.3,
-    top_k=20
-)
-
-# Create results manager for enhanced display
-results_manager = RetrievalResultsManager()
-
-# Search
-results = retriever.retrieve("My custom claim")
-
-# Display with detailed breakdowns
-results_manager.display_results_console("My custom claim", results, top_n=5)
-
-# Generate multiple rankings
-rankings = results_manager.create_multiple_rankings(results)
-print("\nTop 3 by semantic score:")
-for i, result in enumerate(rankings['by_semantic_score'][:3], 1):
-    print(f"  {i}. {result['chunk_id']} - Semantic: {result['score_sem']:.3f}")
-
-# Save results with all rankings
-json_path, text_path = results_manager.save_results(
-    "My custom claim", results, alpha=0.5, beta=0.2, gamma=0.3, rankings=rankings
-)
-print(f"Results saved to {json_path}")
-```
-
-## New Features
-
-### Automatic Graph Statistics
-
-When building a graph, comprehensive statistics are automatically generated and saved to `outputs/statistics/`:
-
-**Generated Files:**
-- `general_stats_{timestamp}.json` - Node and edge counts by type
-- `topic_stats_{timestamp}.json` - Topic information with keywords and document counts
-- `entity_stats_{timestamp}.json` - Entity statistics with top entities by degree
-- `summary_{timestamp}.txt` - Human-readable summary report
-
-**Statistics Include:**
-- Total nodes and edges
-- Breakdown by node type (Document, Chunk, Theme, Entity)
-- Breakdown by edge type (CONTAINS, HAS_TOPIC, MENTIONS, CO_OCCURS, SEMANTIC_SIM)
-- Topics with their representative words and document counts
-- Most connected entities
-- Distribution metrics
-
-### Enhanced Retrieval Scoring
-
-The retrieval system now provides detailed score breakdowns and multiple ranking methods:
-
-**Score Breakdown:**
-Each result shows:
-- Total score (weighted combination)
-- Semantic score (embedding similarity)
-- Thematic score (topic matching)
-- Entity score (entity matching)
-- Contribution percentage of each component
-- Dominant component identification
-
-**Multiple Rankings:**
-Results can be sorted by:
-1. **Total Score** - Default weighted combination
-2. **Semantic Score** - Best embedding matches
-3. **Thematic Score** - Best topic matches
-4. **Entity Score** - Best entity matches
-5. **Balance** - Most balanced across all components
-6. **Max Component** - Highest individual component score
-
-**Statistical Analysis:**
-- Mean, min, max, median for each score type
-- Component dominance analysis (which component dominates results)
-- Score distribution insights
-
-**Output Formats:**
-- Console display with colored output
-- JSON format for programmatic use
-- Text format for human review
-- Automatic saving to `outputs/retrieval_results/`
-
-### Example Output
-
-```
-CLAIM: Photo from Gaza 2008 shared on Facebook claiming Kashmir violence
-================================================================================
-
-Top 5 Results:
-
---- Result #1 ---
-Chunk: chunk_doc_1_2
-Document: doc_1
-
-Scores:
-  Total:     0.7234  [DOMINANT: Semantic (52.3%)]
-  Semantic:  0.8123  (contribution: 52.3%)
-  Thematic:  0.6892  (contribution: 28.6%)
-  Entity:    0.5687  (contribution: 19.1%)
-
-Explanation:
-  - Semantic: High similarity (0.81) - text closely matches query embedding
-  - Thematic: Moderate match (0.69) - shares similar topics
-  - Entity: Moderate match (0.57) - some common entities (Gaza, Facebook)
-
-Text preview:
-  A photo from the 2008 Gaza conflict was shared on Facebook with misleading...
-
-STATISTICS
-================================================================================
-Score Averages:
-  Total: 0.6234 (min: 0.4123, max: 0.7234)
-  Semantic: 0.7123 (min: 0.5234, max: 0.8123)
-  Thematic: 0.5892 (min: 0.3456, max: 0.6892)
-  Entity: 0.5123 (min: 0.2789, max: 0.5687)
-
-Component Dominance:
-  Semantic: 7 (70.0%)
-  Thematic: 2 (20.0%)
-  Entity: 1 (10.0%)
-```
-
-## Performance
-
-### Typical Metrics
-
-- **Construction**: ~5-10 min for 100 documents
-- **Retrieval**: <1s per query
-- **Graph Size**: ~1000 nodes, ~5000 edges for 100 documents
-
-### Optimization
-
-```yaml
-# In config.yaml
-performance:
-  batch_size: 1000      # Batch for PostgreSQL
-  n_jobs: -1            # Use all cores
-  max_memory_mb: 4096   # Memory limit
-  enable_cache: true
-```
-
-## Troubleshooting
-
-### Issue: ModuleNotFoundError
-
-```bash
-# Check installation
-pip list | grep sentence-transformers
-pip list | grep spacy
-
-# Reinstall if needed
-pip install -r requirements.txt
-```
-
-### Issue: PostgreSQL connection failed
-
-```bash
-# Check if PostgreSQL is running
-sudo service postgresql status
-
-# Check credentials in config.yaml
-python cli.py config --validate
-```
-
-### Issue: Out of memory
-
-```bash
-# Reduce max_documents or chunk_size
-python cli.py build --max-docs 50 --chunk-size 300
-```
-
-## Contributing
-
-Contributions are welcome! Please:
-
-1. Fork the project
-2. Create a branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
-## License
-
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
-
-## Authors
-
-- **Your Name** - *Initial work*
-
-## Acknowledgments
-
-- BERTopic for topic modeling
-- spaCy for NER
-- SentenceTransformers for embeddings
-- NetworkX for graph manipulation
-- PostgreSQL for scalable storage
-
-## Contact
-
-For questions, contact: your.email@example.com
 
 ---
 
-**Note**: This project is under active development. Documentation will be updated regularly.
+## 5. Configuration
+
+Voir [config.yaml](config.yaml) pour tous les paramètres :
+
+```yaml
+graph_construction:
+  topic_probability_threshold: 0.15
+  co_occurrence_threshold: 2
+  semantic_similarity_threshold: 0.6
+
+retrieval:
+  alpha: 0.3  # poids sémantique
+  beta: 0.2   # poids thématique
+  gamma: 0.3  # poids entités
+  delta: 0.2  # poids distribution topics
+  entity_relevance_threshold: 0.1
+  theme_relevance_threshold: 0.1
+```
+
+---
+
+## 6. Références
+
+- **BERTopic** : [Grootendorst, 2022](https://github.com/MaartenGr/BERTopic)
+- **SentenceTransformers** : [Reimers & Gurevych, 2019](https://arxiv.org/abs/1908.10084)
+- **spaCy** : [Honnibal & Montani, 2017](https://spacy.io)
+- **Jensen-Shannon Divergence** : [Lin, 1991](https://ieeexplore.ieee.org/document/61115)
