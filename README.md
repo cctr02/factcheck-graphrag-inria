@@ -1,73 +1,73 @@
 # Knowledge Graph for Fact-Checking
 
-Système de fact-checking basé sur un graphe de connaissances multi-niveaux combinant modélisation de topics (BERTopic), extraction d'entités (spaCy) et retrieval hybride.
+Fact-checking system based on a multi-level knowledge graph combining topic modeling (BERTopic), entity extraction (spaCy), and hybrid retrieval.
 
 ---
 
-## 1. Construction du Graph
+## 1. Graph Construction
 
-Le graphe de connaissances est construit en plusieurs étapes, créant un réseau multi-niveaux reliant documents, chunks, thèmes et entités.
+The knowledge graph is built in several steps, creating a multi-level network linking documents, chunks, themes, and entities.
 
-### 1.1 Construction des Nœuds
+### 1.1 Node Construction
 
-#### **Documents et Chunks**
+#### **Documents and Chunks**
 
-Les documents sont découpés en chunks avec chevauchement pour préserver le contexte :
+Documents are split into chunks with overlap to preserve context:
 
 ```python
-# Chunking avec overlap
-chunk_size = 500  # caractères
-chunk_overlap = 100  # caractères
+# Chunking with overlap
+chunk_size = 500  # characters
+chunk_overlap = 100  # characters
 
 chunks = chunk_text(document, chunk_size=500, overlap=100)
 ```
 
-**Format des nœuds** :
-- Document : `doc::{doc_id}`
-- Chunk : `chunk::{doc_id}::{chunk_idx}`
+**Node format**:
+- Document: `doc::{doc_id}`
+- Chunk: `chunk::{doc_id}::{chunk_idx}`
 
-Chaque chunk contient :
-- `text` : le contenu textuel
-- `doc_id` : référence au document parent
-- `chunk_idx` : index du chunk dans le document
+Each chunk contains:
+- `text`: textual content
+- `doc_id`: reference to parent document
+- `chunk_idx`: chunk index in the document
 
-#### **Thèmes (Topics)**
+#### **Themes (Topics)**
 
-Les thèmes sont découverts automatiquement via **BERTopic** :
+Themes are automatically discovered via **BERTopic**:
 
 ```python
-# Entraînement du modèle de topics
+# Topic model training
 topic_model = BERTopic(
     min_topic_size=10,
-    nr_topics=None  # détection automatique
+    nr_topics=None  # automatic detection
 )
 
 topics, probabilities = topic_model.fit_transform(chunk_texts)
 ```
 
-**Génération des labels** : Les thèmes sont labellisés par un LLM (Ollama) basé sur les mots-clés extraits :
+**Label generation**: Themes are labeled by an LLM (Ollama) based on extracted keywords:
 
 ```python
-# Top 5 keywords du topic
+# Top 5 keywords of the topic
 keywords = topic_model.get_topic(topic_id)[:5]
-# Prompt LLM pour générer un label concis
+# LLM prompt to generate concise label
 label = llm_generate_topic_label(keywords)
 ```
 
-**Format des nœuds** :
-- Thème : `theme::{topic_id}`
+**Node format**:
+- Theme: `theme::{topic_id}`
 
-Attributs :
-- `topic_id` : ID du topic BERTopic
-- `label` : label généré par LLM
-- `keywords` : liste des mots-clés principaux
+Attributes:
+- `topic_id`: BERTopic topic ID
+- `label`: LLM-generated label
+- `keywords`: list of main keywords
 
-#### **Entités**
+#### **Entities**
 
-Les entités sont extraites via **spaCy NER** (Named Entity Recognition) :
+Entities are extracted via **spaCy NER** (Named Entity Recognition):
 
 ```python
-# Extraction des entités
+# Entity extraction
 nlp = spacy.load("en_core_web_sm")
 doc = nlp(text)
 
@@ -77,260 +77,260 @@ for ent in doc.ents:
         entities.append((ent.text.lower(), ent.label_))
 ```
 
-**Types d'entités extraites** :
-- `PERSON` : personnes (réelles ou fictives)
-- `ORG` : organisations, entreprises
-- `GPE` : entités géopolitiques (pays, villes)
-- `LOC` : lieux non-GPE (montagnes, océans)
-- `DATE` : dates et périodes temporelles
-- `EVENT` : événements nommés (guerres, catastrophes)
-- `NORP` : nationalités, groupes religieux ou politiques
+**Extracted entity types**:
+- `PERSON`: people (real or fictional)
+- `ORG`: organizations, companies
+- `GPE`: geopolitical entities (countries, cities)
+- `LOC`: non-GPE locations (mountains, oceans)
+- `DATE`: dates and time periods
+- `EVENT`: named events (wars, disasters)
+- `NORP`: nationalities, religious or political groups
 
-**Format des nœuds** :
-- Entité : `entity::{entity_type}::{entity_text}`
-
----
-
-### 1.2 Construction des Arêtes
-
-#### **CONTAINS** : Document → Chunk
-
-Arête simple reliant chaque document à ses chunks.
-
-```
-Poids : 1.0 (non pondéré)
-```
+**Node format**:
+- Entity: `entity::{entity_type}::{entity_text}`
 
 ---
 
-#### **HAS_TOPIC** : Chunk → Thème
+### 1.2 Edge Construction
 
-Relie chaque chunk aux thèmes détectés par BERTopic, avec un seuil de probabilité.
+#### **CONTAINS**: Document → Chunk
 
-**Calcul du poids** :
+Simple edge linking each document to its chunks.
+
+```
+Weight: 1.0 (unweighted)
+```
+
+---
+
+#### **HAS_TOPIC**: Chunk → Theme
+
+Links each chunk to themes detected by BERTopic, with a probability threshold.
+
+**Weight calculation**:
 
 ```python
-# Probabilité BERTopic pour chaque topic
+# BERTopic probability for each topic
 topic_probs = topic_model.transform([chunk_text])[1][0]
 
-# Création d'arêtes uniquement si prob > threshold
+# Create edges only if prob > threshold
 for topic_id, prob in enumerate(topic_probs):
-    if prob > topic_probability_threshold:  # défaut: 0.15
+    if prob > topic_probability_threshold:  # default: 0.15
         graph.add_edge(
             chunk_id,
             f"theme::{topic_id}",
             edge_type="HAS_TOPIC",
-            weight=prob  # Probabilité BERTopic
+            weight=prob  # BERTopic probability
         )
 ```
 
-**Formule** :
+**Formula**:
 ```
 weight_HAS_TOPIC = P(topic|chunk)
 ```
 
-où `P(topic|chunk)` est la probabilité BERTopic que le chunk appartienne au topic.
+where `P(topic|chunk)` is the BERTopic probability that the chunk belongs to the topic.
 
 ---
 
-#### **MENTIONS** : Chunk → Entité
+#### **MENTIONS**: Chunk → Entity
 
-Relie les chunks aux entités qu'ils mentionnent, pondéré par **TF-IDF**.
+Links chunks to entities they mention, weighted by **TF-IDF**.
 
-**Calcul du poids** :
+**Weight calculation**:
 
 ```python
-# TF (Term Frequency) : nombre d'occurrences de l'entité dans le chunk
+# TF (Term Frequency): number of entity occurrences in the chunk
 TF(entity, chunk) = count(entity in chunk)
 
-# IDF (Inverse Document Frequency) : rareté de l'entité
+# IDF (Inverse Document Frequency): entity rarity
 IDF(entity) = log(total_chunks / chunks_containing_entity)
 
-# TF-IDF final
+# Final TF-IDF
 weight_MENTIONS = TF(entity, chunk) × IDF(entity)
 ```
 
-**Formule** :
+**Formula**:
 ```
 weight_MENTIONS(chunk, entity) = TF(entity, chunk) × log(N / df(entity))
 ```
 
-où :
-- `N` = nombre total de chunks
-- `df(entity)` = nombre de chunks contenant l'entité
+where:
+- `N` = total number of chunks
+- `df(entity)` = number of chunks containing the entity
 
-**Avantage** : Les entités rares (haute valeur informative) reçoivent des poids plus élevés.
+**Advantage**: Rare entities (high informative value) receive higher weights.
 
 ---
 
-#### **CO_OCCURS** : Entité ↔ Entité
+#### **CO_OCCURS**: Entity ↔ Entity
 
-Relie les entités qui apparaissent ensemble dans les mêmes documents.
+Links entities that appear together in the same documents.
 
-**Calcul du poids** :
+**Weight calculation**:
 
 ```python
-# Co-occurrence au niveau document (pas chunk)
-co_occur_count = nombre de documents contenant (entity1 ET entity2)
+# Co-occurrence at document level (not chunk)
+co_occur_count = number of documents containing (entity1 AND entity2)
 
-# Fréquences des entités
-freq1 = nombre de documents contenant entity1
-freq2 = nombre de documents contenant entity2
+# Entity frequencies
+freq1 = number of documents containing entity1
+freq2 = number of documents containing entity2
 
-# Poids inversement proportionnel à la fréquence
+# Weight inversely proportional to frequency
 inv_freq_weight = 1 / sqrt(freq1 × freq2)
 
-# Poids final
+# Final weight
 weight_CO_OCCURS = co_occur_count × inv_freq_weight
 ```
 
-**Formule** :
+**Formula**:
 ```
 weight_CO_OCCURS(e1, e2) = count(e1, e2) × (1 / √(freq(e1) × freq(e2)))
 ```
 
-**Intuition** :
-- Les entités qui co-apparaissent fréquemment ont un poids élevé
-- **Mais** les entités omniprésentes sont pénalisées (diviseur)
-- Exemple : "Trump" et "France" co-apparaissent rarement → poids élevé si co-occurrence détectée
+**Intuition**:
+- Entities that co-appear frequently have high weight
+- **But** omnipresent entities are penalized (divisor)
+- Example: "Trump" and "France" rarely co-appear → high weight if co-occurrence detected
 
 ---
 
-#### **SEMANTIC_SIM** : Entité ↔ Entité / Thème ↔ Thème
+#### **SEMANTIC_SIM**: Entity ↔ Entity / Theme ↔ Theme
 
-Relie les entités (ou thèmes) sémantiquement similaires via leurs embeddings.
+Links semantically similar entities (or themes) via their embeddings.
 
-**Pour les entités** :
+**For entities**:
 
 ```python
-# Embeddings des noms d'entités
+# Embeddings of entity names
 embeddings = SentenceTransformer.encode([entity_text1, entity_text2, ...])
 
-# Similarité cosinus
+# Cosine similarity
 sim = cosine_similarity(embedding1, embedding2) = embedding1 · embedding2
 
-# Arête si sim > threshold (défaut: 0.6)
+# Edge if sim > threshold (default: 0.6)
 if sim > semantic_similarity_threshold:
     weight_SEMANTIC_SIM = sim
 ```
 
-**Pour les thèmes** :
+**For themes**:
 
 ```python
-# Représentation = concaténation des top 5 keywords
+# Representation = concatenation of top 5 keywords
 theme_repr = " ".join(topic_keywords[:5])
 
-# Embeddings puis similarité cosinus
+# Embeddings then cosine similarity
 sim = cosine_similarity(theme_embedding1, theme_embedding2)
 ```
 
-**Formule** :
+**Formula**:
 ```
 weight_SEMANTIC_SIM(n1, n2) = cos(emb(n1), emb(n2)) = (emb(n1) · emb(n2)) / (||emb(n1)|| × ||emb(n2)||)
 ```
 
-Avec normalisation des embeddings : `||emb|| = 1`, donc :
+With normalized embeddings: `||emb|| = 1`, thus:
 ```
 weight_SEMANTIC_SIM(n1, n2) = emb(n1) · emb(n2)
 ```
 
 ---
 
-#### **CO_PRESENCE** : Thème ↔ Thème
+#### **CO_PRESENCE**: Theme ↔ Theme
 
-Relie les thèmes qui apparaissent ensemble dans les mêmes chunks (via arêtes HAS_TOPIC).
+Links themes that appear together in the same chunks (via HAS_TOPIC edges).
 
-**Calcul du poids** :
+**Weight calculation**:
 
 ```python
-# Co-présence au niveau chunk
-co_presence_count = nombre de chunks contenant (theme1 ET theme2)
+# Co-presence at chunk level
+co_presence_count = number of chunks containing (theme1 AND theme2)
 
-# Fréquences des thèmes
-freq1 = nombre de chunks contenant theme1
-freq2 = nombre de chunks contenant theme2
+# Theme frequencies
+freq1 = number of chunks containing theme1
+freq2 = number of chunks containing theme2
 
-# Poids inversement proportionnel à la fréquence
+# Weight inversely proportional to frequency
 inv_freq_weight = 1 / sqrt(freq1 × freq2)
 
-# Poids final (même formule que CO_OCCURS)
+# Final weight (same formula as CO_OCCURS)
 weight_CO_PRESENCE = co_presence_count × inv_freq_weight
 ```
 
-**Formule** :
+**Formula**:
 ```
 weight_CO_PRESENCE(t1, t2) = count(t1, t2) × (1 / √(freq(t1) × freq(t2)))
 ```
 
 ---
 
-## 2. Retrieval du Graph
+## 2. Graph Retrieval
 
-Le système utilise un **retrieval hybride** combinant 4 stratégies complémentaires, fusionnées par moyenne pondérée.
+The system uses **hybrid retrieval** combining 4 complementary strategies, fused by weighted average.
 
-### 2.1 Stratégie 1 : Retrieval Sémantique
+### 2.1 Strategy 1: Semantic Retrieval
 
-Basé sur la similarité d'embeddings entre le claim et les chunks.
+Based on embedding similarity between the claim and chunks.
 
-**Processus** :
+**Process**:
 
 ```python
-# 1. Encoder le claim
+# 1. Encode the claim
 claim_embedding = SentenceTransformer.encode(claim)
 
-# 2. Encoder tous les chunks (pré-calculé)
+# 2. Encode all chunks (pre-computed)
 chunk_embeddings = SentenceTransformer.encode(all_chunks)
 
-# 3. Calculer similarités cosinus
+# 3. Compute cosine similarities
 similarities = chunk_embeddings @ claim_embedding
 
-# 4. Normaliser (min-max)
+# 4. Normalize (min-max)
 score_sem(chunk) = (sim(chunk) - min_sim) / (max_sim - min_sim)
 ```
 
-**Formule** :
+**Formula**:
 ```
 score_sem(chunk) = normalize(cos(emb(claim), emb(chunk)))
 ```
 
-**Sortie** : Dictionnaire `{chunk_id: score_sem}` avec scores normalisés `[0, 1]`.
+**Output**: Dictionary `{chunk_id: score_sem}` with normalized scores `[0, 1]`.
 
 ---
 
-### 2.2 Stratégie 2 : Retrieval Thématique
+### 2.2 Strategy 2: Thematic Retrieval
 
-Basé sur les topics BERTopic et la propagation de pertinence dans le graphe de thèmes.
+Based on BERTopic topics and relevance propagation through the theme graph.
 
-**Processus** :
+**Process**:
 
 ```python
-# 1. Classifier le claim en topics
+# 1. Classify the claim into topics
 topic_probs = BERTopic.transform(claim)
 
-# 2. Sélectionner les thèmes pertinents (prob > threshold)
+# 2. Select relevant themes (prob > threshold)
 seed_themes = [(theme_id, prob) for theme_id, prob in topic_probs if prob > 0.1]
 
-# 3. Propager la pertinence dans le graphe de thèmes (BFS)
+# 3. Propagate relevance through the theme graph (BFS)
 for theme, relevance in BFS(seed_themes):
     for neighbor_theme in graph.neighbors(theme):
-        edge_weight = graph[theme][neighbor_theme]['weight']  # CO_PRESENCE ou SEMANTIC_SIM
+        edge_weight = graph[theme][neighbor_theme]['weight']  # CO_PRESENCE or SEMANTIC_SIM
         propagated_relevance = relevance × edge_weight
         if propagated_relevance > threshold:
             update_relevance(neighbor_theme, propagated_relevance)
 
-# 4. Scorer les chunks via arêtes HAS_TOPIC
+# 4. Score chunks via HAS_TOPIC edges
 for theme, relevance in theme_relevance.items():
     for chunk in chunks_with_HAS_TOPIC_to(theme):
-        prob_weight = graph[chunk][theme]['weight']  # Probabilité BERTopic
+        prob_weight = graph[chunk][theme]['weight']  # BERTopic probability
         score_theme[chunk] += relevance × prob_weight
 
-# 5. Normaliser
+# 5. Normalize
 score_theme(chunk) = normalize(score_theme[chunk])
 ```
 
-**Formules** :
+**Formulas**:
 
-1. **Propagation de pertinence** (BFS dans le graphe de thèmes) :
+1. **Relevance propagation** (BFS through theme graph):
 ```
 relevance(theme_neighbor) = max(
     current_relevance(theme_neighbor),
@@ -338,51 +338,51 @@ relevance(theme_neighbor) = max(
 )
 ```
 
-2. **Score final du chunk** :
+2. **Final chunk score**:
 ```
 score_theme(chunk) = normalize(∑_{theme} relevance(theme) × P(theme|chunk))
 ```
 
-où `P(theme|chunk)` est le poids de l'arête HAS_TOPIC (probabilité BERTopic).
+where `P(theme|chunk)` is the HAS_TOPIC edge weight (BERTopic probability).
 
-**Sortie** : Dictionnaire `{chunk_id: score_theme}`.
+**Output**: Dictionary `{chunk_id: score_theme}`.
 
 ---
 
-### 2.3 Stratégie 3 : Retrieval par Entités
+### 2.3 Strategy 3: Entity-based Retrieval
 
-Basé sur l'extraction d'entités du claim et la propagation de pertinence dans le graphe d'entités.
+Based on entity extraction from the claim and relevance propagation through the entity graph.
 
-**Processus** :
+**Process**:
 
 ```python
-# 1. Extraire les entités du claim
+# 1. Extract entities from the claim
 entities_claim = spaCy.extract_entities(claim)
 
-# 2. Trouver les entités correspondantes dans le graphe
+# 2. Find corresponding entities in the graph
 seed_entities = [entity_node for entity_text in entities_claim if entity_node in graph]
 
-# 3. Propager la pertinence dans le graphe d'entités (BFS)
+# 3. Propagate relevance through the entity graph (BFS)
 for entity, relevance in BFS(seed_entities):
     for neighbor_entity in graph.neighbors(entity):
-        edge_weight = graph[entity][neighbor_entity]['weight']  # CO_OCCURS ou SEMANTIC_SIM
+        edge_weight = graph[entity][neighbor_entity]['weight']  # CO_OCCURS or SEMANTIC_SIM
         propagated_relevance = relevance × edge_weight
         if propagated_relevance > threshold:
             update_relevance(neighbor_entity, propagated_relevance)
 
-# 4. Scorer les chunks via arêtes MENTIONS
+# 4. Score chunks via MENTIONS edges
 for entity, relevance in entity_relevance.items():
     for chunk in chunks_with_MENTIONS_to(entity):
         tf_idf_weight = graph[chunk][entity]['weight']  # TF-IDF
         score_entity[chunk] += relevance × tf_idf_weight
 
-# 5. Normaliser
+# 5. Normalize
 score_entity(chunk) = normalize(score_entity[chunk])
 ```
 
-**Formules** :
+**Formulas**:
 
-1. **Propagation de pertinence** (BFS dans le graphe d'entités) :
+1. **Relevance propagation** (BFS through entity graph):
 ```
 relevance(entity_neighbor) = max(
     current_relevance(entity_neighbor),
@@ -390,69 +390,69 @@ relevance(entity_neighbor) = max(
 )
 ```
 
-2. **Score final du chunk** :
+2. **Final chunk score**:
 ```
 score_entity(chunk) = normalize(∑_{entity} relevance(entity) × TF-IDF(entity, chunk))
 ```
 
-**Sortie** : Dictionnaire `{chunk_id: score_entity}`.
+**Output**: Dictionary `{chunk_id: score_entity}`.
 
 ---
 
-### 2.4 Stratégie 4 : Retrieval par Distribution de Topics
+### 2.4 Strategy 4: Topic Distribution Retrieval
 
-Basé sur la similarité entre les distributions de probabilités de topics (Jensen-Shannon divergence).
+Based on similarity between topic probability distributions (Jensen-Shannon divergence).
 
-**Processus** :
+**Process**:
 
 ```python
-# 1. Obtenir la distribution de topics du claim
-claim_topic_dist = BERTopic.transform(claim)  # Vecteur de probabilités
+# 1. Get the topic distribution of the claim
+claim_topic_dist = BERTopic.transform(claim)  # Probability vector
 
-# 2. Obtenir les distributions de tous les chunks (pré-calculées)
+# 2. Get distributions for all chunks (pre-computed)
 chunk_topic_dists = [BERTopic.transform(chunk) for chunk in chunks]
 
-# 3. Calculer la divergence de Jensen-Shannon
+# 3. Compute Jensen-Shannon divergence
 for chunk, chunk_dist in zip(chunks, chunk_topic_dists):
     js_divergence = jensen_shannon(claim_topic_dist, chunk_dist)
 
-    # Convertir en similarité (divergence ∈ [0, 1])
+    # Convert to similarity (divergence ∈ [0, 1])
     similarity = 1 - js_divergence
     score_topic_dist[chunk] = similarity
 
-# 4. Normaliser
+# 4. Normalize
 score_topic_dist(chunk) = normalize(similarity)
 ```
 
-**Formule de Jensen-Shannon Divergence** :
+**Jensen-Shannon Divergence Formula**:
 
 ```
 JS(P || Q) = (1/2) × KL(P || M) + (1/2) × KL(Q || M)
 ```
 
-où :
-- `M = (P + Q) / 2` (distribution moyenne)
-- `KL(P || Q) = ∑_i P(i) × log(P(i) / Q(i))` (divergence de Kullback-Leibler)
+where:
+- `M = (P + Q) / 2` (average distribution)
+- `KL(P || Q) = ∑_i P(i) × log(P(i) / Q(i))` (Kullback-Leibler divergence)
 
-**Conversion en similarité** :
+**Conversion to similarity**:
 ```
 score_topic_dist(chunk) = normalize(1 - JS(P_claim || P_chunk))
 ```
 
-**Propriétés** :
-- Symétrique : `JS(P || Q) = JS(Q || P)`
-- Bornée : `JS ∈ [0, 1]`
-- `JS = 0` si distributions identiques
+**Properties**:
+- Symmetric: `JS(P || Q) = JS(Q || P)`
+- Bounded: `JS ∈ [0, 1]`
+- `JS = 0` if distributions are identical
 
-**Sortie** : Dictionnaire `{chunk_id: score_topic_dist}`.
+**Output**: Dictionary `{chunk_id: score_topic_dist}`.
 
 ---
 
-### 2.5 Fusion des Scores
+### 2.5 Score Fusion
 
-Les 4 scores sont combinés par **moyenne pondérée** avec poids configurables.
+The 4 scores are combined by **weighted average** with configurable weights.
 
-**Formule de fusion** :
+**Fusion formula**:
 
 ```
 score_final(chunk) = α × score_sem(chunk)
@@ -461,21 +461,21 @@ score_final(chunk) = α × score_sem(chunk)
                    + δ × score_topic_dist(chunk)
 ```
 
-**Contrainte** : `α + β + γ + δ = 1.0`
+**Constraint**: `α + β + γ + δ = 1.0`
 
-**Poids par défaut** :
-- `α = 0.3` (sémantique)
-- `β = 0.2` (thématique)
-- `γ = 0.3` (entités)
-- `δ = 0.2` (distribution de topics)
+**Default weights**:
+- `α = 0.3` (semantic)
+- `β = 0.2` (thematic)
+- `γ = 0.3` (entities)
+- `δ = 0.2` (topic distribution)
 
-**Processus de fusion** :
+**Fusion process**:
 
 ```python
-# Union de tous les chunks trouvés par les 4 stratégies
+# Union of all chunks found by the 4 strategies
 all_chunks = set(S1) ∪ set(S2) ∪ set(S3) ∪ set(S4)
 
-# Pour chaque chunk, calculer le score final
+# For each chunk, compute final score
 results = []
 for chunk in all_chunks:
     score_sem = S1.get(chunk, 0)
@@ -494,56 +494,56 @@ for chunk in all_chunks:
         'score_topic_dist': score_topic_dist
     })
 
-# Trier par score final décroissant
+# Sort by final score (descending)
 results.sort(key=lambda x: x['score_total'], reverse=True)
 
-# Retourner top-K
+# Return top-K
 return results[:top_k]
 ```
 
-**Sortie finale** : Liste des `top_k` chunks les plus pertinents avec leurs scores détaillés.
+**Final output**: List of `top_k` most relevant chunks with detailed scores.
 
 ---
 
-## 3. Architecture Technique
+## 3. Technical Architecture
 
-### Modèles utilisés
+### Models used
 
-- **Embeddings** : `all-MiniLM-L6-v2` (SentenceTransformers)
-- **NER** : `en_core_web_sm` (spaCy)
-- **Topic Modeling** : BERTopic
-- **LLM** : `llama3.1:latest` (Ollama) pour les labels de topics
+- **Embeddings**: `all-MiniLM-L6-v2` (SentenceTransformers)
+- **NER**: `en_core_web_sm` (spaCy)
+- **Topic Modeling**: BERTopic
+- **LLM**: `llama3.1:latest` (Ollama) for topic labels
 
-### Stockage
+### Storage
 
-- **Graph** : NetworkX (pickle) + PostgreSQL (tables versionnées)
-- **Topic Model** : pickle (.pkl)
-- **Metadata** : JSON
+- **Graph**: NetworkX (pickle) + PostgreSQL (versioned tables)
+- **Topic Model**: pickle (.pkl)
+- **Metadata**: JSON
 
-### Format des tables PostgreSQL
+### PostgreSQL table format
 
-**Table `graph_{timestamp}`** (edges) :
-- `source` : nœud source
-- `predicate` : type d'arête (CONTAINS, HAS_TOPIC, etc.)
-- `target` : nœud cible
-- `weight` : poids de l'arête
+**Table `graph_{timestamp}`** (edges):
+- `source`: source node
+- `predicate`: edge type (CONTAINS, HAS_TOPIC, etc.)
+- `target`: target node
+- `weight`: edge weight
 
-**Table `nodes_{timestamp}`** (nodes) :
-- `node_id` : identifiant unique
-- `node_type` : type (document, chunk, theme, entity)
-- `attributes` : JSONB avec tous les attributs
+**Table `nodes_{timestamp}`** (nodes):
+- `node_id`: unique identifier
+- `node_type`: type (document, chunk, theme, entity)
+- `attributes`: JSONB with all attributes
 
-**Table `graph_metadata`** :
-- `graph_id` : timestamp de création
-- `num_nodes` : nombre de nœuds
-- `num_edges` : nombre d'arêtes
-- `metadata` : JSONB avec configuration
+**Table `graph_metadata`**:
+- `graph_id`: creation timestamp
+- `num_nodes`: number of nodes
+- `num_edges`: number of edges
+- `metadata`: JSONB with configuration
 
 ---
 
-## 4. Utilisation
+## 4. Usage
 
-### Construction d'un graph
+### Building a graph
 
 ```bash
 uv run python cli.py build --max-docs 100
@@ -555,13 +555,13 @@ uv run python cli.py build --max-docs 100
 uv run python cli.py retrieve "Trump met Macron in France" --top-k 10 --graph-id 20251118_150602
 ```
 
-### Visualisation
+### Visualization
 
 ```bash
-# Visualisation complète
+# Full visualization
 uv run python cli.py visualize --mode full --graph-id 20251118_150602
 
-# Sous-graphe centré sur une entité
+# Entity-centered subgraph
 uv run python cli.py visualize --mode entity --entity "trump" --graph-id 20251118_150602
 ```
 
@@ -569,7 +569,7 @@ uv run python cli.py visualize --mode entity --entity "trump" --graph-id 2025111
 
 ## 5. Configuration
 
-Voir [config.yaml](config.yaml) pour tous les paramètres :
+See [config.yaml](config.yaml) for all parameters:
 
 ```yaml
 graph_construction:
@@ -578,19 +578,19 @@ graph_construction:
   semantic_similarity_threshold: 0.6
 
 retrieval:
-  alpha: 0.3  # poids sémantique
-  beta: 0.2   # poids thématique
-  gamma: 0.3  # poids entités
-  delta: 0.2  # poids distribution topics
+  alpha: 0.3  # semantic weight
+  beta: 0.2   # thematic weight
+  gamma: 0.3  # entity weight
+  delta: 0.2  # topic distribution weight
   entity_relevance_threshold: 0.1
   theme_relevance_threshold: 0.1
 ```
 
 ---
 
-## 6. Références
+## 6. References
 
-- **BERTopic** : [Grootendorst, 2022](https://github.com/MaartenGr/BERTopic)
-- **SentenceTransformers** : [Reimers & Gurevych, 2019](https://arxiv.org/abs/1908.10084)
-- **spaCy** : [Honnibal & Montani, 2017](https://spacy.io)
-- **Jensen-Shannon Divergence** : [Lin, 1991](https://ieeexplore.ieee.org/document/61115)
+- **BERTopic**: [Grootendorst, 2022](https://github.com/MaartenGr/BERTopic)
+- **SentenceTransformers**: [Reimers & Gurevych, 2019](https://arxiv.org/abs/1908.10084)
+- **spaCy**: [Honnibal & Montani, 2017](https://spacy.io)
+- **Jensen-Shannon Divergence**: [Lin, 1991](https://ieeexplore.ieee.org/document/61115)
