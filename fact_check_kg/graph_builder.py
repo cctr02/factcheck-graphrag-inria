@@ -17,6 +17,8 @@ from sentence_transformers import SentenceTransformer
 from bertopic import BERTopic
 import logging
 from tqdm import tqdm
+import time as time
+
 
 from fact_check_kg.db_connector import GraphDatabaseConnector
 
@@ -358,8 +360,8 @@ Topic label:"""
                 continue
 
             # Label topic (with LLM or simple concatenation)
-            label = self.label_topic_with_llm(topic_words)
 
+            label = self.label_topic_with_llm(topic_words)
             # Add theme node
             theme_node = f"theme::{topic_id}"
             self.graph.add_node(

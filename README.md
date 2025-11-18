@@ -557,6 +557,12 @@ return results[:top_k]
 uv run python cli.py build --max-docs 100
 ```
 
+**Note**: Statistics are automatically generated during graph build and saved to `outputs/statistics/`:
+- `general_stats_{timestamp}.json` - Node/edge counts by type
+- `topic_stats_{timestamp}.json` - Topic details with chunks/documents
+- `entity_stats_{timestamp}.json` - Entity statistics with top entities by degree
+- `summary_{timestamp}.txt` - Human-readable summary report
+
 ### Retrieval
 
 ```bash
@@ -566,6 +572,9 @@ uv run python cli.py retrieve "Trump met Macron in France" --top-k 10 --graph-id
 ### Visualization
 
 ```bash
+# Display pre-computed statistics (reads from outputs/statistics/)
+uv run python cli.py visualize --mode stats --graph-id 20251118_150602
+
 # Full visualization
 uv run python cli.py visualize --mode full --graph-id 20251118_150602
 
@@ -573,9 +582,50 @@ uv run python cli.py visualize --mode full --graph-id 20251118_150602
 uv run python cli.py visualize --mode entity --entity "trump" --graph-id 20251118_150602
 ```
 
+**Visualization features**:
+- Interactive legend: Click on node types to hide/show them
+- Normalized edge weights: All weights displayed in [0, 1] range
+- Larger nodes and fonts for better readability
+
 ---
 
-## 5. Configuration
+## 5. Understanding Statistics
+
+### Topic Statistics Explained
+
+In the statistics reports, each topic shows:
+- **Chunks**: Number of text chunks (segments) assigned to this topic by BERTopic
+- **Documents**: Number of unique original documents that contain at least one chunk from this topic
+
+**Example interpretation**:
+```
+Topic 0: sri lanka photo misleading
+  Chunks: 44, Documents: 8
+  Keywords: image, photo, sri, lanka, sri lanka
+```
+
+This means:
+- 44 text chunks (of 500 characters each) discuss "sri lanka photo misleading"
+- These 44 chunks come from 8 different fact-check articles
+- On average, each document has ~5.5 chunks about this topic (44 ÷ 8)
+- The topic is recurrent across multiple fact-checks
+
+### Entity Degree (Connections)
+
+The **degree** (or **connections**) of a node represents the total number of edges connected to it:
+- High degree = central node with many relationships
+- For entities: shows how many chunks mention them + co-occurrence relationships
+- For themes: shows how many chunks belong to them + semantic similarities
+
+**Example**:
+```
+donald trump (PERSON) - 156 connections
+```
+This means Trump is mentioned in many chunks and has co-occurrence relationships with many other entities.
+
+---
+
+## 6. Configuration
 
 See [config.yaml](config.yaml) for all parameters:
 

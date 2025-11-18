@@ -16,12 +16,57 @@ import os
 import sys
 import re
 from pathlib import Path
+import requests
+import json
 
 # Add parent directory to path
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
 from fact_check_kg.db_connector import GraphDatabaseConnector
 from fact_check_kg.config import DatabaseConfig
+
+
+def summarize_chunk_with_ollama(chunk_text: str, model: str = "llama3.1:latest", max_length: int = 30) -> str:
+    """
+    Summarize chunk text using Ollama LLM.
+
+    Args:
+        chunk_text: The chunk text to summarize
+        model: Ollama model to use
+        max_length: Maximum words in summary
+
+    Returns:
+        Summary string (or truncated text if Ollama fails)
+    """
+    try:
+        # Call Ollama API
+        response = requests.post(
+            "http://localhost:11434/api/generate",
+            json={
+                "model": model,
+                "prompt": f"Summarize the following text in {max_length} words or less. Be concise and capture the main point:\n\n{chunk_text}\n\nSummary:",
+                "stream": False,
+                "options": {
+                    "temperature": 0.3,
+                    "num_predict": max_length * 2  # Allow some flexibility
+                }
+            },
+            timeout=10
+        )
+
+        if response.status_code == 200:
+            result = response.json()
+            summary = result.get('response', '').strip()
+            # Remove common prefixes
+            for prefix in ["Summary:", "Here's a summary:", "Here is a summary:"]:
+                if summary.startswith(prefix):
+                    summary = summary[len(prefix):].strip()
+            return summary if summary else chunk_text[:50] + "..."
+        else:
+            return chunk_text[:50] + "..."
+    except Exception as e:
+        # Fallback to simple truncation if Ollama is not available
+        return chunk_text[:50] + "..."
 
 
 def extract_timestamp_from_path(file_path: str) -> str:
@@ -42,6 +87,211 @@ def extract_timestamp_from_path(file_path: str) -> str:
     if match:
         return match.group(1)
     return ""
+
+
+def generate_legend_html(chunk_full_texts: dict = None) -> str:
+    """
+    Generate interactive legend HTML with optional chunk popup functionality.
+
+    Args:
+        chunk_full_texts: Dictionary mapping chunk node IDs to full text (None for entity view)
+
+    Returns:
+        HTML string with legend and optional chunk popup
+    """
+    # Chunk modal (only if chunk_full_texts provided)
+    chunk_modal = ""
+    chunk_texts_js = "{}"
+    chunk_click_handler = ""
+
+    if chunk_full_texts:
+        chunk_modal = """
+    <!-- Popup modal for chunk full text -->
+    <div id="chunkModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+                                 background-color: rgba(0,0,0,0.8); z-index: 2000; overflow: auto;">
+        <div style="background-color: #2a2a2a; margin: 5% auto; padding: 30px; width: 70%; max-width: 800px;
+                    border-radius: 10px; border: 2px solid #666; color: white; font-family: Arial; position: relative;">
+            <span onclick="closeChunkModal()" style="position: absolute; top: 15px; right: 20px; font-size: 32px;
+                                                     font-weight: bold; cursor: pointer; color: #aaa;">&times;</span>
+            <h2 style="margin-top: 0; color: #fbc02d; border-bottom: 2px solid #666; padding-bottom: 10px;">Chunk Content</h2>
+            <div id="chunkModalContent" style="max-height: 500px; overflow-y: auto; line-height: 1.6; white-space: pre-wrap;">
+            </div>
+        </div>
+    </div>
+        """
+        chunk_texts_js = json.dumps(chunk_full_texts)
+        chunk_click_handler = """
+                // Add click event listener for chunks
+                network.on("click", function(params) {
+                    if (params.nodes.length > 0) {
+                        var nodeId = params.nodes[0];
+                        var nodeData = nodeMetadata[nodeId];
+
+                        // If it's a chunk node, show the full text
+                        if (nodeData && nodeData.type === 'chunk' && chunkFullTexts[nodeId]) {
+                            showChunkModal(chunkFullTexts[nodeId]);
+                        }
+                    }
+                });
+        """
+
+    chunk_functions = """
+        function showChunkModal(fullText) {
+            var modal = document.getElementById('chunkModal');
+            var content = document.getElementById('chunkModalContent');
+            content.textContent = fullText;
+            modal.style.display = 'block';
+        }
+
+        function closeChunkModal() {
+            document.getElementById('chunkModal').style.display = 'none';
+        }
+
+        // Close modal when clicking outside of it
+        window.onclick = function(event) {
+            var modal = document.getElementById('chunkModal');
+            if (event.target === modal) {
+                closeChunkModal();
+            }
+        }
+    """ if chunk_full_texts else ""
+
+    legend_html = f"""
+    <div style="position: fixed; top: 10px; right: 10px; background-color: rgba(34, 34, 34, 0.9);
+                padding: 15px; border-radius: 8px; border: 2px solid #666; font-family: Arial;
+                color: white; z-index: 1000; max-width: 250px;">
+        <h3 style="margin-top: 0; color: #fff; border-bottom: 2px solid #666; padding-bottom: 5px;">Legend (Click to filter)</h3>
+
+        <h4 style="margin: 10px 0 5px 0; color: #aaa;">Node Types:</h4>
+        <div id="filter-document" style="margin: 5px 0; cursor: pointer; padding: 3px; border-radius: 3px;"
+             onclick="toggleNodeType('document')" data-active="true">
+            <span style="display: inline-block; width: 15px; height: 15px; background-color: #0277bd;
+                        border-radius: 50%; margin-right: 8px;"></span>
+            <span>Document</span>
+            <span style="float: right;">✓</span>
+        </div>
+        <div id="filter-chunk" style="margin: 5px 0; cursor: pointer; padding: 3px; border-radius: 3px;"
+             onclick="toggleNodeType('chunk')" data-active="true">
+            <span style="display: inline-block; width: 15px; height: 15px; background-color: #fbc02d;
+                        border-radius: 50%; margin-right: 8px;"></span>
+            <span>Chunk{' (click to view)' if chunk_full_texts else ''}</span>
+            <span style="float: right;">✓</span>
+        </div>
+        <div id="filter-theme" style="margin: 5px 0; cursor: pointer; padding: 3px; border-radius: 3px;"
+             onclick="toggleNodeType('theme')" data-active="true">
+            <span style="display: inline-block; width: 15px; height: 15px; background-color: #7b1fa2;
+                        border-radius: 50%; margin-right: 8px;"></span>
+            <span>Theme</span>
+            <span style="float: right;">✓</span>
+        </div>
+        <div id="filter-entity" style="margin: 5px 0; cursor: pointer; padding: 3px; border-radius: 3px;"
+             onclick="toggleNodeType('entity')" data-active="true">
+            <span style="display: inline-block; width: 15px; height: 15px; background-color: #388e3c;
+                        border-radius: 50%; margin-right: 8px;"></span>
+            <span>Entity</span>
+            <span style="float: right;">✓</span>
+        </div>
+
+        <h4 style="margin: 15px 0 5px 0; color: #aaa;">Edge Types:</h4>
+        <div style="margin: 5px 0;">
+            <span style="display: inline-block; width: 25px; height: 3px; background-color: #666666;
+                        margin-right: 8px; vertical-align: middle;"></span>
+            <span>CONTAINS</span>
+        </div>
+        <div style="margin: 5px 0;">
+            <span style="display: inline-block; width: 25px; height: 3px; background-color: #ab47bc;
+                        margin-right: 8px; vertical-align: middle;"></span>
+            <span>HAS_TOPIC</span>
+        </div>
+        <div style="margin: 5px 0;">
+            <span style="display: inline-block; width: 25px; height: 3px; background-color: #66bb6a;
+                        margin-right: 8px; vertical-align: middle;"></span>
+            <span>MENTIONS</span>
+        </div>
+        <div style="margin: 5px 0;">
+            <span style="display: inline-block; width: 25px; height: 3px; background-color: #ef5350;
+                        margin-right: 8px; vertical-align: middle;"></span>
+            <span>CO_OCCURS</span>
+        </div>
+        <div style="margin: 5px 0;">
+            <span style="display: inline-block; width: 25px; height: 3px; background-color: #42a5f5;
+                        margin-right: 8px; vertical-align: middle;"></span>
+            <span>SEMANTIC_SIM</span>
+        </div>
+        <div style="margin: 5px 0;">
+            <span style="display: inline-block; width: 25px; height: 3px; background-color: #9c27b0;
+                        margin-right: 8px; vertical-align: middle;"></span>
+            <span>CO_PRESENCE</span>
+        </div>
+    </div>
+
+    {chunk_modal}
+
+    <script type="text/javascript">
+        // Store node metadata and full texts
+        var nodeMetadata = {{}};
+        var chunkFullTexts = {chunk_texts_js};
+
+        // Parse nodes from network
+        setTimeout(function() {{
+            if (typeof network !== 'undefined') {{
+                var nodes = network.body.data.nodes;
+                nodes.forEach(function(node) {{
+                    // Extract type from title (format: "type: node_id")
+                    var title = node.title || '';
+                    var typeMatch = title.match(/^(\\w+):/);
+                    if (typeMatch) {{
+                        nodeMetadata[node.id] = {{type: typeMatch[1], originalHidden: node.hidden || false}};
+                    }}
+                }});
+                {chunk_click_handler}
+            }}
+        }}, 500);
+
+        {chunk_functions}
+
+        function toggleNodeType(nodeType) {{
+            if (typeof network === 'undefined') {{
+                console.error('Network not loaded yet');
+                return;
+            }}
+
+            var filterElement = document.getElementById('filter-' + nodeType);
+            var isActive = filterElement.getAttribute('data-active') === 'true';
+
+            // Toggle state
+            var newState = !isActive;
+            filterElement.setAttribute('data-active', newState);
+
+            // Update visual feedback
+            if (newState) {{
+                filterElement.style.backgroundColor = '';
+                filterElement.querySelector('span:last-child').textContent = '✓';
+            }} else {{
+                filterElement.style.backgroundColor = 'rgba(255, 0, 0, 0.2)';
+                filterElement.querySelector('span:last-child').textContent = '✗';
+            }}
+
+            // Update network
+            var nodes = network.body.data.nodes;
+            var nodesToUpdate = [];
+
+            for (var nodeId in nodeMetadata) {{
+                if (nodeMetadata[nodeId].type === nodeType) {{
+                    nodesToUpdate.push({{
+                        id: nodeId,
+                        hidden: !newState
+                    }});
+                }}
+            }}
+
+            if (nodesToUpdate.length > 0) {{
+                nodes.update(nodesToUpdate);
+            }}
+        }}
+    </script>
+    """
+    return legend_html
 
 
 def load_graph_from_source(graph_path: str = None, use_postgres: bool = False, db_config: DatabaseConfig = None) -> nx.Graph:
@@ -126,6 +376,22 @@ def visualize_full_graph(
 
     print(f"Visualizing {G_viz.number_of_nodes()} nodes, {G_viz.number_of_edges()} edges...")
 
+    # Summarize chunks with Ollama (only for chunks in the visualization)
+    print("Generating chunk summaries with Ollama...")
+    chunk_summaries = {}
+    chunk_full_texts = {}
+    chunk_nodes = [n for n, d in G_viz.nodes(data=True) if d.get('type') == 'chunk']
+
+    for i, node in enumerate(chunk_nodes, 1):
+        node_data = G_viz.nodes[node]
+        chunk_text = node_data.get('text', '')
+        if chunk_text:
+            print(f"  Summarizing chunk {i}/{len(chunk_nodes)}...", end='\r')
+            summary = summarize_chunk_with_ollama(chunk_text, max_length=15)
+            chunk_summaries[node] = summary
+            chunk_full_texts[node] = chunk_text
+    print(f"\nSummaries generated for {len(chunk_summaries)} chunks")
+
     # Create pyvis network with better font settings
     net = Network(height="900px", width="100%", bgcolor="#222222", font_color="white")
     net.barnes_hut(gravity=-8000, central_gravity=0.3, spring_length=100)
@@ -151,20 +417,34 @@ def visualize_full_graph(
             label = node_data.get('entity_text', node.split('::')[-1])
         elif node_type == 'theme':
             label = node_data.get('label', f"theme_{node.split('::')[-1]}")
+        elif node_type == 'chunk':
+            # Use Ollama summary for chunk labels
+            label = chunk_summaries.get(node, node.split('::')[-1][:20])
         else:
             label = node.split('::')[-1][:20]
 
-        # Size by degree
+        # Size by degree (increased from 10+min(deg*2,40) to 30+min(deg*3,80))
         degree = G_viz.degree(node)
-        size = 10 + min(degree * 2, 40)
+        size = 30 + min(degree * 3, 80)
+
+        # Prepare title (tooltip) - include full text for chunks
+        if node_type == 'chunk':
+            full_text = chunk_full_texts.get(node, '')
+            # Escape HTML special characters and limit length for tooltip
+            full_text_preview = full_text[:200].replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br>')
+            title = f"{node_type}: {node}<br>Degree: {degree}<br><br>Preview: {full_text_preview}..."
+        else:
+            title = f"{node_type}: {node}<br>Degree: {degree}"
 
         net.add_node(
             node,
             label=label,
             color=color_map.get(node_type, 'gray'),
             size=size,
-            title=f"{node_type}: {node}<br>Degree: {degree}",
-            font={'size': 16, 'face': 'arial'}
+            title=title,
+            font={'size': 24, 'face': 'arial'},  # Increased from 16 to 24
+            # Store full text as custom attribute for chunks
+            full_text=chunk_full_texts.get(node, '') if node_type == 'chunk' else ''
         )
 
     # Add edges with colors by type
@@ -173,79 +453,31 @@ def visualize_full_graph(
         'HAS_TOPIC': '#ab47bc',
         'MENTIONS': '#66bb6a',
         'CO_OCCURS': '#ef5350',
-        'SEMANTIC_SIM': '#42a5f5'
+        'SEMANTIC_SIM': '#42a5f5',
+        'CO_PRESENCE': '#9c27b0'
     }
 
     for edge in G_viz.edges(data=True):
         edge_type = edge[2].get('edge_type', 'unknown')
         weight = edge[2].get('weight', 1)
 
+        # Normalize weight to [0, 1] if > 1 (for CO_OCCURS and CO_PRESENCE edges)
+        if weight > 1:
+            normalized_weight = min(weight / 10.0, 1.0)  # Divide by 10 and cap at 1
+        else:
+            normalized_weight = weight
+
         net.add_edge(
             edge[0],
             edge[1],
-            title=f"{edge_type} (weight: {weight:.2f})",
-            label=f"{weight:.2f}",  # Display weight on edge
+            title=f"{edge_type} (weight: {weight:.2f}, normalized: {normalized_weight:.2f})",
+            label=f"{normalized_weight:.2f}",  # Display normalized weight on edge
             color=edge_color_map.get(edge_type, 'gray'),
-            width=min(weight * 2, 5)
+            width=min(normalized_weight * 3, 5)  # Increased multiplier from 2 to 3
         )
 
-    # Add legend
-    legend_html = """
-    <div style="position: fixed; top: 10px; right: 10px; background-color: rgba(34, 34, 34, 0.9);
-                padding: 15px; border-radius: 8px; border: 2px solid #666; font-family: Arial;
-                color: white; z-index: 1000; max-width: 250px;">
-        <h3 style="margin-top: 0; color: #fff; border-bottom: 2px solid #666; padding-bottom: 5px;">Legend</h3>
-
-        <h4 style="margin: 10px 0 5px 0; color: #aaa;">Node Types:</h4>
-        <div style="margin: 5px 0;">
-            <span style="display: inline-block; width: 15px; height: 15px; background-color: #0277bd;
-                        border-radius: 50%; margin-right: 8px;"></span>
-            <span>Document</span>
-        </div>
-        <div style="margin: 5px 0;">
-            <span style="display: inline-block; width: 15px; height: 15px; background-color: #fbc02d;
-                        border-radius: 50%; margin-right: 8px;"></span>
-            <span>Chunk</span>
-        </div>
-        <div style="margin: 5px 0;">
-            <span style="display: inline-block; width: 15px; height: 15px; background-color: #7b1fa2;
-                        border-radius: 50%; margin-right: 8px;"></span>
-            <span>Theme</span>
-        </div>
-        <div style="margin: 5px 0;">
-            <span style="display: inline-block; width: 15px; height: 15px; background-color: #388e3c;
-                        border-radius: 50%; margin-right: 8px;"></span>
-            <span>Entity</span>
-        </div>
-
-        <h4 style="margin: 15px 0 5px 0; color: #aaa;">Edge Types:</h4>
-        <div style="margin: 5px 0;">
-            <span style="display: inline-block; width: 25px; height: 3px; background-color: #666666;
-                        margin-right: 8px; vertical-align: middle;"></span>
-            <span>CONTAINS</span>
-        </div>
-        <div style="margin: 5px 0;">
-            <span style="display: inline-block; width: 25px; height: 3px; background-color: #ab47bc;
-                        margin-right: 8px; vertical-align: middle;"></span>
-            <span>HAS_TOPIC</span>
-        </div>
-        <div style="margin: 5px 0;">
-            <span style="display: inline-block; width: 25px; height: 3px; background-color: #66bb6a;
-                        margin-right: 8px; vertical-align: middle;"></span>
-            <span>MENTIONS</span>
-        </div>
-        <div style="margin: 5px 0;">
-            <span style="display: inline-block; width: 25px; height: 3px; background-color: #ef5350;
-                        margin-right: 8px; vertical-align: middle;"></span>
-            <span>CO_OCCURS</span>
-        </div>
-        <div style="margin: 5px 0;">
-            <span style="display: inline-block; width: 25px; height: 3px; background-color: #42a5f5;
-                        margin-right: 8px; vertical-align: middle;"></span>
-            <span>SEMANTIC_SIM</span>
-        </div>
-    </div>
-    """
+    # Generate interactive legend with chunk popup functionality
+    legend_html = generate_legend_html(chunk_full_texts)
 
     # Save
     net.save_graph(output_path)
@@ -260,7 +492,6 @@ def visualize_full_graph(
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(html_content)
     print(f"\nVisualization saved to: {output_path}")
-    print(f"Open in browser to explore!")
 
 
 def visualize_entity_subgraph(
@@ -320,6 +551,22 @@ def visualize_entity_subgraph(
     G_viz = G.subgraph(subgraph_nodes)
     print(f"Subgraph: {G_viz.number_of_nodes()} nodes, {G_viz.number_of_edges()} edges")
 
+    # Summarize chunks with Ollama (only for chunks in the visualization)
+    print("Generating chunk summaries with Ollama...")
+    chunk_summaries = {}
+    chunk_full_texts = {}
+    chunk_nodes = [n for n, d in G_viz.nodes(data=True) if d.get('type') == 'chunk']
+
+    for i, node in enumerate(chunk_nodes, 1):
+        node_data = G_viz.nodes[node]
+        chunk_text = node_data.get('text', '')
+        if chunk_text:
+            print(f"  Summarizing chunk {i}/{len(chunk_nodes)}...", end='\r')
+            summary = summarize_chunk_with_ollama(chunk_text, max_length=15)
+            chunk_summaries[node] = summary
+            chunk_full_texts[node] = chunk_text
+    print(f"\nSummaries generated for {len(chunk_summaries)} chunks")
+
     # Create network with better font settings
     net = Network(height="900px", width="100%", bgcolor="#222222", font_color="white")
     net.barnes_hut()
@@ -340,33 +587,41 @@ def visualize_entity_subgraph(
         node_data = G_viz.nodes[node]
         node_type = node_data.get('type', 'unknown')
 
-        # Don't truncate labels for subgraphs - show full text
+        # Create label
         if node_type == 'entity':
             label = node_data.get('entity_text', node.split('::')[-1])
         elif node_type == 'theme':
             label = node_data.get('label', f"theme_{node.split('::')[-1]}")
         elif node_type == 'chunk':
-            # For chunks, show a slightly shorter preview but not too truncated
-            chunk_id = node.split('::')[-1]
-            label = f"Chunk {chunk_id[:10]}"
+            # Use Ollama summary for chunk labels
+            label = chunk_summaries.get(node, node.split('::')[-1][:20])
         else:
             label = node.split('::')[-1]
 
-        # Highlight central entity
+        # Highlight central entity (increased sizes: 50→70, 25→40)
         if node == entity_node:
-            size = 50
+            size = 70
             color = '#ff0000'  # Red for central node
         else:
-            size = 25
+            size = 40
             color = color_map.get(node_type, 'gray')
+
+        # Prepare title (tooltip) - include full text for chunks
+        if node_type == 'chunk':
+            full_text = chunk_full_texts.get(node, '')
+            # Escape HTML special characters and limit length for tooltip
+            full_text_preview = full_text[:200].replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br>')
+            title = f"{node_type}: {node}<br><br>Preview: {full_text_preview}..."
+        else:
+            title = f"{node_type}: {node}"
 
         net.add_node(
             node,
             label=label,
             color=color,
             size=size,
-            title=f"{node_type}: {node}",
-            font={'size': 20, 'face': 'arial'}  # Larger font for subgraph
+            title=title,
+            font={'size': 28, 'face': 'arial'}  # Increased from 20 to 28
         )
 
     # Add edges
@@ -375,84 +630,31 @@ def visualize_entity_subgraph(
         'HAS_TOPIC': '#ab47bc',
         'MENTIONS': '#66bb6a',
         'CO_OCCURS': '#ef5350',
-        'SEMANTIC_SIM': '#42a5f5'
+        'SEMANTIC_SIM': '#42a5f5',
+        'CO_PRESENCE': '#9c27b0'
     }
 
     for edge in G_viz.edges(data=True):
         edge_type = edge[2].get('edge_type', 'unknown')
         weight = edge[2].get('weight', 1)
 
+        # Normalize weight to [0, 1] if > 1 (for CO_OCCURS and CO_PRESENCE edges)
+        if weight > 1:
+            normalized_weight = min(weight / 10.0, 1.0)  # Divide by 10 and cap at 1
+        else:
+            normalized_weight = weight
+
         net.add_edge(
             edge[0],
             edge[1],
-            title=f"{edge_type} (weight: {weight:.2f})",
-            label=f"{weight:.2f}",  # Display weight on edge
+            title=f"{edge_type} (weight: {weight:.2f}, normalized: {normalized_weight:.2f})",
+            label=f"{normalized_weight:.2f}",  # Display normalized weight on edge
             color=edge_color_map.get(edge_type, 'gray'),
-            width=min(weight * 2, 5)
+            width=min(normalized_weight * 3, 5)  # Increased multiplier from 2 to 3
         )
 
-    # Add legend
-    legend_html = """
-    <div style="position: fixed; top: 10px; right: 10px; background-color: rgba(34, 34, 34, 0.9);
-                padding: 15px; border-radius: 8px; border: 2px solid #666; font-family: Arial;
-                color: white; z-index: 1000; max-width: 250px;">
-        <h3 style="margin-top: 0; color: #fff; border-bottom: 2px solid #666; padding-bottom: 5px;">Legend</h3>
-
-        <h4 style="margin: 10px 0 5px 0; color: #aaa;">Node Types:</h4>
-        <div style="margin: 5px 0;">
-            <span style="display: inline-block; width: 15px; height: 15px; background-color: #0277bd;
-                        border-radius: 50%; margin-right: 8px;"></span>
-            <span>Document</span>
-        </div>
-        <div style="margin: 5px 0;">
-            <span style="display: inline-block; width: 15px; height: 15px; background-color: #fbc02d;
-                        border-radius: 50%; margin-right: 8px;"></span>
-            <span>Chunk</span>
-        </div>
-        <div style="margin: 5px 0;">
-            <span style="display: inline-block; width: 15px; height: 15px; background-color: #7b1fa2;
-                        border-radius: 50%; margin-right: 8px;"></span>
-            <span>Theme</span>
-        </div>
-        <div style="margin: 5px 0;">
-            <span style="display: inline-block; width: 15px; height: 15px; background-color: #388e3c;
-                        border-radius: 50%; margin-right: 8px;"></span>
-            <span>Entity</span>
-        </div>
-        <div style="margin: 5px 0;">
-            <span style="display: inline-block; width: 15px; height: 15px; background-color: #ff0000;
-                        border-radius: 50%; margin-right: 8px;"></span>
-            <span>Central Entity</span>
-        </div>
-
-        <h4 style="margin: 15px 0 5px 0; color: #aaa;">Edge Types:</h4>
-        <div style="margin: 5px 0;">
-            <span style="display: inline-block; width: 25px; height: 3px; background-color: #666666;
-                        margin-right: 8px; vertical-align: middle;"></span>
-            <span>CONTAINS</span>
-        </div>
-        <div style="margin: 5px 0;">
-            <span style="display: inline-block; width: 25px; height: 3px; background-color: #ab47bc;
-                        margin-right: 8px; vertical-align: middle;"></span>
-            <span>HAS_TOPIC</span>
-        </div>
-        <div style="margin: 5px 0;">
-            <span style="display: inline-block; width: 25px; height: 3px; background-color: #66bb6a;
-                        margin-right: 8px; vertical-align: middle;"></span>
-            <span>MENTIONS</span>
-        </div>
-        <div style="margin: 5px 0;">
-            <span style="display: inline-block; width: 25px; height: 3px; background-color: #ef5350;
-                        margin-right: 8px; vertical-align: middle;"></span>
-            <span>CO_OCCURS</span>
-        </div>
-        <div style="margin: 5px 0;">
-            <span style="display: inline-block; width: 25px; height: 3px; background-color: #42a5f5;
-                        margin-right: 8px; vertical-align: middle;"></span>
-            <span>SEMANTIC_SIM</span>
-        </div>
-    </div>
-    """
+    # Generate interactive legend with chunk popup functionality
+    legend_html = generate_legend_html(chunk_full_texts)
 
     # Save
     net.save_graph(output_path)
@@ -472,64 +674,61 @@ def visualize_entity_subgraph(
 
 def analyze_graph_stats(graph_path: str = None, use_postgres: bool = False, db_config: DatabaseConfig = None):
     """
-    Print detailed graph statistics.
+    Display pre-computed graph statistics from the statistics directory.
+
+    Instead of recalculating statistics from the graph, this function reads
+    the summary file that was already generated during graph construction,
+    avoiding redundant computation.
 
     Args:
-        graph_path: Path to .gpickle file (if not using postgres)
+        graph_path: Path to .gpickle file (used to find corresponding stats)
         use_postgres: Whether to load from PostgreSQL
         db_config: Database configuration
     """
-    G = load_graph_from_source(graph_path, use_postgres, db_config)
+    # Extract timestamp from graph path to find corresponding stats
+    timestamp = extract_timestamp_from_path(graph_path) if graph_path else None
 
-    print("\n" + "="*60)
-    print("GRAPH STATISTICS")
-    print("="*60)
+    if not timestamp:
+        print("\n" + "="*60)
+        print("ERROR: Could not extract timestamp from graph path")
+        print("="*60)
+        print("\nPlease provide a graph file with timestamp in format: graph_YYYYMMDD_HHMMSS.gpickle")
+        print("Example: outputs/graphs/graph_20251118_155115.gpickle")
+        return
 
-    print(f"\nTotal nodes: {G.number_of_nodes()}")
-    print(f"Total edges: {G.number_of_edges()}")
+    # Look for the pre-computed summary file
+    stats_dir = Path("outputs/statistics")
+    summary_file = stats_dir / f"summary_{timestamp}.txt"
 
-    # Nodes by type
-    node_types = defaultdict(int)
-    for node, data in G.nodes(data=True):
-        node_types[data.get('type', 'unknown')] += 1
+    if summary_file.exists():
+        print("\n" + "="*60)
+        print("READING PRE-COMPUTED STATISTICS")
+        print(f"Timestamp: {timestamp}")
+        print("="*60 + "\n")
 
-    print("\nNodes by type:")
-    for ntype, count in sorted(node_types.items()):
-        print(f"  {ntype}: {count}")
+        # Read and display the summary file
+        with open(summary_file, 'r', encoding='utf-8') as f:
+            summary_content = f.read()
 
-    # Edges by type
-    edge_types = defaultdict(int)
-    for u, v, data in G.edges(data=True):
-        edge_types[data.get('edge_type', 'unknown')] += 1
+        print(summary_content)
 
-    print("\nEdges by type:")
-    for etype, count in sorted(edge_types.items()):
-        print(f"  {etype}: {count}")
-
-    # Top entities by degree
-    print("\nTop 15 entities by degree:")
-    entities = [
-        (n, G.degree(n), G.nodes[n].get('entity_text', ''))
-        for n, d in G.nodes(data=True)
-        if d.get('type') == 'entity'
-    ]
-    entities.sort(key=lambda x: x[1], reverse=True)
-
-    for i, (node, degree, text) in enumerate(entities[:15], 1):
-        entity_type = node.split('::')[1]
-        print(f"  {i}. {entity_type}::{text} - {degree} connections")
-
-    # Themes info
-    print("\nThemes:")
-    themes = [
-        (n, G.nodes[n].get('label', ''), G.degree(n))
-        for n, d in G.nodes(data=True)
-        if d.get('type') == 'theme'
-    ]
-    for node, label, degree in themes:
-        print(f"  {node}: '{label}' - {degree} connections")
-
-    print("\n" + "="*60)
+        print("\n" + "="*60)
+        print("STATISTICS FILES AVAILABLE:")
+        print("="*60)
+        print(f"  - Summary: {summary_file}")
+        print(f"  - General stats: {stats_dir}/general_stats_{timestamp}.json")
+        print(f"  - Topic stats: {stats_dir}/topic_stats_{timestamp}.json")
+        print(f"  - Entity stats: {stats_dir}/entity_stats_{timestamp}.json")
+        print("="*60 + "\n")
+    else:
+        print("\n" + "="*60)
+        print("WARNING: Pre-computed statistics not found")
+        print("="*60)
+        print(f"\nExpected file: {summary_file}")
+        print("\nStatistics are normally generated during graph build.")
+        print("If you built this graph before the statistics feature was added,")
+        print("please rebuild the graph to generate statistics.")
+        print("="*60 + "\n")
 
 
 def main():

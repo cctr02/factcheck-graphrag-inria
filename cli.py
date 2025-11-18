@@ -113,11 +113,13 @@ def build(max_docs, chunk_size, chunk_overlap, use_postgres, log_level):
               help=f'Maximum nodes to display (default: {config.visualization.max_nodes_full_view})')
 @click.option('--output', type=str, default=None,
               help='Output HTML file (auto-generated if not specified)')
+@click.option('--graph-id', type=str, default=None,
+              help='Graph ID (timestamp) to use (e.g., 20251117_213022)')
 @click.option('--use-postgres', is_flag=True,
               help='Load graph from PostgreSQL')
 @click.option('--graph-file', type=str, default=None,
               help='Path to graph pickle file (if not using postgres)')
-def visualize(mode, entity, max_nodes, output, use_postgres, graph_file):
+def visualize(mode, entity, max_nodes, output, graph_id, use_postgres, graph_file):
     """Visualize the knowledge graph."""
     import subprocess
     from fact_check_kg.visualize_graph import analyze_graph_stats
@@ -126,6 +128,13 @@ def visualize(mode, entity, max_nodes, output, use_postgres, graph_file):
     logger.info("=" * 60)
     logger.info(f"VISUALIZING GRAPH - MODE: {mode.upper()}")
     logger.info("=" * 60)
+
+    # Determine graph file path based on graph_id
+    if graph_id and not graph_file:
+        from pathlib import Path
+        graph_file = str(Path(config.paths.graphs_dir) / f"graph_{graph_id}.gpickle")
+        logger.info(f"Using graph with ID: {graph_id}")
+        logger.info(f"Graph file: {graph_file}")
 
     # Build command based on mode
     if mode == 'stats':
@@ -160,6 +169,9 @@ def visualize(mode, entity, max_nodes, output, use_postgres, graph_file):
 
     if graph_file:
         cmd.extend(["--graph", graph_file])
+
+    # Add mode to command
+    cmd.extend(["--mode", mode])
 
     if mode == 'entity' and entity:
         cmd.extend(["--entity", entity])
