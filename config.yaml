@@ -46,7 +46,7 @@ graph_construction:
 
   # Entity extraction thresholds
   co_occurrence_threshold: 2  # Minimum co-occurrences to create edge
-  semantic_similarity_threshold: 0.6  # Minimum similarity for entity edges
+  semantic_similarity_threshold: 0.8  # Minimum similarity for entity edges
 
   # Entity types to extract (spaCy)
   entity_types:
