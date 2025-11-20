@@ -43,3 +43,4 @@ Afficher aussi les 10 keywords daans le summary de la création du graph
 entity faire attention il faut qu'aavec ou sans s ça soit la même entité (philippine et philippines) unifier les mots (nigeria nigerian
 )
 régler le problème pour les entités trouvées ( sri, lanka, sri lanka, sri lankan, lankan)
+

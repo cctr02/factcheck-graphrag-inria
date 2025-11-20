@@ -34,13 +34,47 @@ class RetrievalResultsManager:
         self.results_dir = Path("outputs/retrieval_results")
         self.results_dir.mkdir(parents=True, exist_ok=True)
 
+    def _get_next_retrieval_filename(self, graph_id: str) -> str:
+        """
+        Get next available filename for retrieval results.
+
+        Args:
+            graph_id: Graph ID to use as base
+
+        Returns:
+            Filename base like "results_{graph_id}_1"
+        """
+        # Find existing retrieval files for this graph_id
+        pattern = f"results_{graph_id}_*.json"
+        existing_files = list(self.results_dir.glob(pattern))
+
+        if not existing_files:
+            return f"results_{graph_id}_1"
+
+        # Extract numbers from filenames
+        numbers = []
+        for file in existing_files:
+            # Extract number from filename like "results_20251118_155115_1.json"
+            stem = file.stem  # Remove .json
+            parts = stem.split('_')
+            if len(parts) >= 4:  # results_YYYYMMDD_HHMMSS_N
+                try:
+                    numbers.append(int(parts[-1]))
+                except ValueError:
+                    continue
+
+        # Get next number
+        next_num = max(numbers) + 1 if numbers else 1
+        return f"results_{graph_id}_{next_num}"
+
     def format_results_detailed(
         self,
         claim: str,
         results: List[Dict],
         alpha: float,
         beta: float,
-        gamma: float
+        gamma: float,
+        delta: float
     ) -> Dict:
         """
         Format results with detailed scoring breakdown.
@@ -51,6 +85,7 @@ class RetrievalResultsManager:
             alpha: Semantic weight
             beta: Thematic weight
             gamma: Entity weight
+            delta: Topic distribution weight
 
         Returns:
             Formatted results dictionary
@@ -64,7 +99,8 @@ class RetrievalResultsManager:
                 "weights": {
                     "alpha_semantic": alpha,
                     "beta_thematic": beta,
-                    "gamma_entity": gamma
+                    "gamma_entity": gamma,
+                    "delta_topic_dist": delta
                 },
                 "total_results": len(results)
             },
@@ -77,19 +113,22 @@ class RetrievalResultsManager:
                 "chunk_id": result['chunk_id'],
                 "document_id": result['doc_id'],
                 "text_preview": result['text'][:200] + "..." if len(result['text']) > 200 else result['text'],
+                "full_text": result['text'],  # Store full text
                 "text_length": len(result['text']),
                 "scores": {
                     "total": round(result['score_total'], 4),
                     "semantic": round(result['score_sem'], 4),
                     "thematic": round(result['score_theme'], 4),
-                    "entity": round(result['score_entity'], 4)
+                    "entity": round(result['score_entity'], 4),
+                    "topic_dist": round(result['score_topic_dist'], 4)
                 },
                 "score_contributions": {
                     "semantic_contribution": round(result['score_sem'] * alpha, 4),
                     "thematic_contribution": round(result['score_theme'] * beta, 4),
-                    "entity_contribution": round(result['score_entity'] * gamma, 4)
+                    "entity_contribution": round(result['score_entity'] * gamma, 4),
+                    "topic_dist_contribution": round(result['score_topic_dist'] * delta, 4)
                 },
-                "score_explanation": self._generate_score_explanation(result, alpha, beta, gamma)
+                "score_explanation": self._generate_score_explanation(result, alpha, beta, gamma, delta)
             }
             formatted["results"].append(formatted_result)
 
@@ -100,7 +139,8 @@ class RetrievalResultsManager:
         result: Dict,
         alpha: float,
         beta: float,
-        gamma: float
+        gamma: float,
+        delta: float
     ) -> str:
         """
         Generate human-readable explanation of score calculation.
@@ -110,6 +150,7 @@ class RetrievalResultsManager:
             alpha: Semantic weight
             beta: Thematic weight
             gamma: Entity weight
+            delta: Topic distribution weight
 
         Returns:
             Score explanation string
@@ -117,18 +158,21 @@ class RetrievalResultsManager:
         sem_contrib = result['score_sem'] * alpha
         theme_contrib = result['score_theme'] * beta
         entity_contrib = result['score_entity'] * gamma
+        topic_dist_contrib = result['score_topic_dist'] * delta
         total = result['score_total']
 
         explanation = f"Total score: {total:.4f} = "
         explanation += f"({result['score_sem']:.4f} × {alpha}) + "
         explanation += f"({result['score_theme']:.4f} × {beta}) + "
-        explanation += f"({result['score_entity']:.4f} × {gamma})"
+        explanation += f"({result['score_entity']:.4f} × {gamma}) + "
+        explanation += f"({result['score_topic_dist']:.4f} × {delta})"
 
         # Identify dominant component
         components = [
             ("semantic", sem_contrib),
             ("thematic", theme_contrib),
-            ("entity", entity_contrib)
+            ("entity", entity_contrib),
+            ("topic_dist", topic_dist_contrib)
         ]
         dominant = max(components, key=lambda x: x[1])
         explanation += f"\nDominant component: {dominant[0]} ({dominant[1]:.4f})"
@@ -175,17 +219,24 @@ class RetrievalResultsManager:
             reverse=True
         )
 
-        # 5. Ranking by score variance (most balanced)
+        # 5. Ranking by topic distribution score
+        rankings["by_topic_dist_score"] = sorted(
+            results,
+            key=lambda x: x['score_topic_dist'],
+            reverse=True
+        )
+
+        # 6. Ranking by score variance (most balanced)
         rankings["by_balance"] = sorted(
             results,
             key=lambda x: self._calculate_score_variance(x),
             reverse=False  # Lower variance = more balanced
         )
 
-        # 6. Ranking by maximum component score
+        # 7. Ranking by maximum component score
         rankings["by_max_component"] = sorted(
             results,
-            key=lambda x: max(x['score_sem'], x['score_theme'], x['score_entity']),
+            key=lambda x: max(x['score_sem'], x['score_theme'], x['score_entity'], x['score_topic_dist']),
             reverse=True
         )
 
@@ -201,7 +252,7 @@ class RetrievalResultsManager:
         Returns:
             Variance value
         """
-        scores = [result['score_sem'], result['score_theme'], result['score_entity']]
+        scores = [result['score_sem'], result['score_theme'], result['score_entity'], result['score_topic_dist']]
         mean = sum(scores) / len(scores)
         variance = sum((x - mean) ** 2 for x in scores) / len(scores)
         return variance
@@ -230,12 +281,14 @@ class RetrievalResultsManager:
         sem_scores = [r['score_sem'] for r in results]
         theme_scores = [r['score_theme'] for r in results]
         entity_scores = [r['score_entity'] for r in results]
+        topic_dist_scores = [r['score_topic_dist'] for r in results]
 
         for name, scores in [
             ("total", total_scores),
             ("semantic", sem_scores),
             ("thematic", theme_scores),
-            ("entity", entity_scores)
+            ("entity", entity_scores),
+            ("topic_dist", topic_dist_scores)
         ]:
             stats["score_statistics"][name] = {
                 "mean": sum(scores) / len(scores),
@@ -249,7 +302,8 @@ class RetrievalResultsManager:
             scores = {
                 "semantic": result['score_sem'],
                 "thematic": result['score_theme'],
-                "entity": result['score_entity']
+                "entity": result['score_entity'],
+                "topic_dist": result['score_topic_dist']
             }
             dominant = max(scores, key=scores.get)
             stats["component_analysis"][dominant] = stats["component_analysis"].get(dominant, 0) + 1
@@ -263,7 +317,10 @@ class RetrievalResultsManager:
         alpha: float,
         beta: float,
         gamma: float,
-        rankings: Dict[str, List[Dict]] = None
+        delta: float,
+        rankings: Dict[str, List[Dict]] = None,
+        graph_id: str = None,
+        custom_name: str = None
     ) -> Tuple[str, str]:
         """
         Save results to JSON and text files.
@@ -274,15 +331,28 @@ class RetrievalResultsManager:
             alpha: Semantic weight
             beta: Thematic weight
             gamma: Entity weight
+            delta: Topic distribution weight
             rankings: Optional pre-computed rankings
+            graph_id: Graph ID to use as base timestamp
+            custom_name: Custom name for this retrieval (e.g., "test1")
 
         Returns:
             Tuple of (json_path, text_path)
         """
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Determine filename based on graph_id and custom_name
+        if custom_name:
+            # Use custom name: results_{graph_id}_{custom_name}
+            filename_base = f"results_{graph_id}_{custom_name}" if graph_id else f"results_{custom_name}"
+        elif graph_id:
+            # Auto-increment: results_{graph_id}_1, results_{graph_id}_2, etc.
+            filename_base = self._get_next_retrieval_filename(graph_id)
+        else:
+            # Fallback to timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename_base = f"results_{timestamp}"
 
         # Format results
-        formatted = self.format_results_detailed(claim, results, alpha, beta, gamma)
+        formatted = self.format_results_detailed(claim, results, alpha, beta, gamma, delta)
 
         # Create rankings if not provided
         if rankings is None:
@@ -305,13 +375,13 @@ class RetrievalResultsManager:
         formatted["statistics"] = self.generate_statistics(results)
 
         # Save JSON
-        json_path = self.results_dir / f"results_{timestamp}.json"
+        json_path = self.results_dir / f"{filename_base}.json"
         with open(json_path, 'w') as f:
             json.dump(formatted, f, indent=2)
 
         # Generate text report
         text_report = self._generate_text_report(formatted, rankings)
-        text_path = self.results_dir / f"results_{timestamp}.txt"
+        text_path = self.results_dir / f"{filename_base}.txt"
         with open(text_path, 'w', encoding='utf-8') as f:
             f.write(text_report)
 
@@ -348,6 +418,7 @@ class RetrievalResultsManager:
         report.append(f"  Alpha (Semantic): {formatted['metadata']['weights']['alpha_semantic']}")
         report.append(f"  Beta (Thematic): {formatted['metadata']['weights']['beta_thematic']}")
         report.append(f"  Gamma (Entity): {formatted['metadata']['weights']['gamma_entity']}")
+        report.append(f"  Delta (Topic Dist): {formatted['metadata']['weights']['delta_topic_dist']}")
         report.append(f"\nTotal Results: {formatted['metadata']['total_results']}")
         report.append("")
 
@@ -380,6 +451,7 @@ class RetrievalResultsManager:
             report.append(f"     Semantic: {result['scores']['semantic']:.4f} (contrib: {result['score_contributions']['semantic_contribution']:.4f})")
             report.append(f"     Thematic: {result['scores']['thematic']:.4f} (contrib: {result['score_contributions']['thematic_contribution']:.4f})")
             report.append(f"     Entity: {result['scores']['entity']:.4f} (contrib: {result['score_contributions']['entity_contribution']:.4f})")
+            report.append(f"     Topic Dist: {result['scores']['topic_dist']:.4f} (contrib: {result['score_contributions']['topic_dist_contribution']:.4f})")
             report.append(f"   {result['score_explanation']}")
             report.append(f"   Text: {result['text_preview']}")
 
@@ -394,6 +466,19 @@ class RetrievalResultsManager:
             report.append(f"\n{ranking_name.replace('_', ' ').title()} (Top 5):")
             for i, result in enumerate(ranking_results[:5], 1):
                 report.append(f"  {i}. {result['chunk_id']} - Total: {result['score_total']:.4f}")
+
+        # All chunks with full text
+        report.append("\n\nALL RETRIEVED CHUNKS (Full Text)")
+        report.append("=" * 80)
+        for i, result in enumerate(formatted["results"], 1):
+            report.append(f"\n--- Chunk #{i}: {result['chunk_id']} ---")
+            report.append(f"Document ID: {result['document_id']}")
+            report.append(f"Total Score: {result['scores']['total']:.4f}")
+            report.append(f"\nFull Text:")
+            # Get full text from formatted results (we need to add it)
+            full_text = result.get('full_text', result['text_preview'])
+            report.append(full_text)
+            report.append("-" * 80)
 
         report.append("\n" + "=" * 80)
 
@@ -428,10 +513,11 @@ class RetrievalResultsManager:
             print(f"Document ID: {result['doc_id']}")
             print(f"Chunk ID: {result['chunk_id']}")
             print(f"\nScores:")
-            print(f"  Total:    {result['score_total']:.4f}")
-            print(f"  Semantic: {result['score_sem']:.4f}")
-            print(f"  Thematic: {result['score_theme']:.4f}")
-            print(f"  Entity:   {result['score_entity']:.4f}")
+            print(f"  Total:      {result['score_total']:.4f}")
+            print(f"  Semantic:   {result['score_sem']:.4f}")
+            print(f"  Thematic:   {result['score_theme']:.4f}")
+            print(f"  Entity:     {result['score_entity']:.4f}")
+            print(f"  Topic Dist: {result['score_topic_dist']:.4f}")
             print(f"\nText preview:")
             text_preview = result['text'][:300] + "..." if len(result['text']) > 300 else result['text']
             print(f"  {text_preview}")
@@ -440,7 +526,8 @@ class RetrievalResultsManager:
             scores = {
                 'semantic': result['score_sem'],
                 'thematic': result['score_theme'],
-                'entity': result['score_entity']
+                'entity': result['score_entity'],
+                'topic_dist': result['score_topic_dist']
             }
             dominant = max(scores, key=scores.get)
             print(f"\nDominant component: {dominant} ({scores[dominant]:.4f})")

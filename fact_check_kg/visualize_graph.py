@@ -327,6 +327,11 @@ def load_graph_from_source(graph_path: str = None, use_postgres: bool = False, d
             db.disconnect()
     else:
         print(f"Loading graph from {graph_path}...")
+        if not os.path.exists(graph_path):
+            raise FileNotFoundError(
+                f"Graph file not found: {graph_path}\n"
+                f"Available graphs can be listed with: uv run python cli.py list-graphs"
+            )
         with open(graph_path, 'rb') as f:
             G = pickle.load(f)
         return G
@@ -376,21 +381,17 @@ def visualize_full_graph(
 
     print(f"Visualizing {G_viz.number_of_nodes()} nodes, {G_viz.number_of_edges()} edges...")
 
-    # Summarize chunks with Ollama (only for chunks in the visualization)
-    print("Generating chunk summaries with Ollama...")
-    chunk_summaries = {}
+    # Store chunk full texts for hover display
+    print("Collecting chunk texts...")
     chunk_full_texts = {}
     chunk_nodes = [n for n, d in G_viz.nodes(data=True) if d.get('type') == 'chunk']
 
-    for i, node in enumerate(chunk_nodes, 1):
+    for node in chunk_nodes:
         node_data = G_viz.nodes[node]
         chunk_text = node_data.get('text', '')
         if chunk_text:
-            print(f"  Summarizing chunk {i}/{len(chunk_nodes)}...", end='\r')
-            summary = summarize_chunk_with_ollama(chunk_text, max_length=15)
-            chunk_summaries[node] = summary
             chunk_full_texts[node] = chunk_text
-    print(f"\nSummaries generated for {len(chunk_summaries)} chunks")
+    print(f"Collected texts for {len(chunk_full_texts)} chunks")
 
     # Create pyvis network with better font settings
     net = Network(height="900px", width="100%", bgcolor="#222222", font_color="white")
@@ -418,8 +419,8 @@ def visualize_full_graph(
         elif node_type == 'theme':
             label = node_data.get('label', f"theme_{node.split('::')[-1]}")
         elif node_type == 'chunk':
-            # Use Ollama summary for chunk labels
-            label = chunk_summaries.get(node, node.split('::')[-1][:20])
+            # Use chunk ID as label
+            label = node
         else:
             label = node.split('::')[-1][:20]
 
@@ -551,21 +552,17 @@ def visualize_entity_subgraph(
     G_viz = G.subgraph(subgraph_nodes)
     print(f"Subgraph: {G_viz.number_of_nodes()} nodes, {G_viz.number_of_edges()} edges")
 
-    # Summarize chunks with Ollama (only for chunks in the visualization)
-    print("Generating chunk summaries with Ollama...")
-    chunk_summaries = {}
+    # Store chunk full texts for hover display
+    print("Collecting chunk texts...")
     chunk_full_texts = {}
     chunk_nodes = [n for n, d in G_viz.nodes(data=True) if d.get('type') == 'chunk']
 
-    for i, node in enumerate(chunk_nodes, 1):
+    for node in chunk_nodes:
         node_data = G_viz.nodes[node]
         chunk_text = node_data.get('text', '')
         if chunk_text:
-            print(f"  Summarizing chunk {i}/{len(chunk_nodes)}...", end='\r')
-            summary = summarize_chunk_with_ollama(chunk_text, max_length=15)
-            chunk_summaries[node] = summary
             chunk_full_texts[node] = chunk_text
-    print(f"\nSummaries generated for {len(chunk_summaries)} chunks")
+    print(f"Collected texts for {len(chunk_full_texts)} chunks")
 
     # Create network with better font settings
     net = Network(height="900px", width="100%", bgcolor="#222222", font_color="white")
@@ -593,8 +590,8 @@ def visualize_entity_subgraph(
         elif node_type == 'theme':
             label = node_data.get('label', f"theme_{node.split('::')[-1]}")
         elif node_type == 'chunk':
-            # Use Ollama summary for chunk labels
-            label = chunk_summaries.get(node, node.split('::')[-1][:20])
+            # Use chunk ID as label
+            label = node
         else:
             label = node.split('::')[-1]
 

@@ -110,6 +110,11 @@ def main():
         default="postgres",
         help="PostgreSQL password"
     )
+    parser.add_argument(
+        "--use-llm-labels",
+        action="store_true",
+        help="Use LLM to generate topic labels (slower but more descriptive)"
+    )
     args = parser.parse_args()
 
     # Load configuration
@@ -164,10 +169,16 @@ def main():
 
     # Step 3: Build graph
     logger.info("\n### STEP 3: Building knowledge graph ###")
+    if args.use_llm_labels:
+        logger.info("Using LLM for topic labeling (this may take a while)...")
+    else:
+        logger.info("Using keyword-based topic labels (top 3 words)")
+
     graph = builder.build_graph(
         chunks=chunks,
         min_topic_size=config.graph_construction.min_topic_size,
-        nr_topics=config.graph_construction.nr_topics
+        nr_topics=config.graph_construction.nr_topics,
+        use_llm_labels=args.use_llm_labels
     )
 
     # Step 4: Save graph and models

@@ -45,13 +45,15 @@ topic_model = BERTopic(
 topics, probabilities = topic_model.fit_transform(chunk_texts)
 ```
 
-**Label generation**: Themes are labeled by an LLM (Ollama) based on extracted keywords:
+**Label generation**: Themes are labeled using **top 3 keywords** by default (fast), or optionally via LLM (slower but more descriptive):
 
 ```python
-# Top 10 keywords of the topic
-keywords = topic_model.get_topic(topic_id)[:10]
-# LLM prompt to generate concise label
-label = llm_generate_topic_label(keywords)
+# Default: Keyword-based labels (top 3 words)
+keywords = topic_model.get_topic(topic_id)[:3]
+label = " ".join(keywords)  # e.g., "gaza israel conflict"
+
+# Optional: LLM-generated labels (use --use-llm-labels flag)
+# label = llm_generate_topic_label(keywords)  # e.g., "middle east conflict"
 ```
 
 **Node format**:
@@ -520,7 +522,7 @@ return results[:top_k]
 - **Embeddings**: `all-MiniLM-L6-v2` (SentenceTransformers)
 - **NER**: `en_core_web_sm` (spaCy)
 - **Topic Modeling**: BERTopic
-- **LLM**: `llama3.1:latest` (Ollama) for topic labels
+- **LLM** (optional): `llama3.1:latest` (Ollama) for topic labels when using `--use-llm-labels`
 
 ### Storage
 
@@ -551,41 +553,156 @@ return results[:top_k]
 
 ## 4. Usage
 
-### Building a graph
+### Quick Start Workflow
 
+**1. Build a graph:**
 ```bash
 uv run python cli.py build --max-docs 100
 ```
+This creates a graph with a unique ID like `20251119_185707` (timestamp-based).
 
-**Note**: Statistics are automatically generated during graph build and saved to `outputs/statistics/`:
-- `general_stats_{timestamp}.json` - Node/edge counts by type
-- `topic_stats_{timestamp}.json` - Topic details with chunks/documents
-- `entity_stats_{timestamp}.json` - Entity statistics with top entities by degree
-- `summary_{timestamp}.txt` - Human-readable summary report
+**2. List available graphs:**
+```bash
+uv run python cli.py list-graphs
+```
+
+Example output:
+```
+================================================================================
+AVAILABLE GRAPHS
+================================================================================
+
+1. Graph ID: 20251119_190959
+   Created: 2025-11-19T19:09:59
+   Documents: 20, Chunks: 161
+   Nodes: 762, Edges: 7042
+
+2. Graph ID: 20251119_185707
+   Created: 2025-11-19T18:57:28
+   Documents: 1000, Chunks: 9270
+   Nodes: 26272, Edges: 1510527
+================================================================================
+```
+
+**Copy the graph ID** you want to use (e.g., `20251119_185707`).
+
+**3. Use the graph for retrieval or visualization:**
+```bash
+# Retrieval (replace with your graph ID)
+uv run python cli.py retrieve "Your claim here" --graph-id 20251119_185707
+
+# Visualization (replace with your graph ID and entity)
+uv run python cli.py visualize --mode entity --entity "trump" --graph-id 20251119_185707
+```
+
+---
+
+### Building a graph
+
+```bash
+# Fast build (default - keyword-based topic labels)
+uv run python cli.py build --max-docs 100
+
+# With LLM-generated topic labels (slower but more descriptive)
+uv run python cli.py build --max-docs 100 --use-llm-labels
+
+# With PostgreSQL storage
+uv run python cli.py build --max-docs 100 --use-postgres
+```
+
+**Graph ID**: Each graph is identified by its creation timestamp (e.g., `20251119_185707`). All related files (visualizations, retrievals) use this ID.
+
+**Important**: Always use `list-graphs` to get the correct graph ID before running retrieval or visualization commands.
+
+**Note**: Statistics are automatically generated during graph build and saved to `outputs/statistics/{graph_id}/`:
+- `general_stats_{graph_id}.json` - Node/edge counts by type
+- `topic_stats_{graph_id}.json` - Topic details with chunks/documents
+- `entity_stats_{graph_id}.json` - Entity statistics with top entities by degree
+- `summary_{graph_id}.txt` - Human-readable summary report
 
 ### Retrieval
 
+**Use `list-graphs` to get the correct graph ID, then retrieve:**
+
 ```bash
-uv run python cli.py retrieve "Trump met Macron in France" --top-k 10 --graph-id 20251118_150602
+# Basic retrieval (use your actual graph ID from list-graphs)
+uv run python cli.py retrieve "Trump met Macron in France" --graph-id 20251119_185707
+
+# Custom parameters with named retrieval
+uv run python cli.py retrieve "claim text" \
+  --graph-id 20251119_185707 \
+  --top-k 10 \
+  --alpha 0.3 --beta 0.2 --gamma 0.3 --delta 0.2 \
+  --name "my_experiment"
 ```
+
+**Retrieval results** are saved in `outputs/retrieval_results/` as `results_{graph_id}_{name}.json/txt`:
+- Without `--name`: Auto-incremented (e.g., `results_20251119_185707_1.json`, `results_20251119_185707_2.json`)
+- With `--name "test"`: Custom name (e.g., `results_20251119_185707_test.json`)
+
+**Result files include**:
+- Top-ranked chunks with scores (semantic, thematic, entity, topic distribution)
+- Alternative rankings (by semantic score, by entity score, etc.)
+- Statistics (score distributions, component dominance)
+- **Full text of ALL retrieved chunks** (at the end of the file)
 
 ### Visualization
 
+**First, list available graphs to get the correct graph ID:**
+
 ```bash
-# Display pre-computed statistics (reads from outputs/statistics/)
-uv run python cli.py visualize --mode stats --graph-id 20251118_150602
-
-# Full visualization
-uv run python cli.py visualize --mode full --graph-id 20251118_150602
-
-# Entity-centered subgraph
-uv run python cli.py visualize --mode entity --entity "trump" --graph-id 20251118_150602
+uv run python cli.py list-graphs
 ```
 
+This will show all available graphs with their IDs, creation dates, and statistics. Example output:
+```
+Available graphs:
+  - 20251119_185707 (created: 2025-11-19 18:57:07)
+  - 20251117_213022 (created: 2025-11-17 21:30:22)
+```
+
+**Then visualize using the correct graph ID:**
+
+```bash
+# Display pre-computed statistics
+uv run python cli.py visualize --mode stats --graph-id 20251119_185707
+
+# Full graph visualization
+uv run python cli.py visualize --mode full --graph-id 20251119_185707
+
+# Entity-centered subgraph (replace "trump" with your entity of interest)
+uv run python cli.py visualize --mode entity --entity "trump" --graph-id 20251119_185707
+```
+
+**Important**: The `--graph-id` must match an existing graph. Use `list-graphs` to see available IDs.
+
+**Visualization files** are saved as `graph_{mode}_{graph_id}.html` in `outputs/visualizations/`
+
 **Visualization features**:
-- Interactive legend: Click on node types to hide/show them
-- Normalized edge weights: All weights displayed in [0, 1] range
-- Larger nodes and fonts for better readability
+- **Chunk labels**: Display chunk IDs (no LLM summary for speed)
+- Hover to see full chunk text
+- Interactive legend: Click node types to hide/show
+- Normalized edge weights: All weights in [0, 1] range
+- Larger nodes and fonts for readability
+
+---
+
+### Common Errors and Solutions
+
+**Error: `FileNotFoundError: Graph file not found`**
+
+This means the graph ID you specified doesn't exist. Solution:
+```bash
+# List all available graphs
+uv run python cli.py list-graphs
+
+# Use one of the IDs from the output
+uv run python cli.py visualize --mode entity --entity "trump" --graph-id <CORRECT_ID>
+```
+
+```bash
+uv run python cli.py visualize --mode entity --entity "trump" --graph-id 20251119_185707
+```
 
 ---
 
@@ -625,7 +742,16 @@ This means Trump is mentioned in many chunks and has co-occurrence relationships
 
 ---
 
-## 6. Configuration
+## 6. Performance Improvements
+
+**LLM mode** (with `--use-llm-labels`):
+- Generates descriptive labels via Ollama (e.g., "middle east conflict")
+- Slower but more human-readable (5s per topic)
+- Use for final production graphs
+
+---
+
+## 7. Configuration
 
 See [config.yaml](config.yaml) for all parameters:
 

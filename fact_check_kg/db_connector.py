@@ -137,6 +137,7 @@ class GraphDatabaseConnector:
             predicate TEXT NOT NULL,
             target TEXT NOT NULL,
             weight FLOAT DEFAULT 1.0,
+            attributes JSONB,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         """
@@ -180,12 +181,37 @@ class GraphDatabaseConnector:
             self.cursor.execute(create_node_table)
             self.cursor.execute(create_node_index)
             self.cursor.execute(create_metadata_table)
+
+            # Migrate existing tables: add attributes column if missing
+            self._migrate_add_attributes_column()
+
             self.conn.commit()
             self.logger.info(f"Graph tables created successfully: {self.graph_table}, {self.nodes_table}")
         except Exception as e:
             self.conn.rollback()
             self.logger.error(f"Failed to create tables: {e}")
             raise
+
+    def _migrate_add_attributes_column(self):
+        """Add attributes column to edge table if it doesn't exist (migration)."""
+        try:
+            # Check if attributes column exists
+            self.cursor.execute(f"""
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = '{self.graph_table}'
+                AND column_name = 'attributes'
+            """)
+
+            if not self.cursor.fetchone():
+                self.logger.info(f"Migrating {self.graph_table}: adding 'attributes' column...")
+                self.cursor.execute(f"""
+                    ALTER TABLE {self.graph_table}
+                    ADD COLUMN attributes JSONB
+                """)
+                self.logger.info(f"Migration complete: 'attributes' column added to {self.graph_table}")
+        except Exception as e:
+            self.logger.warning(f"Migration warning: {e}")
 
     def clear_graph(self):
         """Clear all data from graph and nodes tables."""
@@ -231,7 +257,21 @@ class GraphDatabaseConnector:
         for source, target, attrs in graph.edges(data=True):
             edge_type = attrs.get('edge_type', 'UNKNOWN')
             weight = attrs.get('weight', 1.0)
-            edge_data.append((source, edge_type, target, float(weight)))
+
+            # Convert all edge attributes to JSON-compatible format (similar to nodes)
+            clean_attrs = {}
+            for key, value in attrs.items():
+                if key in ('edge_type', 'weight'):
+                    continue  # Already stored in dedicated columns
+                # Convert numpy types, lists, etc. to JSON-compatible types
+                if hasattr(value, 'tolist'):
+                    clean_attrs[key] = value.tolist()
+                elif isinstance(value, (list, dict, str, int, float, bool, type(None))):
+                    clean_attrs[key] = value
+                else:
+                    clean_attrs[key] = str(value)
+
+            edge_data.append((source, edge_type, target, float(weight), psycopg2.extras.Json(clean_attrs)))
 
         try:
             # Insert nodes in batches
@@ -248,8 +288,8 @@ class GraphDatabaseConnector:
             # Insert edges in batches
             self.logger.info(f"Inserting {len(edge_data)} edges into {self.graph_table}...")
             insert_edge_query = f"""
-            INSERT INTO {self.graph_table} (source, predicate, target, weight)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO {self.graph_table} (source, predicate, target, weight, attributes)
+            VALUES (%s, %s, %s, %s, %s)
             """
             execute_batch(self.cursor, insert_edge_query, edge_data, page_size=1000)
 
@@ -298,12 +338,16 @@ class GraphDatabaseConnector:
                 graph.add_node(node_id, **attributes)
 
             # Load edges
-            self.cursor.execute(f"SELECT source, predicate, target, weight FROM {self.graph_table}")
+            self.cursor.execute(f"SELECT source, predicate, target, weight, attributes FROM {self.graph_table}")
             edges = self.cursor.fetchall()
 
             self.logger.info(f"Loading {len(edges)} edges...")
-            for source, predicate, target, weight in edges:
-                graph.add_edge(source, target, edge_type=predicate, weight=weight)
+            for source, predicate, target, weight, attributes in edges:
+                # Merge edge attributes from JSONB with basic attributes
+                edge_attrs = {'edge_type': predicate, 'weight': weight}
+                if attributes:
+                    edge_attrs.update(attributes)
+                graph.add_edge(source, target, **edge_attrs)
 
             self.logger.info(f"Graph loaded successfully: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
             return graph

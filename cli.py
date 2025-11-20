@@ -53,10 +53,19 @@ def cli():
               help=f'Overlap between chunks (default: {config.graph_construction.chunk_overlap})')
 @click.option('--use-postgres', is_flag=True,
               help='Save graph to PostgreSQL instead of pickle')
+@click.option('--use-llm-labels', is_flag=True,
+              help='Use LLM to generate topic labels (slower but more descriptive, default: keyword-based)')
 @click.option('--log-level', type=click.Choice(['DEBUG', 'INFO', 'WARNING', 'ERROR']),
               default='INFO', help='Logging level')
-def build(max_docs, chunk_size, chunk_overlap, use_postgres, log_level):
-    """Build the knowledge graph from CSV data."""
+def build(max_docs, chunk_size, chunk_overlap, use_postgres, use_llm_labels, log_level):
+    """
+    Build the knowledge graph from CSV data.
+
+    By default, uses keyword-based topic labels (top 3 words) for speed.
+    Use --use-llm-labels for LLM-generated labels (slower but more descriptive).
+
+    Graph files are saved with a timestamp ID (e.g., graph_20251118_155115.gpickle).
+    """
     import subprocess
 
     logger.info("=" * 60)
@@ -89,6 +98,9 @@ def build(max_docs, chunk_size, chunk_overlap, use_postgres, log_level):
             "--db-password", config.database.password
         ])
 
+    if use_llm_labels:
+        cmd.append("--use-llm-labels")
+
     try:
         result = subprocess.run(cmd, check=True, capture_output=False)
         logger.info("Graph building completed successfully!")
@@ -105,10 +117,10 @@ def build(max_docs, chunk_size, chunk_overlap, use_postgres, log_level):
 # ============================================================================
 
 @cli.command()
-@click.option('--mode', type=click.Choice(['full', 'entity', 'hierarchical', 'stats']),
+@click.option('--mode', type=click.Choice(['full', 'entity', 'stats']),
               default='stats', help='Visualization mode')
 @click.option('--entity', type=str, default=None,
-              help='Entity name for entity/hierarchical mode')
+              help='Entity name for entity mode')
 @click.option('--max-nodes', type=int, default=None,
               help=f'Maximum nodes to display (default: {config.visualization.max_nodes_full_view})')
 @click.option('--output', type=str, default=None,
@@ -120,7 +132,16 @@ def build(max_docs, chunk_size, chunk_overlap, use_postgres, log_level):
 @click.option('--graph-file', type=str, default=None,
               help='Path to graph pickle file (if not using postgres)')
 def visualize(mode, entity, max_nodes, output, graph_id, use_postgres, graph_file):
-    """Visualize the knowledge graph."""
+    """
+    Visualize the knowledge graph.
+
+    Modes:
+    - stats: Display pre-computed statistics (fast)
+    - full: Full graph visualization (interactive HTML)
+    - entity: Entity-centered subgraph visualization
+
+    Visualization files are saved as graph_{mode}_{graph_id}.html
+    """
     import subprocess
     from fact_check_kg.visualize_graph import analyze_graph_stats
     from fact_check_kg.config import DatabaseConfig
@@ -176,18 +197,14 @@ def visualize(mode, entity, max_nodes, output, graph_id, use_postgres, graph_fil
     if mode == 'entity' and entity:
         cmd.extend(["--entity", entity])
         if not output:
-            timestamp = datetime.now().strftime(config.export.timestamp_format)
-            output = f"{config.paths.visualizations_dir}/graph_entity_{entity}_{timestamp}.html"
-    elif mode == 'hierarchical' and entity:
-        # Call hierarchical visualization
-        cmd = [sys.executable, "fact_check_kg/visualize_hierarchical.py", "--entity", entity]
-        if not output:
-            timestamp = datetime.now().strftime(config.export.timestamp_format)
-            output = f"{config.paths.visualizations_dir}/graph_hierarchical_{entity}_{timestamp}.html"
+            # Use graph_id as timestamp for visualization
+            vis_timestamp = graph_id if graph_id else datetime.now().strftime(config.export.timestamp_format)
+            output = f"{config.paths.visualizations_dir}/graph_entity_{entity}_{vis_timestamp}.html"
     elif mode == 'full':
         if not output:
-            timestamp = datetime.now().strftime(config.export.timestamp_format)
-            output = f"{config.paths.visualizations_dir}/graph_full_{timestamp}.html"
+            # Use graph_id as timestamp for visualization
+            vis_timestamp = graph_id if graph_id else datetime.now().strftime(config.export.timestamp_format)
+            output = f"{config.paths.visualizations_dir}/graph_full_{vis_timestamp}.html"
         if max_nodes:
             cmd.extend(["--max-nodes", str(max_nodes)])
 
@@ -230,8 +247,24 @@ def visualize(mode, entity, max_nodes, output, graph_id, use_postgres, graph_fil
               help='Number of top results to display in detail (default: 5)')
 @click.option('--save-results/--no-save-results', default=True,
               help='Save results to files (default: True)')
-def retrieve(claim, alpha, beta, gamma, delta, top_k, graph_id, use_postgres, top_n, save_results):
-    """Retrieve relevant chunks for a fact-checking claim with detailed scoring."""
+@click.option('--name', type=str, default=None,
+              help='Custom name for this retrieval (e.g., "test1"). If not specified, uses _1, _2, etc.')
+def retrieve(claim, alpha, beta, gamma, delta, top_k, graph_id, use_postgres, top_n, save_results, name):
+    """
+    Retrieve relevant chunks for a fact-checking claim with detailed scoring.
+
+    Uses 4 retrieval strategies:
+    - Semantic (alpha): Embedding similarity
+    - Thematic (beta): Topic-based graph traversal
+    - Entity (gamma): Entity-based graph traversal
+    - Topic Distribution (delta): Jensen-Shannon divergence
+
+    Results are saved as:
+    - results_{graph_id}_1.json/txt (auto-incremented)
+    - results_{graph_id}_{name}.json/txt (with --name flag)
+
+    Result files include full text of all retrieved chunks at the end.
+    """
     import pickle
     import spacy
     from sentence_transformers import SentenceTransformer
@@ -415,7 +448,8 @@ def retrieve(claim, alpha, beta, gamma, delta, top_k, graph_id, use_postgres, to
                 print("SAVING RESULTS")
                 print("=" * 80)
                 json_path, text_path = results_manager.save_results(
-                    claim_text, results, alpha, beta, gamma, rankings
+                    claim_text, results, alpha, beta, gamma, delta, rankings,
+                    graph_id=graph_id, custom_name=name
                 )
                 print(f"Results saved to:")
                 print(f"  JSON: {json_path}")
