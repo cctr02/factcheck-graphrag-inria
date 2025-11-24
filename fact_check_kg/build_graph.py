@@ -17,7 +17,7 @@ from pathlib import Path
 # Add parent directory to path
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
-from fact_check_kg.config_loader import get_config
+from fact_check_kg.config_loader import get_build_config, load_raw_config
 from fact_check_kg.data_loader import load_and_chunk_documents
 from fact_check_kg.graph_builder import KnowledgeGraphBuilder
 
@@ -117,8 +117,8 @@ def main():
     )
     args = parser.parse_args()
 
-    # Load configuration
-    config = get_config()
+    # Load build configuration
+    config = get_build_config()
 
     # Setup logging
     logger = setup_logging(args.log_level)
@@ -164,6 +164,18 @@ def main():
         co_occur_threshold=config.graph_construction.co_occurrence_threshold,
         semantic_sim_threshold=config.graph_construction.semantic_similarity_threshold,
         topic_prob_threshold=config.graph_construction.topic_probability_threshold,
+        temporal_max_year_gap=config.graph_construction.temporal_max_year_gap,
+        temporal_decay_rate=config.graph_construction.temporal_decay_rate,
+        topic_keywords_initial=config.graph_construction.topic_keywords_initial,
+        topic_keywords_final=config.graph_construction.topic_keywords_final,
+        demonymic_suffixes=config.graph_construction.demonymic_suffixes,
+        llm_endpoint=config.models.llm_endpoint,
+        llm_model=config.models.llm_model,
+        llm_temperature=config.models.llm_temperature,
+        llm_max_tokens=config.models.llm_max_tokens,
+        llm_timeout=config.models.llm_timeout,
+        llm_label_max_length=config.models.llm_label_max_length,
+        llm_label_max_words=config.models.llm_label_max_words,
         logger=logger
     )
 
@@ -215,7 +227,36 @@ def main():
         pickle.dump(builder.topic_model, f)
     logger.info(f"Topic model saved to: {topic_model_path}")
 
-    # 3. Create metadata
+    # 3. Save chunk embeddings to FAISS index
+    logger.info("Computing and saving chunk embeddings to FAISS...")
+    from fact_check_kg.embedding_cache import EmbeddingCache
+
+    # Extract chunk IDs and texts
+    chunk_nodes = [n for n, d in graph.nodes(data=True) if d.get('type') == 'chunk']
+    chunk_texts = [graph.nodes[n]['text'] for n in chunk_nodes]
+
+    # Compute embeddings
+    embeddings = builder.embedding_model.encode(
+        chunk_texts,
+        show_progress_bar=True,
+        normalize_embeddings=True
+    )
+
+    # Build and save FAISS index
+    embedding_cache = EmbeddingCache(
+        dimension=config.models.embedding_dimension,
+        logger=logger
+    )
+    embedding_cache.build_index(chunk_nodes, embeddings)
+    embedding_cache.save(graphs_dir, timestamp)
+
+    logger.info(f"Chunk embeddings saved for {len(chunk_nodes)} chunks")
+
+    # 4. Create metadata
+    # Load raw configs separately
+    base_config_path = Path(__file__).parent.parent / "config" / "config.yaml"
+    build_config_path = Path(__file__).parent.parent / "config" / "config_build.yaml"
+
     metadata = {
         "timestamp": timestamp,
         "created_at": datetime.now().isoformat(),
@@ -228,7 +269,9 @@ def main():
         "num_edges": graph.number_of_edges(),
         "num_documents": n_docs,
         "num_chunks": len(chunks),
-        "edge_types": edge_type_counts
+        "edge_types": edge_type_counts,
+        "config": load_raw_config(base_config_path),  # Save common configuration
+        "config_build": load_raw_config(build_config_path)  # Save build-specific configuration
     }
 
     # 4. Save to PostgreSQL with timestamped tables (optional - continues if fails)

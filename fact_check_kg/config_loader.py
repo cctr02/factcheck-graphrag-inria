@@ -40,6 +40,11 @@ class GraphConstructionConfig:
     co_occurrence_threshold: int
     semantic_similarity_threshold: float
     topic_probability_threshold: float
+    temporal_max_year_gap: int
+    temporal_decay_rate: float
+    topic_keywords_initial: int
+    topic_keywords_final: int
+    demonymic_suffixes: List[str]
     entity_types: List[str]
 
 
@@ -47,11 +52,16 @@ class GraphConstructionConfig:
 class ModelsConfig:
     """Model configuration."""
     embedding_model: str
+    embedding_dimension: int
     ner_model: str
-    llm_model: str
-    llm_endpoint: str
-    llm_temperature: float
-    llm_max_tokens: int
+    # LLM fields are optional (only used during build)
+    llm_model: Optional[str] = None
+    llm_endpoint: Optional[str] = None
+    llm_temperature: Optional[float] = None
+    llm_max_tokens: Optional[int] = None
+    llm_timeout: Optional[int] = None
+    llm_label_max_length: Optional[int] = None
+    llm_label_max_words: Optional[int] = None
 
 
 @dataclass
@@ -120,11 +130,12 @@ class LoggingConfig:
 @dataclass
 class ExportConfig:
     """Export configuration."""
-    graph_pickle_pattern: str
-    topic_model_pattern: str
-    visualization_pattern: str
     timestamp_format: str
     supported_formats: List[str]
+    # Optional fields (may differ between build and retrieval)
+    graph_pickle_pattern: Optional[str] = None
+    topic_model_pattern: Optional[str] = None
+    visualization_pattern: Optional[str] = None
 
 
 @dataclass
@@ -159,40 +170,96 @@ class Config:
         'logs'
     """
 
-    def __init__(self, config_path: Optional[str] = None):
+    def __init__(self, config_path: Optional[str] = None, base_config_path: Optional[str] = None):
         """
         Initialize configuration.
 
         Args:
-            config_path: Path to config.yaml file (default: ./config.yaml)
+            config_path: Path to specific config file (e.g., config_build.yaml)
+            base_config_path: Path to base config file with common settings (default: ./config.yaml)
         """
-        if config_path is None:
-            config_path = Path(__file__).parent.parent / "config.yaml"
+        # Load base config first (common settings)
+        if base_config_path is None:
+            base_config_path = Path(__file__).parent.parent / "config" / "config.yaml"
         else:
+            base_config_path = Path(base_config_path)
+
+        if base_config_path.exists():
+            with open(base_config_path, 'r', encoding='utf-8') as f:
+                self._raw_config = yaml.safe_load(f) or {}
+        else:
+            self._raw_config = {}
+
+        # Load specific config and merge
+        if config_path is not None:
             config_path = Path(config_path)
+            if not config_path.exists():
+                raise ConfigError(f"Configuration file not found: {config_path}")
 
-        if not config_path.exists():
-            raise ConfigError(f"Configuration file not found: {config_path}")
+            with open(config_path, 'r', encoding='utf-8') as f:
+                specific_config = yaml.safe_load(f) or {}
 
-        # Load YAML
-        with open(config_path, 'r', encoding='utf-8') as f:
-            self._raw_config = yaml.safe_load(f)
+            # Deep merge: specific config overrides base config
+            self._raw_config = self._deep_merge(self._raw_config, specific_config)
 
         # Parse configuration sections
         self._parse_config()
 
+    def _deep_merge(self, base: dict, override: dict) -> dict:
+        """
+        Deep merge two dictionaries. Override values take precedence.
+
+        Args:
+            base: Base dictionary
+            override: Override dictionary
+
+        Returns:
+            Merged dictionary
+        """
+        result = base.copy()
+        for key, value in override.items():
+            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+                result[key] = self._deep_merge(result[key], value)
+            else:
+                result[key] = value
+        return result
+
     def _parse_config(self):
         """Parse configuration sections into dataclass instances."""
         try:
+            # Required sections (must be present)
             self.paths = PathsConfig(**self._raw_config['paths'])
-            self.graph_construction = GraphConstructionConfig(**self._raw_config['graph_construction'])
             self.models = ModelsConfig(**self._raw_config['models'])
             self.database = DatabaseConfig(**self._raw_config['database'])
-            self.retrieval = RetrievalConfig(**self._raw_config['retrieval'])
-            self.visualization = VisualizationConfig(**self._raw_config['visualization'])
             self.logging = LoggingConfig(**self._raw_config['logging'])
-            self.export = ExportConfig(**self._raw_config['export'])
             self.performance = PerformanceConfig(**self._raw_config['performance'])
+
+            # Optional sections (may not be in all configs)
+            if 'graph_construction' in self._raw_config:
+                self.graph_construction = GraphConstructionConfig(**self._raw_config['graph_construction'])
+            else:
+                self.graph_construction = None
+
+            if 'retrieval' in self._raw_config:
+                self.retrieval = RetrievalConfig(**self._raw_config['retrieval'])
+            else:
+                self.retrieval = None
+
+            if 'visualization' in self._raw_config:
+                self.visualization = VisualizationConfig(**self._raw_config['visualization'])
+            else:
+                self.visualization = None
+
+            if 'export' in self._raw_config:
+                self.export = ExportConfig(**self._raw_config['export'])
+            else:
+                self.export = None
+
+            if 'active_graph' in self._raw_config:
+                # active_graph is a simple dict, not a dataclass
+                self.active_graph = self._raw_config['active_graph']
+            else:
+                self.active_graph = None
 
             # Testing config is optional
             if 'testing' in self._raw_config:
@@ -242,13 +309,73 @@ class Config:
         return f"Config(paths={self.paths}, graph_construction={self.graph_construction})"
 
 
-# Singleton instance
-_config_instance: Optional[Config] = None
+# Singleton instances
+_config_build_instance: Optional[Config] = None
+_config_retrieval_instance: Optional[Config] = None
+_config_instance: Optional[Config] = None  # Legacy support
+
+
+def get_build_config(config_path: Optional[str] = None) -> Config:
+    """
+    Get build configuration instance (singleton).
+
+    Loads config.yaml (common settings) and merges with config_build.yaml (build-specific settings).
+
+    Args:
+        config_path: Path to build config file (default: ./config_build.yaml)
+
+    Returns:
+        Config instance for building graphs
+
+    Example:
+        >>> from fact_check_kg.config_loader import get_build_config
+        >>> config = get_build_config()
+        >>> print(config.graph_construction.chunk_size)
+    """
+    global _config_build_instance
+
+    if _config_build_instance is None:
+        if config_path is None:
+            config_path = Path(__file__).parent.parent / "config" / "config_build.yaml"
+        # Load base config.yaml and merge with config_build.yaml
+        _config_build_instance = Config(config_path=config_path)
+
+    return _config_build_instance
+
+
+def get_retrieval_config(config_path: Optional[str] = None) -> Config:
+    """
+    Get retrieval configuration instance (singleton).
+
+    Loads config.yaml (common settings) and merges with config_retrieval.yaml (retrieval-specific settings).
+
+    Args:
+        config_path: Path to retrieval config file (default: ./config_retrieval.yaml)
+
+    Returns:
+        Config instance for retrieval
+
+    Example:
+        >>> from fact_check_kg.config_loader import get_retrieval_config
+        >>> config = get_retrieval_config()
+        >>> print(config.retrieval.top_k)
+    """
+    global _config_retrieval_instance
+
+    if _config_retrieval_instance is None:
+        if config_path is None:
+            config_path = Path(__file__).parent.parent / "config" / "config_retrieval.yaml"
+        # Load base config.yaml and merge with config_retrieval.yaml
+        _config_retrieval_instance = Config(config_path=config_path)
+
+    return _config_retrieval_instance
 
 
 def get_config(config_path: Optional[str] = None) -> Config:
     """
     Get configuration instance (singleton).
+
+    DEPRECATED: Use get_build_config() or get_retrieval_config() instead.
 
     Args:
         config_path: Path to config file (only used on first call)
@@ -278,3 +405,43 @@ def reload_config(config_path: Optional[str] = None):
     """
     global _config_instance
     _config_instance = Config(config_path)
+
+
+def load_raw_config(config_path: str) -> dict:
+    """
+    Load raw config from YAML file without merging or parsing.
+
+    Args:
+        config_path: Path to config file
+
+    Returns:
+        Raw configuration dictionary
+    """
+    with open(config_path, 'r', encoding='utf-8') as f:
+        return yaml.safe_load(f) or {}
+
+
+def reload_build_config(config_path: Optional[str] = None):
+    """
+    Reload build configuration from file.
+
+    Args:
+        config_path: Path to config file
+    """
+    global _config_build_instance
+    if config_path is None:
+        config_path = Path(__file__).parent.parent / "config" / "config_build.yaml"
+    _config_build_instance = Config(config_path)
+
+
+def reload_retrieval_config(config_path: Optional[str] = None):
+    """
+    Reload retrieval configuration from file.
+
+    Args:
+        config_path: Path to config file
+    """
+    global _config_retrieval_instance
+    if config_path is None:
+        config_path = Path(__file__).parent.parent / "config" / "config_retrieval.yaml"
+    _config_retrieval_instance = Config(config_path)

@@ -62,26 +62,16 @@ outputs/retrieval_results/*
 *.sqlite
 *.sqlite3
 
-# Large data files (keep directory structure)
+# Large data files
 *.csv
 *.json
-
-
-# Jupyter
-.ipynb_checkpoints/
-*.ipynb
+*.faiss
 
 # Testing
 .pytest_cache/
 .coverage
 htmlcov/
 .tox/
-
-# Documentation builds
-docs/_build/
-
-# OS
-Thumbs.db
 
 # Project specific
 uv.lock

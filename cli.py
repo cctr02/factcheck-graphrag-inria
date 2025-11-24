@@ -19,13 +19,12 @@ from datetime import datetime
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from fact_check_kg.config_loader import get_config
+from fact_check_kg.config_loader import get_build_config, get_retrieval_config
 from fact_check_kg.logger import get_logger
 
 
-# Initialize configuration
-config = get_config()
-logger = get_logger("cli", config.logging.level)
+# Initialize logger (will be reconfigured by each command as needed)
+logger = None
 
 
 @click.group()
@@ -46,42 +45,48 @@ def cli():
 
 @cli.command()
 @click.option('--max-docs', type=int, default=None,
-              help=f'Maximum number of documents to process (default: {config.graph_construction.max_documents})')
+              help='Maximum number of documents to process (default: from config_build.yaml)')
 @click.option('--chunk-size', type=int, default=None,
-              help=f'Size of text chunks (default: {config.graph_construction.chunk_size})')
+              help='Size of text chunks (default: from config_build.yaml)')
 @click.option('--chunk-overlap', type=int, default=None,
-              help=f'Overlap between chunks (default: {config.graph_construction.chunk_overlap})')
+              help='Overlap between chunks (default: from config_build.yaml)')
 @click.option('--use-postgres', is_flag=True,
               help='Save graph to PostgreSQL instead of pickle')
-@click.option('--use-llm-labels', is_flag=True,
-              help='Use LLM to generate topic labels (slower but more descriptive, default: keyword-based)')
+@click.option('--no-llm-labels', is_flag=True,
+              help='Use keyword-based topic labels instead of LLM (faster but less descriptive)')
 @click.option('--log-level', type=click.Choice(['DEBUG', 'INFO', 'WARNING', 'ERROR']),
               default='INFO', help='Logging level')
-def build(max_docs, chunk_size, chunk_overlap, use_postgres, use_llm_labels, log_level):
+def build(max_docs, chunk_size, chunk_overlap, use_postgres, no_llm_labels, log_level):
     """
     Build the knowledge graph from CSV data.
 
-    By default, uses keyword-based topic labels (top 3 words) for speed.
-    Use --use-llm-labels for LLM-generated labels (slower but more descriptive).
+    By default, uses LLM to generate topic labels (more descriptive).
+    Use --no-llm-labels for keyword-based labels (top 3 words, faster).
 
     Graph files are saved with a timestamp ID (e.g., graph_20251118_155115.gpickle).
     """
     import subprocess
+
+    # Load build configuration
+    build_config = get_build_config()
+
+    # Initialize logger
+    logger = get_logger("cli", build_config.logging.level)
 
     logger.info("=" * 60)
     logger.info("BUILDING KNOWLEDGE GRAPH")
     logger.info("=" * 60)
 
     # Use config defaults if not specified
-    max_docs = max_docs or config.graph_construction.max_documents
-    chunk_size = chunk_size or config.graph_construction.chunk_size
-    chunk_overlap = chunk_overlap or config.graph_construction.chunk_overlap
+    max_docs = max_docs or build_config.graph_construction.max_documents
+    chunk_size = chunk_size or build_config.graph_construction.chunk_size
+    chunk_overlap = chunk_overlap or build_config.graph_construction.chunk_overlap
 
     # Build command
     cmd = [
         sys.executable,
         "fact_check_kg/build_graph.py",
-        "--csv", config.paths.csv_file,
+        "--csv", build_config.paths.csv_file,
         "--max-docs", str(max_docs),
         "--chunk-size", str(chunk_size),
         "--chunk-overlap", str(chunk_overlap),
@@ -98,7 +103,7 @@ def build(max_docs, chunk_size, chunk_overlap, use_postgres, use_llm_labels, log
             "--db-password", config.database.password
         ])
 
-    if use_llm_labels:
+    if not no_llm_labels:
         cmd.append("--use-llm-labels")
 
     try:
@@ -122,7 +127,7 @@ def build(max_docs, chunk_size, chunk_overlap, use_postgres, use_llm_labels, log
 @click.option('--entity', type=str, default=None,
               help='Entity name for entity mode')
 @click.option('--max-nodes', type=int, default=None,
-              help=f'Maximum nodes to display (default: {config.visualization.max_nodes_full_view})')
+              help='Maximum nodes to display (default: from config_retrieval.yaml)')
 @click.option('--output', type=str, default=None,
               help='Output HTML file (auto-generated if not specified)')
 @click.option('--graph-id', type=str, default=None,
@@ -230,15 +235,15 @@ def visualize(mode, entity, max_nodes, output, graph_id, use_postgres, graph_fil
 @cli.command()
 @click.argument('claim', type=str, required=False)
 @click.option('--alpha', type=float, default=None,
-              help=f'Weight for semantic score (default: {config.retrieval.alpha})')
+              help='Weight for semantic score (default: from config_retrieval.yaml)')
 @click.option('--beta', type=float, default=None,
-              help=f'Weight for thematic score (default: {config.retrieval.beta})')
+              help='Weight for thematic score (default: from config_retrieval.yaml)')
 @click.option('--gamma', type=float, default=None,
-              help=f'Weight for entity score (default: {config.retrieval.gamma})')
+              help='Weight for entity score (default: from config_retrieval.yaml)')
 @click.option('--delta', type=float, default=None,
-              help=f'Weight for topic distribution score (default: {config.retrieval.delta})')
+              help='Weight for topic distribution score (default: from config_retrieval.yaml)')
 @click.option('--top-k', type=int, default=None,
-              help=f'Number of results (default: {config.retrieval.top_k})')
+              help='Number of results (default: from config_retrieval.yaml)')
 @click.option('--graph-id', type=str, default=None,
               help='Graph ID (timestamp) to use (e.g., 20251117_213022). If not specified, uses latest or default.')
 @click.option('--use-postgres', is_flag=True,
@@ -272,16 +277,30 @@ def retrieve(claim, alpha, beta, gamma, delta, top_k, graph_id, use_postgres, to
     from fact_check_kg.retrieval_results import RetrievalResultsManager
     from fact_check_kg.db_connector import GraphDatabaseConnector
 
+    # Load retrieval configuration
+    retrieval_config = get_retrieval_config()
+
+    # Load raw configs for saving to metadata
+    from pathlib import Path
+    from fact_check_kg.config_loader import load_raw_config
+    base_config_path = Path(__file__).parent / "config" / "config.yaml"
+    retrieval_config_path = Path(__file__).parent / "config" / "config_retrieval.yaml"
+    raw_config = load_raw_config(base_config_path)
+    raw_config_retrieval = load_raw_config(retrieval_config_path)
+
+    # Initialize logger
+    logger = get_logger("cli", retrieval_config.logging.level)
+
     logger.info("=" * 60)
     logger.info("KNOWLEDGE GRAPH RETRIEVAL")
     logger.info("=" * 60)
 
     # Use config defaults
-    alpha = alpha or config.retrieval.alpha
-    beta = beta or config.retrieval.beta
-    gamma = gamma or config.retrieval.gamma
-    delta = delta or config.retrieval.delta
-    top_k = top_k or config.retrieval.top_k
+    alpha = alpha or retrieval_config.retrieval.alpha
+    beta = beta or retrieval_config.retrieval.beta
+    gamma = gamma or retrieval_config.retrieval.gamma
+    delta = delta or retrieval_config.retrieval.delta
+    top_k = top_k or retrieval_config.retrieval.top_k
 
     # Get claim
     if not claim:
@@ -295,11 +314,11 @@ def retrieve(claim, alpha, beta, gamma, delta, top_k, graph_id, use_postgres, to
         logger.info("Loading knowledge graph...")
         if use_postgres:
             db = GraphDatabaseConnector(
-                host=config.database.host,
-                port=config.database.port,
-                database=config.database.database,
-                user=config.database.user,
-                password=config.database.password,
+                host=retrieval_config.database.host,
+                port=retrieval_config.database.port,
+                database=retrieval_config.database.database,
+                user=retrieval_config.database.user,
+                password=retrieval_config.database.password,
                 graph_id=graph_id,  # Use specified graph_id
                 logger=logger
             )
@@ -314,9 +333,9 @@ def retrieve(claim, alpha, beta, gamma, delta, top_k, graph_id, use_postgres, to
 
             # Load topic model with graph_id if specified
             if graph_id:
-                topic_model_path = Path(f"{config.paths.graphs_dir}/topic_model_{graph_id}.pkl")
+                topic_model_path = Path(f"{retrieval_config.paths.graphs_dir}/topic_model_{graph_id}.pkl")
             else:
-                topic_model_path = Path(f"{config.paths.graphs_dir}/topic_model.pkl")
+                topic_model_path = Path(f"{retrieval_config.paths.graphs_dir}/topic_model.pkl")
 
             with open(topic_model_path, 'rb') as f:
                 topic_model = pickle.load(f)
@@ -325,12 +344,12 @@ def retrieve(claim, alpha, beta, gamma, delta, top_k, graph_id, use_postgres, to
             if graph_id:
                 # If graph_id is specified, look for that specific graph
                 possible_paths = [
-                    Path(f"{config.paths.graphs_dir}/graph_{graph_id}.gpickle"),
+                    Path(f"{retrieval_config.paths.graphs_dir}/graph_{graph_id}.gpickle"),
                 ]
             else:
                 # Try default names
                 possible_paths = [
-                    Path(f"{config.paths.graphs_dir}/knowledge_graph.gpickle"),  # Default name
+                    Path(f"{retrieval_config.paths.graphs_dir}/knowledge_graph.gpickle"),  # Default name
                     Path("fact_check_kg/knowledge_graph.gpickle"),  # Legacy location
                 ]
 
@@ -354,7 +373,7 @@ def retrieve(claim, alpha, beta, gamma, delta, top_k, graph_id, use_postgres, to
             # Load topic model with matching graph_id if available
             if graph_id:
                 topic_model_paths = [
-                    Path(f"{config.paths.graphs_dir}/topic_model_{graph_id}.pkl"),
+                    Path(f"{retrieval_config.paths.graphs_dir}/topic_model_{graph_id}.pkl"),
                 ]
             else:
                 topic_model_paths = [
@@ -377,26 +396,31 @@ def retrieve(claim, alpha, beta, gamma, delta, top_k, graph_id, use_postgres, to
 
         # Load models
         logger.info("Loading embedding and NER models...")
-        embedding_model = SentenceTransformer(config.models.embedding_model)
-        nlp = spacy.load(config.models.ner_model)
+        embedding_model = SentenceTransformer(retrieval_config.models.embedding_model)
+        nlp = spacy.load(retrieval_config.models.ner_model)
         logger.info("Models loaded")
 
         # Initialize retriever
         logger.info("Initializing retriever...")
+        # Note: entity_types comes from build config, but we need it for entity extraction from queries
+        # For now, we'll define it in retrieval config too, or read from graph metadata
         retriever = HybridRetriever(
             graph=graph,
             topic_model=topic_model,
             embedding_model=embedding_model,
             nlp=nlp,
-            entity_types=config.graph_construction.entity_types,
+            entity_types=["PERSON", "ORG", "GPE", "LOC", "DATE", "EVENT", "NORP"],  # Use default entity types
             alpha=alpha,
             beta=beta,
             gamma=gamma,
             delta=delta,
             top_k=top_k,
-            theme_threshold=config.retrieval.theme_threshold,
-            entity_relevance_threshold=config.retrieval.entity_relevance_threshold,
-            theme_relevance_threshold=config.retrieval.theme_relevance_threshold,
+            theme_threshold=retrieval_config.retrieval.theme_threshold,
+            entity_relevance_threshold=retrieval_config.retrieval.entity_relevance_threshold,
+            theme_relevance_threshold=retrieval_config.retrieval.theme_relevance_threshold,
+            graph_id=graph_id,
+            cache_dir=retrieval_config.paths.graphs_dir,
+            config=retrieval_config.to_dict(),  # Pass complete configuration
             logger=logger
         )
 
@@ -449,7 +473,8 @@ def retrieve(claim, alpha, beta, gamma, delta, top_k, graph_id, use_postgres, to
                 print("=" * 80)
                 json_path, text_path = results_manager.save_results(
                     claim_text, results, alpha, beta, gamma, delta, rankings,
-                    graph_id=graph_id, custom_name=name
+                    graph_id=graph_id, custom_name=name,
+                    config=raw_config, config_retrieval=raw_config_retrieval
                 )
                 print(f"Results saved to:")
                 print(f"  JSON: {json_path}")
@@ -564,7 +589,7 @@ def stats(graph_id, use_postgres, detailed):
 @click.option('--use-postgres', is_flag=True,
               help='Use PostgreSQL storage')
 @click.option('--llm-model', type=str, default=None,
-              help=f'LLM model to use (default: {config.models.llm_model})')
+              help='LLM model to use (default: from config_build.yaml)')
 def relabel(use_postgres, llm_model):
     """Relabel topics using LLM."""
     from fact_check_kg.relabel_topics import relabel_graph

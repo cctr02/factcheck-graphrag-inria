@@ -1,0 +1,72 @@
+# Knowledge Graph Build Configuration
+# Configuration for building the knowledge graph from documents
+#
+# NOTE: Common settings (paths, models, database, logging, performance)
+# are loaded from config.yaml
+
+# ============================================================================
+# GRAPH CONSTRUCTION PARAMETERS
+# ============================================================================
+graph_construction:
+  # Data loading
+  max_documents: 100  # Maximum number of documents to process (-1 for all)
+
+  # Text chunking
+  chunk_size: 500  # Size of text chunks in characters
+  chunk_overlap: 100  # Overlap between chunks in characters
+
+  # Topic modeling (BERTopic)
+  min_topic_size: 10  # Minimum size for a topic
+  nr_topics: null  # Number of topics (null = auto-detect)
+  topic_probability_threshold: 0.15  # Minimum probability to create HAS_TOPIC edge
+
+  # Entity extraction thresholds
+  co_occurrence_threshold: 2  # Minimum co-occurrences to create edge
+  semantic_similarity_threshold: 0.8  # Minimum similarity for entity edges
+
+  # Temporal similarity (for DATE entities)
+  temporal_max_year_gap: 10  # Maximum year difference to create TEMPORAL_DIST edges
+  temporal_decay_rate: 0.5  # Exponential decay rate for temporal similarity (weight = exp(-rate * year_diff))
+
+  # Topic keyword processing
+  topic_keywords_initial: 15  # Number of keywords to retrieve from BERTopic initially
+  topic_keywords_final: 10  # Number of keywords after lemmatization and deduplication
+
+  # Demonymic suffixes for merging variants (e.g., nigeria/nigerian)
+  demonymic_suffixes:
+    - "ian"  # nigerian -> nigeria, australian -> australia
+    - "an"   # american -> america
+    - "ese"  # chinese -> china (sometimes), japanese -> japan
+    - "ish"  # british -> brit, spanish -> spain
+    - "i"    # iraqi -> iraq, pakistani -> pakistan
+
+  # Entity types to extract (spaCy)
+  entity_types:
+    - "PERSON"  # People, including fictional
+    - "ORG"  # Companies, agencies, institutions
+    - "GPE"  # Countries, cities, states
+    - "LOC"  # Non-GPE locations, mountain ranges, bodies of water
+    - "DATE"  # Absolute or relative dates or periods
+    - "EVENT"  # Named hurricanes, battles, wars, sports events
+    - "NORP"  # Nationalities or religious or political groups
+
+# ============================================================================
+# BUILD-SPECIFIC MODEL CONFIGURATION
+# ============================================================================
+models:
+  # LLM for topic labeling (Ollama) - only used during build
+  llm_model: "llama3.1:latest"  # Ollama model for topic labeling
+  llm_endpoint: "http://localhost:11434/api/generate"
+  llm_temperature: 0.3
+  llm_max_tokens: 20
+  llm_timeout: 300  # Request timeout in seconds
+  llm_label_max_length: 50  # Maximum length for topic labels
+  llm_label_max_words: 4  # Maximum words for truncated labels
+
+# ============================================================================
+# EXPORT CONFIGURATION
+# ============================================================================
+export:
+  # Build-specific file naming patterns
+  graph_pickle_pattern: "knowledge_graph_{timestamp}.gpickle"
+  topic_model_pattern: "topic_model_{timestamp}.pkl"

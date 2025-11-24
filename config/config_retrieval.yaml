@@ -1,0 +1,86 @@
+# Knowledge Graph Retrieval Configuration
+# Configuration for retrieving information from the knowledge graph
+#
+# NOTE: Common settings (paths, models, database, logging, performance)
+# are loaded from config.yaml
+
+# ============================================================================
+# GRAPH SELECTION
+# ============================================================================
+active_graph:
+  # Graph ID to use by default (timestamp format: YYYYMMDD_HHMMSS)
+  # Set to "latest" to always use the most recent graph
+  # Set to specific timestamp like "20251113_104456" to use a specific graph
+  graph_id: "latest"
+
+# ============================================================================
+# RETRIEVAL CONFIGURATION
+# ============================================================================
+retrieval:
+  # Weight parameters for hybrid retrieval (must sum to 1.0)
+  alpha: 0.3  # Weight for semantic similarity (embedding-based)
+  beta: 0.2  # Weight for thematic similarity (topic graph traversal)
+  gamma: 0.3  # Weight for entity-based similarity (entity graph traversal)
+  delta: 0.2  # Weight for topic distribution similarity (Jensen-Shannon divergence)
+
+  # Retrieval parameters
+  top_k: 10  # Number of results to return
+  theme_threshold: 0.1  # Minimum confidence for theme detection
+
+  # Path scoring weights
+  direct_path_weight: 1.0  # Entity -> Chunk (direct mention)
+  co_occurrence_path_weight: 0.8  # Entity -> Co-occurring Entity -> Chunk
+  theme_path_weight: 0.6  # Entity -> Theme -> Chunk
+
+  # Relevance propagation thresholds (for graph traversal)
+  entity_relevance_threshold: 0.1  # Minimum relevance to continue entity graph traversal
+  theme_relevance_threshold: 0.1  # Minimum relevance to continue theme graph traversal
+
+# ============================================================================
+# VISUALIZATION CONFIGURATION
+# ============================================================================
+visualization:
+  # General settings
+  default_width: "100%"
+  default_height: "900px"
+  background_color: "#1a1a1a"
+  font_color: "white"
+
+  # Node size limits
+  min_node_size: 10
+  max_node_size: 50
+
+  # Maximum nodes for full graph visualization
+  max_nodes_full_view: 200
+  max_nodes_entity_view: 50
+
+  # Node colors by type
+  colors:
+    document: "#42a5f5"  # Blue
+    chunk: "#ffd54f"  # Yellow
+    theme: "#ab47bc"  # Purple
+    entity: "#66bb6a"  # Green
+    central_entity: "#ff1744"  # Red (for focused views)
+
+  # Edge colors by type
+  edge_colors:
+    CONTAINS: "#666666"  # Gray
+    HAS_TOPIC: "#ab47bc"  # Purple
+    MENTIONS: "#66bb6a"  # Green
+    CO_OCCURS: "#ef5350"  # Red
+    SEMANTIC_SIM: "#42a5f5"  # Blue
+
+  # Physics simulation
+  physics:
+    enabled: true
+    gravity: -8000
+    central_gravity: 0.3
+    spring_length: 100
+    damping: 0.09
+
+# ============================================================================
+# EXPORT CONFIGURATION
+# ============================================================================
+export:
+  # Retrieval-specific file naming pattern
+  visualization_pattern: "{type}_{name}_{timestamp}.html"

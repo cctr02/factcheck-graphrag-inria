@@ -49,6 +49,18 @@ class KnowledgeGraphBuilder:
         co_occur_threshold: int = 2,
         semantic_sim_threshold: float = 0.6,
         topic_prob_threshold: float = 0.15,
+        temporal_max_year_gap: int = 10,
+        temporal_decay_rate: float = 0.3,
+        topic_keywords_initial: int = 15,
+        topic_keywords_final: int = 10,
+        demonymic_suffixes: Optional[List[str]] = None,
+        llm_endpoint: str = "http://localhost:11434/api/generate",
+        llm_model: str = "llama3.1:latest",
+        llm_temperature: float = 0.3,
+        llm_max_tokens: int = 20,
+        llm_timeout: int = 300,
+        llm_label_max_length: int = 50,
+        llm_label_max_words: int = 4,
         logger: Optional[logging.Logger] = None
     ):
         """
@@ -61,6 +73,17 @@ class KnowledgeGraphBuilder:
             co_occur_threshold: Minimum co-occurrences to create edge
             semantic_sim_threshold: Minimum similarity to create edge
             topic_prob_threshold: Minimum probability to create HAS_TOPIC edge
+            temporal_max_year_gap: Maximum year difference for temporal similarity
+            temporal_decay_rate: Decay rate for exponential temporal similarity
+            topic_keywords_initial: Number of keywords to retrieve initially
+            topic_keywords_final: Number of keywords after deduplication
+            llm_endpoint: LLM API endpoint for topic labeling
+            llm_model: LLM model name
+            llm_temperature: LLM temperature parameter
+            llm_max_tokens: Maximum tokens for LLM response
+            llm_timeout: LLM request timeout in seconds
+            llm_label_max_length: Maximum length for topic labels
+            llm_label_max_words: Maximum words for truncated labels
             logger: Optional logger instance
         """
         self.logger = logger or logging.getLogger(__name__)
@@ -77,6 +100,24 @@ class KnowledgeGraphBuilder:
         self.co_occur_threshold = co_occur_threshold
         self.semantic_sim_threshold = semantic_sim_threshold
         self.topic_prob_threshold = topic_prob_threshold
+
+        # Temporal similarity configuration
+        self.temporal_max_year_gap = temporal_max_year_gap
+        self.temporal_decay_rate = temporal_decay_rate
+
+        # Topic keyword processing configuration
+        self.topic_keywords_initial = topic_keywords_initial
+        self.topic_keywords_final = topic_keywords_final
+        self.demonymic_suffixes = demonymic_suffixes or ['ian', 'an', 'ese', 'ish', 'i']
+
+        # LLM configuration
+        self.llm_endpoint = llm_endpoint
+        self.llm_model = llm_model
+        self.llm_temperature = llm_temperature
+        self.llm_max_tokens = llm_max_tokens
+        self.llm_timeout = llm_timeout
+        self.llm_label_max_length = llm_label_max_length
+        self.llm_label_max_words = llm_label_max_words
 
         # Graph
         self.graph = nx.Graph()
@@ -106,6 +147,8 @@ class KnowledgeGraphBuilder:
         """
         Extract named entities from text using spaCy.
 
+        For DATE entities, only extract the year (4-digit format).
+
         Args:
             text: Input text
 
@@ -113,20 +156,32 @@ class KnowledgeGraphBuilder:
             List of (entity_text, entity_type) tuples
 
         Example:
-            >>> entities = builder.extract_entities("Trump visited France")
+            >>> entities = builder.extract_entities("Trump visited France in 2019")
             >>> entities
-            [("trump", "PERSON"), ("france", "GPE")]
+            [("trump", "PERSON"), ("france", "GPE"), ("2019", "DATE")]
         """
+        import re
+
         doc = self.nlp(text)
         entities = []
 
         for ent in doc.ents:
             # Filter for relevant entity types
             if ent.label_ in self.entity_types:
-                # Normalize entity text
                 entity_text = ent.text.strip().lower()
-                if len(entity_text) > 2:  # Filter very short entities
-                    entities.append((entity_text, ent.label_))
+
+                # Special handling for DATE: extract only the year
+                if ent.label_ == "DATE":
+                    # Look for 4-digit year in the entity text
+                    year_match = re.search(r'\b(19|20)\d{2}\b', entity_text)
+                    if year_match:
+                        year = year_match.group(0)
+                        entities.append((year, "DATE"))
+                    # Skip dates without a clear year
+                else:
+                    # For non-DATE entities, keep as is
+                    if len(entity_text) > 2:  # Filter very short entities
+                        entities.append((entity_text, ent.label_))
 
         return entities
 
@@ -186,13 +241,134 @@ class KnowledgeGraphBuilder:
         self.topic_model = topic_model
         return topic_model, topics, probabilities
 
+    def _process_topic_keywords(
+        self,
+        topic_words: List[Tuple[str, float]]
+    ) -> List[Tuple[str, float]]:
+        """
+        Process topic keywords with lemmatization and n-gram deduplication.
+
+        Args:
+            topic_words: List of (word, score) from BERTopic
+
+        Returns:
+            List of (word, score) tuples, deduplicated and lemmatized
+        """
+        if not topic_words:
+            return []
+
+        # Step 1: Lemmatize and merge variants (take top N initially)
+        lemma_scores = {}
+        original_forms = {}  # Map lemma to original form with highest score
+
+        for word, score in topic_words[:self.topic_keywords_initial]:
+            # Lemmatize using spaCy
+            doc = self.nlp(word)
+            lemma = " ".join([token.lemma_ for token in doc])
+
+            # Keep the form with the highest score
+            if lemma not in lemma_scores or score > lemma_scores[lemma]:
+                lemma_scores[lemma] = score
+                original_forms[lemma] = word
+
+        # Step 1b: Merge words with common roots (e.g., nigeria/nigerian, australia/australian)
+        # Create a mapping from each lemma to its canonical root
+        lemma_to_root = {}
+
+        for lemma in lemma_scores.keys():
+            # Try stripping each suffix to find potential root
+            canonical_root = lemma  # Default to itself
+
+            for suffix in self.demonymic_suffixes:
+                if lemma.endswith(suffix) and len(lemma) > len(suffix) + 2:
+                    potential_root = lemma[:-len(suffix)]
+                    # Check if this root exists in our lemmas
+                    if potential_root in lemma_scores:
+                        # Use the shorter root as canonical
+                        canonical_root = potential_root
+                        break
+
+            lemma_to_root[lemma] = canonical_root
+
+        # Build root -> all variants mapping
+        root_variants = {}
+        for lemma, score in lemma_scores.items():
+            root = lemma_to_root[lemma]
+            if root not in root_variants:
+                root_variants[root] = []
+            root_variants[root].append((lemma, score))
+
+        # Merge scores for each root (sum all scores from variants)
+        merged_lemma_scores = {}
+        for root, variants in root_variants.items():
+            # Sum scores from all variants
+            total_score = sum(score for _, score in variants)
+            merged_lemma_scores[root] = total_score
+
+        # Update lemma_scores with merged version
+        lemma_scores = merged_lemma_scores
+
+        # Step 2: Filter redundant n-grams
+        # Strategy: Keep longer n-grams, remove shorter ones that are substrings
+        # Sort by length (descending) then score (descending)
+        sorted_items = sorted(
+            lemma_scores.items(),
+            key=lambda x: (len(x[0].split()), x[1]),  # Sort by word count, then score
+            reverse=True
+        )
+
+        filtered = []
+        for lemma, score in sorted_items:
+            is_redundant = False
+
+            # Check if this lemma is a substring of any already kept lemma
+            for kept_lemma, kept_score in filtered:
+                # Check if current lemma is contained in a kept lemma
+                # Use word boundary checks to avoid false positives
+                lemma_words = set(lemma.split())
+                kept_words = set(kept_lemma.split())
+
+                # If all words in current lemma are in the kept lemma, it's redundant
+                if lemma_words.issubset(kept_words):
+                    is_redundant = True
+                    break
+
+            if not is_redundant:
+                # Before adding, remove any kept lemmas that are substrings of current lemma
+                to_remove = []
+                for kept_lemma, kept_score in filtered:
+                    kept_words = set(kept_lemma.split())
+                    lemma_words = set(lemma.split())
+
+                    # If kept lemma is subset of current lemma, mark for removal
+                    if kept_words.issubset(lemma_words) and kept_lemma != lemma:
+                        to_remove.append((kept_lemma, kept_score))
+
+                # Remove redundant kept items
+                for item in to_remove:
+                    filtered.remove(item)
+
+                filtered.append((lemma, score))
+
+        # Step 3: Re-sort by score and take top N
+        filtered_sorted = sorted(filtered, key=lambda x: x[1], reverse=True)
+        final_count = min(max(len(filtered_sorted), 3), self.topic_keywords_final)
+        top_keywords = filtered_sorted[:final_count]
+
+        # Return with lemmatized forms (not original forms)
+        result = [(lemma, score) for lemma, score in top_keywords]
+
+        self.logger.debug(f"Processed keywords: {len(topic_words)} -> {len(result)} (removed {len(topic_words) - len(result)} redundant)")
+
+        return result
+
     def label_topic_with_llm(
         self,
         topic_words: List[Tuple[str, float]],
         use_llm: bool = False
     ) -> str:
         """
-        Label a topic using keywords (or optionally LLM).
+        Label a topic using processed keywords (or optionally LLM).
 
         Args:
             topic_words: List of (word, score) tuples from BERTopic
@@ -207,8 +383,11 @@ class KnowledgeGraphBuilder:
             >>> label
             "gaza israel conflict"
         """
-        # Extract top words
-        top_words = [word for word, score in topic_words[:10]]
+        # Process keywords: lemmatize and remove redundant n-grams
+        processed_keywords = self._process_topic_keywords(topic_words)
+
+        # Extract top words from processed keywords
+        top_words = [word for word, score in processed_keywords]
 
         # If LLM is not requested, use fallback immediately
         if not use_llm:
@@ -226,17 +405,17 @@ Keywords: {', '.join(top_words)}
 Topic label:"""
 
             response = requests.post(
-                'http://localhost:11434/api/generate',
+                self.llm_endpoint,
                 json={
-                    'model': 'llama3.1:latest',
+                    'model': self.llm_model,
                     'prompt': prompt,
                     'stream': False,
                     'options': {
-                        'temperature': 0.3,
-                        'num_predict': 20  # Short responses
+                        'temperature': self.llm_temperature,
+                        'num_predict': self.llm_max_tokens
                     }
                 },
-                timeout=300
+                timeout=self.llm_timeout
             )
 
             if response.status_code == 200:
@@ -246,8 +425,8 @@ Topic label:"""
                 # Remove quotes if present
                 label = label.strip('"\'')
                 # Limit length
-                if len(label) > 50:
-                    label = ' '.join(label.split()[:4])
+                if len(label) > self.llm_label_max_length:
+                    label = ' '.join(label.split()[:self.llm_label_max_words])
 
                 self.logger.debug(f"LLM labeled topic: {top_words[:3]} -> '{label}'")
                 return label.lower()
@@ -317,9 +496,16 @@ Topic label:"""
         self.logger.info("\nStep 5: Adding CO_OCCURS edges (Entity ↔ Entity)...")
         self._add_entity_co_occurrences(chunk_to_entities)
 
-        # Step 6: Add SEMANTIC_SIM edges (Entity ↔ Entity)
+        # Step 6: Add SEMANTIC_SIM edges (Entity ↔ Entity, excluding DATEs)
         self.logger.info("\nStep 6: Adding SEMANTIC_SIM edges (Entity ↔ Entity)...")
         self._add_entity_semantic_similarity()
+
+        # Step 6b: Add TEMPORAL_DIST edges (DATE ↔ DATE)
+        self.logger.info("\nStep 6b: Adding TEMPORAL_DIST edges (DATE ↔ DATE)...")
+        self._add_date_temporal_similarity(
+            max_year_gap=self.temporal_max_year_gap,
+            decay_rate=self.temporal_decay_rate
+        )
 
         # Step 7: Add SEMANTIC_SIM edges (Theme ↔ Theme)
         self.logger.info("\nStep 7: Adding SEMANTIC_SIM edges (Theme ↔ Theme)...")
@@ -392,16 +578,20 @@ Topic label:"""
             if not topic_words:
                 continue
 
-            # Label topic (with LLM or simple concatenation)
+            # Process keywords: lemmatize and deduplicate n-grams
+            processed_keywords = self._process_topic_keywords(topic_words)
+
+            # Label topic (with LLM or simple concatenation) using processed keywords
             label = self.label_topic_with_llm(topic_words, use_llm=use_llm_labels)
-            # Add theme node
+
+            # Add theme node with processed keywords
             theme_node = f"theme::{topic_id}"
             self.graph.add_node(
                 theme_node,
                 type="theme",
                 topic_id=topic_id,
                 label=label,
-                keywords=[w for w, s in topic_words[:10]]
+                keywords=[w for w, s in processed_keywords]  # Use processed keywords
             )
 
         self._log_step_completion("Creating theme nodes", start_time_themes, len(unique_topics))
@@ -595,17 +785,17 @@ Topic label:"""
         self._log_step_completion("Adding CO_OCCURS edges", start_time_add, edges_added)
 
     def _add_entity_semantic_similarity(self):
-        """Add SEMANTIC_SIM edges between entities based on embeddings."""
+        """Add SEMANTIC_SIM edges between non-DATE entities based on embeddings."""
         start_time = time.time()
 
-        # Get all entity nodes
+        # Get all entity nodes EXCEPT DATE entities
         entity_nodes = [
             n for n, d in self.graph.nodes(data=True)
-            if d.get('type') == 'entity'
+            if d.get('type') == 'entity' and d.get('entity_type') != 'DATE'
         ]
 
         if len(entity_nodes) < 2:
-            self.logger.info("Skipping entity semantic similarity (< 2 entities)")
+            self.logger.info("Skipping entity semantic similarity (< 2 non-DATE entities)")
             return
 
         # Extract entity texts
@@ -615,7 +805,7 @@ Topic label:"""
         ]
 
         # Embed entities (just the name, not context - Option B)
-        self.logger.info(f"Embedding {len(entity_texts)} entities...")
+        self.logger.info(f"Embedding {len(entity_texts)} non-DATE entities...")
         embeddings = self.embedding_model.encode(
             entity_texts,
             show_progress_bar=False,
@@ -641,6 +831,83 @@ Topic label:"""
                     edge_count += 1
 
         self._log_step_completion("Adding entity SEMANTIC_SIM edges", start_time, edge_count)
+
+    def _add_date_temporal_similarity(self, max_year_gap: int = 10, decay_rate: float = 0.3):
+        """
+        Add TEMPORAL_DIST edges between year entities with exponential decay.
+
+        Uses an exponential negative decay function:
+        weight = exp(-decay_rate * year_diff)
+
+        Where:
+        - year_diff = |year2 - year1|
+        - decay_rate controls how fast the weight decreases (default: 0.3)
+
+        Examples (with decay_rate=0.3):
+        - Same year (diff=0): weight = 1.0
+        - 1 year diff: weight ≈ 0.74
+        - 2 years diff: weight ≈ 0.55
+        - 3 years diff: weight ≈ 0.41
+        - 5 years diff: weight ≈ 0.22
+        - 10 years diff: weight ≈ 0.05
+
+        Args:
+            max_year_gap: Maximum year difference to create edges (default: 10)
+            decay_rate: Decay rate for exponential function (default: 0.3)
+        """
+        start_time = time.time()
+
+        # Get all DATE entity nodes (which are now years)
+        date_nodes = [
+            n for n, d in self.graph.nodes(data=True)
+            if d.get('type') == 'entity' and d.get('entity_type') == 'DATE'
+        ]
+
+        if len(date_nodes) < 2:
+            self.logger.info("Skipping date temporal similarity (< 2 years)")
+            return
+
+        self.logger.info(f"Processing temporal similarity for {len(date_nodes)} year entities...")
+        self.logger.info(f"Using exponential decay: weight = exp(-{decay_rate} * year_diff), max_gap={max_year_gap}")
+
+        # Extract years
+        year_nodes = {}
+        for node in date_nodes:
+            year_text = self.graph.nodes[node]['entity_text']
+            try:
+                year = int(year_text)
+                year_nodes[year] = node
+            except ValueError:
+                continue
+
+        years_list = list(year_nodes.keys())
+
+        # Connect all years within max_year_gap with exponential decay
+        edge_count = 0
+        for i in range(len(years_list)):
+            for j in range(i + 1, len(years_list)):
+                year1 = years_list[i]
+                year2 = years_list[j]
+                year_diff = abs(year2 - year1)
+
+                # Only connect if within max_year_gap
+                if year_diff <= max_year_gap:
+                    node1 = year_nodes[year1]
+                    node2 = year_nodes[year2]
+
+                    # Exponential decay: weight = exp(-decay_rate * year_diff)
+                    weight = float(np.exp(-decay_rate * year_diff))
+
+                    self.graph.add_edge(
+                        node1,
+                        node2,
+                        edge_type="TEMPORAL_DIST",
+                        weight=weight,
+                        year_diff=year_diff
+                    )
+                    edge_count += 1
+
+        self._log_step_completion("Adding TEMPORAL_DIST edges (exponential decay)", start_time, edge_count)
 
     def _add_theme_semantic_similarity(self, topic_model: BERTopic):
         """Add SEMANTIC_SIM edges between themes based on topic word embeddings."""
@@ -867,9 +1134,14 @@ Topic label:"""
             topic_chunks = [i for i, t in enumerate(topics) if t == topic_id]
             topic_doc_ids = set(chunks[i]['doc_id'] for i in topic_chunks if i < len(chunks))
 
-            # Get theme label from graph
+            # Get theme label and processed keywords from graph
             theme_node = f"theme::{topic_id}"
-            theme_label = self.graph.nodes[theme_node].get('label', '') if self.graph.has_node(theme_node) else ''
+            if self.graph.has_node(theme_node):
+                theme_label = self.graph.nodes[theme_node].get('label', '')
+                processed_keywords = self.graph.nodes[theme_node].get('keywords', [])
+            else:
+                theme_label = ''
+                processed_keywords = []
 
             topic_info = {
                 "topic_id": topic_id,
@@ -877,7 +1149,7 @@ Topic label:"""
                 "num_chunks": len(topic_chunks),
                 "num_documents": len(topic_doc_ids),
                 "top_words": [{"word": word, "score": float(score)} for word, score in topic_words[:10]],
-                "keywords": [word for word, score in topic_words[:5]]
+                "keywords": processed_keywords  # Use processed keywords from graph node
             }
             topic_stats["topics"].append(topic_info)
 
@@ -891,27 +1163,47 @@ Topic label:"""
             "timestamp": timestamp,
             "total_entities": 0,
             "entities_by_type": {},
-            "top_entities_by_degree": []
+            "top_entities_by_degree": [],
+            "top_entities_by_weight": []
         }
 
-        entities = [(n, self.graph.nodes[n], self.graph.degree(n))
-                   for n, d in self.graph.nodes(data=True)
-                   if d.get('type') == 'entity']
+        # Calculate degree and total weight for each entity
+        entities = []
+        for n, d in self.graph.nodes(data=True):
+            if d.get('type') == 'entity':
+                degree = self.graph.degree(n)
+                # Calculate total weight (sum of all edge weights)
+                total_weight = sum(
+                    self.graph[n][neighbor].get('weight', 1.0)
+                    for neighbor in self.graph.neighbors(n)
+                )
+                entities.append((n, d, degree, total_weight))
 
         entity_stats["total_entities"] = len(entities)
 
         # Count by entity type
-        for node, data, degree in entities:
+        for node, data, degree, weight in entities:
             entity_type = data.get('entity_type', 'unknown')
             entity_stats["entities_by_type"][entity_type] = entity_stats["entities_by_type"].get(entity_type, 0) + 1
 
         # Top entities by degree
-        sorted_entities = sorted(entities, key=lambda x: x[2], reverse=True)[:50]
-        for node, data, degree in sorted_entities:
+        sorted_by_degree = sorted(entities, key=lambda x: x[2], reverse=True)[:50]
+        for node, data, degree, weight in sorted_by_degree:
             entity_stats["top_entities_by_degree"].append({
                 "entity": data.get('entity_text', ''),
                 "type": data.get('entity_type', ''),
-                "degree": degree
+                "degree": degree,
+                "total_weight": round(weight, 4)
+            })
+
+        # Top entities by total weight
+        sorted_by_weight = sorted(entities, key=lambda x: x[3], reverse=True)[:50]
+        for node, data, degree, weight in sorted_by_weight:
+            entity_stats["top_entities_by_weight"].append({
+                "entity": data.get('entity_text', ''),
+                "type": data.get('entity_type', ''),
+                "degree": degree,
+                "total_weight": round(weight, 4)
             })
 
         # Save entity statistics
@@ -957,7 +1249,11 @@ Nodes by Type:
 
         summary += "\n\nTop 20 Entities by Degree:\n"
         for i, entity in enumerate(entity_stats["top_entities_by_degree"][:20], 1):
-            summary += f"  {i}. {entity['entity']} ({entity['type']}) - Degree: {entity['degree']}\n"
+            summary += f"  {i}. {entity['entity']} ({entity['type']}) - Degree: {entity['degree']}, Weight: {entity['total_weight']}\n"
+
+        summary += "\n\nTop 20 Entities by Total Weight:\n"
+        for i, entity in enumerate(entity_stats["top_entities_by_weight"][:20], 1):
+            summary += f"  {i}. {entity['entity']} ({entity['type']}) - Weight: {entity['total_weight']}, Degree: {entity['degree']}\n"
 
         # Save summary
         with open(stats_dir / f"summary_{timestamp}.txt", 'w') as f:

@@ -16,40 +16,76 @@ from utils.io_utils import load_corpus_from_csv
 
 def chunk_text(text: str, chunk_size: int = 500, overlap: int = 100) -> List[str]:
     """
-    Split text into overlapping chunks by characters.
+    Split text into overlapping chunks respecting sentence boundaries.
 
     Args:
         text: Input text to chunk
-        chunk_size: Size of each chunk in characters
-        overlap: Number of overlapping characters between chunks
+        chunk_size: Maximum size of each chunk in characters (soft limit)
+        overlap: Approximate number of overlapping characters between chunks
 
     Returns:
-        List of text chunks
+        List of text chunks (each chunk ends at a sentence boundary)
 
     Example:
-        >>> text = "This is a long text..." * 100
-        >>> chunks = chunk_text(text, chunk_size=200, overlap=50)
-        >>> len(chunks[0]), len(chunks[1])
-        (200, 200)
+        >>> text = "First sentence. Second sentence. Third sentence."
+        >>> chunks = chunk_text(text, chunk_size=30, overlap=10)
+        >>> chunks[0]
+        'First sentence. Second sentence.'
     """
+    import re
+
+    # Split text into sentences using regex
+    # Match sentence endings: . ! ? followed by space or end of string
+    sentence_pattern = r'(?<=[.!?])\s+(?=[A-Z])|(?<=[.!?])$'
+    sentences = re.split(sentence_pattern, text)
+
+    # Clean up sentences
+    sentences = [s.strip() for s in sentences if s.strip()]
+
+    if not sentences:
+        return []
+
     chunks = []
-    start = 0
-    text_len = len(text)
+    current_chunk = []
+    current_length = 0
 
-    while start < text_len:
-        end = start + chunk_size
-        chunk = text[start:end]
+    i = 0
+    while i < len(sentences):
+        sentence = sentences[i]
+        sentence_length = len(sentence)
 
-        # Avoid empty chunks
-        if chunk.strip():
-            chunks.append(chunk.strip())
+        # If adding this sentence would exceed chunk_size
+        if current_length > 0 and current_length + sentence_length + 1 > chunk_size:
+            # Save current chunk
+            chunk_text = ' '.join(current_chunk)
+            if chunk_text:
+                chunks.append(chunk_text)
 
-        # Move start position with overlap
-        start = end - overlap
+            # Start new chunk with overlap
+            # Calculate how many sentences to keep for overlap
+            overlap_sentences = []
+            overlap_length = 0
+            for s in reversed(current_chunk):
+                if overlap_length + len(s) + 1 <= overlap:
+                    overlap_sentences.insert(0, s)
+                    overlap_length += len(s) + 1
+                else:
+                    break
 
-        # Break if we're at the end
-        if end >= text_len:
-            break
+            # Start new chunk with overlap sentences
+            current_chunk = overlap_sentences
+            current_length = overlap_length
+
+        # Add sentence to current chunk
+        current_chunk.append(sentence)
+        current_length += sentence_length + (1 if current_length > 0 else 0)  # +1 for space
+        i += 1
+
+    # Add last chunk
+    if current_chunk:
+        chunk_text = ' '.join(current_chunk)
+        if chunk_text:
+            chunks.append(chunk_text)
 
     return chunks
 

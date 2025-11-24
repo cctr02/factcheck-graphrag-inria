@@ -1,0 +1,101 @@
+# Knowledge Graph System - Common Configuration
+# This file contains configuration shared between build and retrieval
+
+# ============================================================================
+# PATHS CONFIGURATION
+# ============================================================================
+paths:
+  # Data directories
+  data_dir: "data"
+  csv_file: "data/english_fact_checks.csv"
+
+  # Output directories
+  outputs_dir: "outputs"
+  graphs_dir: "outputs/graphs"
+  visualizations_dir: "outputs/visualizations"
+  models_dir: "outputs/models"
+  exports_dir: "outputs/exports"
+
+  # Logs directory
+  logs_dir: "logs"
+
+# ============================================================================
+# MODEL CONFIGURATION
+# ============================================================================
+models:
+  # Sentence embeddings (must be same for build and retrieval)
+  embedding_model: "all-MiniLM-L6-v2"  # SentenceTransformer model for embeddings
+  embedding_dimension: 384  # Dimension of the embedding model (384 for all-MiniLM-L6-v2)
+
+  # Named Entity Recognition
+  ner_model: "en_core_web_sm"  # spaCy model for NER
+
+# ============================================================================
+# POSTGRESQL DATABASE CONFIGURATION
+# ============================================================================
+database:
+  # Connection parameters
+  host: "localhost"
+  port: 5432
+  database: "knowledge_graph"
+  user: "postgres"
+  password: "postgres"
+
+  # Table names
+  graph_table: "graph"
+  nodes_table: "nodes"
+
+  # Connection pool settings
+  pool_size: 10
+  max_overflow: 20
+
+# ============================================================================
+# LOGGING CONFIGURATION
+# ============================================================================
+logging:
+  # Default logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+  level: "INFO"
+
+  # Log to file
+  log_to_file: true
+
+  # Log to console
+  log_to_console: true
+
+  # Log file rotation
+  max_log_size_mb: 10  # Maximum size of each log file
+  backup_count: 5  # Number of backup files to keep
+
+  # Module-specific log levels (optional overrides)
+  module_levels:
+    graph_builder: "INFO"
+    retrieval: "INFO"
+    data_loader: "INFO"
+    visualization: "INFO"
+
+# ============================================================================
+# PERFORMANCE CONFIGURATION
+# ============================================================================
+performance:
+  # Batch processing
+  batch_size: 1000  # Batch size for database operations
+
+  # Parallel processing
+  n_jobs: -1  # Number of parallel jobs (-1 = use all cores)
+
+  # Memory management
+  max_memory_mb: 4096  # Maximum memory usage
+
+  # Caching
+  enable_cache: true
+  cache_dir: ".cache"
+
+# ============================================================================
+# EXPORT CONFIGURATION
+# ============================================================================
+export:
+  # Common export settings
+  timestamp_format: "%Y%m%d_%H%M%S"
+  supported_formats:
+    - "json"
+    - "csv"

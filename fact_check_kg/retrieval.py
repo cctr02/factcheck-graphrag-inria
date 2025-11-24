@@ -47,6 +47,9 @@ class HybridRetriever:
         theme_threshold: float = 0.1,
         entity_relevance_threshold: float = 0.1,
         theme_relevance_threshold: float = 0.1,
+        graph_id: Optional[str] = None,
+        cache_dir: Optional[str] = None,
+        config: Optional[Dict] = None,
         logger: Optional[logging.Logger] = None
     ):
         """
@@ -66,6 +69,9 @@ class HybridRetriever:
             theme_threshold: Minimum confidence for theme detection
             entity_relevance_threshold: Minimum relevance to continue entity traversal
             theme_relevance_threshold: Minimum relevance to continue theme traversal
+            graph_id: Optional graph ID for loading cached embeddings
+            cache_dir: Optional directory containing FAISS cache
+            config: Optional complete configuration dictionary
             logger: Optional logger instance
         """
         self.graph = graph
@@ -73,6 +79,7 @@ class HybridRetriever:
         self.embedding_model = embedding_model
         self.nlp = nlp
         self.entity_types = entity_types
+        self.config = config
 
         # Weights (should sum to 1.0)
         self.alpha = alpha
@@ -86,15 +93,31 @@ class HybridRetriever:
         self.entity_relevance_threshold = entity_relevance_threshold
         self.theme_relevance_threshold = theme_relevance_threshold
 
+        # Cache parameters
+        self.graph_id = graph_id
+        self.cache_dir = cache_dir
+
         self.logger = logger or logging.getLogger(__name__)
 
         # Pre-compute chunk embeddings and topic distributions for efficiency
         self.logger.info("Pre-computing chunk embeddings and topic distributions...")
-        self._precompute_chunk_embeddings()
+        self._precompute_chunk_embeddings(graph_id, cache_dir)
         self._precompute_chunk_topic_distributions()
 
-    def _precompute_chunk_embeddings(self):
-        """Pre-compute embeddings for all chunks in the graph."""
+    def _precompute_chunk_embeddings(self, graph_id: Optional[str] = None, cache_dir: Optional[str] = None):
+        """
+        Pre-compute embeddings for all chunks in the graph.
+
+        If graph_id and cache_dir are provided, will try to load from FAISS cache first.
+        Otherwise, computes embeddings on-the-fly.
+
+        Args:
+            graph_id: Optional graph ID for loading cached embeddings
+            cache_dir: Optional directory containing FAISS cache
+        """
+        from pathlib import Path
+        from fact_check_kg.embedding_cache import EmbeddingCache
+
         self.chunk_nodes = [
             n for n, d in self.graph.nodes(data=True)
             if d.get('type') == 'chunk'
@@ -105,13 +128,37 @@ class HybridRetriever:
             for n in self.chunk_nodes
         ]
 
+        # Try to load from FAISS cache if available
+        if graph_id and cache_dir:
+            try:
+                cache_path = Path(cache_dir)
+                embedding_cache = EmbeddingCache(logger=self.logger)
+                embedding_cache.load(cache_path, graph_id)
+
+                # Get embeddings from cache
+                cached_chunk_ids, cached_embeddings = embedding_cache.get_all_embeddings()
+
+                # Verify chunk IDs match
+                if cached_chunk_ids == self.chunk_nodes:
+                    self.chunk_embeddings = cached_embeddings
+                    self.logger.info(f"Loaded embeddings from FAISS cache for {len(self.chunk_nodes)} chunks")
+                    return
+                else:
+                    self.logger.warning("Cached chunk IDs don't match current graph, recomputing embeddings...")
+            except FileNotFoundError:
+                self.logger.warning(f"FAISS cache not found for graph_id {graph_id}, computing embeddings...")
+            except Exception as e:
+                self.logger.warning(f"Error loading FAISS cache: {e}, computing embeddings...")
+
+        # Fallback: compute embeddings on-the-fly
+        self.logger.info("Computing embeddings for all chunks...")
         self.chunk_embeddings = self.embedding_model.encode(
             self.chunk_texts,
             show_progress_bar=True,
             normalize_embeddings=True
         )
 
-        self.logger.info(f"Pre-computed embeddings for {len(self.chunk_nodes)} chunks")
+        self.logger.info(f"Computed embeddings for {len(self.chunk_nodes)} chunks")
 
     def _precompute_chunk_topic_distributions(self):
         """Pre-compute topic probability distributions for all chunks."""
@@ -568,6 +615,9 @@ class HybridRetriever:
             - score_theme: float (thematic score)
             - score_entity: float (entity score)
             - score_topic_dist: float (topic distribution score)
+            - claim: str (the original claim)
+            - config: Dict (complete configuration used for retrieval, included in first result only)
+            - retrieval_timestamp: str (ISO format timestamp, included in first result only)
         """
         self.logger.info("\n" + "=" * 60)
         self.logger.info(f"RETRIEVAL FOR CLAIM: {claim}")
@@ -627,6 +677,10 @@ class HybridRetriever:
 
         # Return top-K
         top_results = results[:self.top_k]
+
+        # Add claim to all results
+        for result in top_results:
+            result['claim'] = claim
 
         self.logger.info(f"\nTop {len(top_results)} results:")
         for i, result in enumerate(top_results[:5], 1):

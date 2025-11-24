@@ -74,7 +74,9 @@ class RetrievalResultsManager:
         alpha: float,
         beta: float,
         gamma: float,
-        delta: float
+        delta: float,
+        config: dict = None,
+        config_retrieval: dict = None
     ) -> Dict:
         """
         Format results with detailed scoring breakdown.
@@ -86,6 +88,8 @@ class RetrievalResultsManager:
             beta: Thematic weight
             gamma: Entity weight
             delta: Topic distribution weight
+            config: Optional common configuration dict
+            config_retrieval: Optional retrieval-specific configuration dict
 
         Returns:
             Formatted results dictionary
@@ -106,6 +110,12 @@ class RetrievalResultsManager:
             },
             "results": []
         }
+
+        # Add configurations to metadata if provided
+        if config is not None:
+            formatted["metadata"]["config"] = config
+        if config_retrieval is not None:
+            formatted["metadata"]["config_retrieval"] = config_retrieval
 
         for rank, result in enumerate(results, 1):
             formatted_result = {
@@ -320,7 +330,9 @@ class RetrievalResultsManager:
         delta: float,
         rankings: Dict[str, List[Dict]] = None,
         graph_id: str = None,
-        custom_name: str = None
+        custom_name: str = None,
+        config: dict = None,
+        config_retrieval: dict = None
     ) -> Tuple[str, str]:
         """
         Save results to JSON and text files.
@@ -335,6 +347,8 @@ class RetrievalResultsManager:
             rankings: Optional pre-computed rankings
             graph_id: Graph ID to use as base timestamp
             custom_name: Custom name for this retrieval (e.g., "test1")
+            config: Optional common configuration dict
+            config_retrieval: Optional retrieval-specific configuration dict
 
         Returns:
             Tuple of (json_path, text_path)
@@ -351,8 +365,11 @@ class RetrievalResultsManager:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename_base = f"results_{timestamp}"
 
-        # Format results
-        formatted = self.format_results_detailed(claim, results, alpha, beta, gamma, delta)
+        # Format results (include configs if provided)
+        formatted = self.format_results_detailed(
+            claim, results, alpha, beta, gamma, delta,
+            config=config, config_retrieval=config_retrieval
+        )
 
         # Create rankings if not provided
         if rankings is None:

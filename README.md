@@ -12,15 +12,22 @@ The knowledge graph is built in several steps, creating a multi-level network li
 
 #### **Documents and Chunks**
 
-Documents are split into chunks with overlap to preserve context:
+Documents are split into **sentence-based chunks** with overlap to preserve context:
 
 ```python
-# Chunking with overlap
-chunk_size = 500  # characters
+# Intelligent sentence-based chunking
+chunk_size = 500  # characters (soft limit)
 chunk_overlap = 100  # characters
 
 chunks = chunk_text(document, chunk_size=500, overlap=100)
 ```
+
+**Intelligent chunking features**:
+- Chunks are built by accumulating complete sentences until `chunk_size` is reached
+- Chunks end at sentence boundaries (detected via regex: `(?<=[.!?])\s+(?=[A-Z])`)
+- Overlap is calculated at sentence level (not character level)
+- 90%+ of chunks end at natural sentence boundaries
+- Preserves semantic coherence better than naive character-based chunking
 
 **Node format**:
 - Document: `doc::{doc_id}`
@@ -45,16 +52,36 @@ topic_model = BERTopic(
 topics, probabilities = topic_model.fit_transform(chunk_texts)
 ```
 
-**Label generation**: Themes are labeled using **top 3 keywords** by default (fast), or optionally via LLM (slower but more descriptive):
+**Label generation**: Themes are labeled using **intelligent keyword processing** by default (fast), or optionally via LLM (slower but more descriptive):
 
 ```python
-# Default: Keyword-based labels (top 3 words)
-keywords = topic_model.get_topic(topic_id)[:3]
-label = " ".join(keywords)  # e.g., "gaza israel conflict"
+# Intelligent keyword processing (default):
+# 1. Retrieve top 15 keywords from BERTopic
+keywords_raw = topic_model.get_topic(topic_id)[:15]
 
-# Optional: LLM-generated labels (use --use-llm-labels flag)
-# label = llm_generate_topic_label(keywords)  # e.g., "middle east conflict"
+# 2. Lemmatize keywords using spaCy (merge variants)
+# Example: "presidents" → "president", "running" → "run"
+
+# 3. Remove redundant n-grams
+# Example: "sri lanka" (0.9) eliminates "sri" (0.8) and "lanka" (0.7)
+# Keeps only the most informative keyword form
+
+# 4. Return top 10 deduplicated keywords
+keywords = process_keywords(keywords_raw)  # Top 10 after deduplication
+
+# 5. Create label from top 3 keywords
+# Default: LLM-generated labels (more descriptive)
+label = llm_generate_topic_label(keywords)  # e.g., "middle east conflict"
+
+# Alternative: Keyword-based labels (use --no-llm-labels flag for speed)
+# label = " ".join(keywords[:3])  # e.g., "gaza israel conflict"
 ```
+
+**Keyword processing benefits**:
+- Removes morphological variants (e.g., "president" vs "presidents")
+- Eliminates redundant n-gram components (e.g., keeps "sri lanka", removes "sri" and "lanka")
+- Results in cleaner, more informative topic representations
+- Reduces noise in topic labels
 
 **Node format**:
 - Theme: `theme::{topic_id}`
@@ -76,7 +103,14 @@ doc = nlp(text)
 entities = []
 for ent in doc.ents:
     if ent.label_ in ['PERSON', 'ORG', 'GPE', 'LOC', 'DATE', 'EVENT', 'NORP']:
-        entities.append((ent.text.lower(), ent.label_))
+        # Special handling for DATEs: extract only years
+        if ent.label_ == "DATE":
+            year_match = re.search(r'\b(19|20)\d{2}\b', ent.text.lower())
+            if year_match:
+                year = year_match.group(0)
+                entities.append((year, "DATE"))
+        else:
+            entities.append((ent.text.lower(), ent.label_))
 ```
 
 **Extracted entity types**:
@@ -84,9 +118,15 @@ for ent in doc.ents:
 - `ORG`: organizations, companies
 - `GPE`: geopolitical entities (countries, cities)
 - `LOC`: non-GPE locations (mountains, oceans)
-- `DATE`: dates and time periods
+- `DATE`: **years only** (4-digit years like "2019", "1995") extracted from date mentions
 - `EVENT`: named events (wars, disasters)
 - `NORP`: nationalities, religious or political groups
+
+**Special DATE handling**:
+- Only 4-digit years (19xx or 20xx) are extracted from DATE entities
+- Detailed dates like "January 15, 2020" → year node "2020"
+- Reduces date nodes by 88% (218 dates → 26 unique years)
+- Enables temporal similarity connections between years
 
 **Node format**:
 - Entity: `entity::{entity_type}::{entity_text}`
@@ -230,18 +270,20 @@ weight_CO_PRESENCE(t1, t2) = count(t1, t2) × (1 / √(freq(t1) × freq(t2)))
 
 Links semantically similar entities (or themes) via their embeddings.
 
-**For entities**:
+**For entities** (excluding DATE entities):
 
 ```python
-# Embeddings of entity names
+# Embeddings of entity names (DATE entities excluded)
 embeddings = SentenceTransformer.encode([entity_text1, entity_text2, ...])
 
 # Cosine similarity
 sim = cosine_similarity(embedding1, embedding2) = embedding1 · embedding2
 
-# Edge if sim > threshold (default: 0.6)
+# Edge if sim > threshold (default: 0.8)
 if sim > semantic_similarity_threshold:
     weight_SEMANTIC_SIM = sim
+
+# NOTE: DATE entities use TEMPORAL_DIST instead (see below)
 ```
 
 **For themes**:
@@ -266,6 +308,52 @@ weight_SEMANTIC_SIM(n1, n2) = emb(n1) · emb(n2)
 
 ---
 
+#### **TEMPORAL_DIST**: DATE ↔ DATE
+
+Links DATE entities (years) using **exponential temporal decay** to capture temporal proximity.
+
+**Weight calculation**:
+
+```python
+# Extract years from DATE entities
+years = [int(year_text) for year_text in date_entities]
+
+# Connect years within max_year_gap (default: 10 years)
+for year1 in years:
+    for year2 in years:
+        year_diff = abs(year1 - year2)
+
+        if 0 < year_diff <= max_year_gap:  # default: 10
+            # Exponential decay formula
+            weight_TEMPORAL_DIST = exp(-decay_rate × year_diff)
+            # default decay_rate: 0.3
+```
+
+**Formula**:
+```
+weight_TEMPORAL_DIST(y1, y2) = exp(-λ × |y1 - y2|)
+```
+
+where:
+- `λ` = decay_rate (default: 0.3)
+- `|y1 - y2|` = absolute year difference
+
+**Examples** (with decay_rate=0.3):
+- Same year (diff=0): weight = 1.0
+- 1 year difference: weight ≈ 0.74
+- 2 years difference: weight ≈ 0.55
+- 3 years difference: weight ≈ 0.41
+- 5 years difference: weight ≈ 0.22
+- 10 years difference: weight ≈ 0.05
+
+**Rationale**:
+- Years closer in time are more related than distant years
+- Exponential decay creates smooth temporal neighborhood
+- Configurable max_year_gap limits connections to relevant temporal window
+- 26 year nodes create 134 temporal edges (vs. 1506 with previous approach)
+
+---
+
 ## 2. Graph Retrieval
 
 The system uses **hybrid retrieval** combining 4 complementary strategies, fused by weighted average.
@@ -282,14 +370,26 @@ The system uses **hybrid retrieval** combining 4 complementary strategies, fused
 
 Based on embedding similarity between the claim and chunks.
 
+**FAISS Embedding Cache**:
+- Chunk embeddings are pre-computed during graph construction
+- Stored in FAISS (Facebook AI Similarity Search) index for fast retrieval
+- Saves to `outputs/graphs/embeddings_{graph_id}.faiss` + metadata pickle
+- Eliminates redundant embedding computation during retrieval
+- Supports fast similarity search via inner product (cosine similarity with normalized vectors)
+
 **Process**:
 
 ```python
 # 1. Encode the claim
 claim_embedding = SentenceTransformer.encode(claim)
 
-# 2. Encode all chunks (pre-computed)
-chunk_embeddings = SentenceTransformer.encode(all_chunks)
+# 2. Load chunk embeddings from FAISS cache (or recompute if missing)
+if cache_exists:
+    embedding_cache = EmbeddingCache()
+    embedding_cache.load(cache_dir, graph_id)
+    chunk_ids, chunk_embeddings = embedding_cache.get_all_embeddings()
+else:
+    chunk_embeddings = SentenceTransformer.encode(all_chunks)
 
 # 3. Compute cosine similarities
 similarities = chunk_embeddings @ claim_embedding
@@ -522,7 +622,7 @@ return results[:top_k]
 - **Embeddings**: `all-MiniLM-L6-v2` (SentenceTransformers)
 - **NER**: `en_core_web_sm` (spaCy)
 - **Topic Modeling**: BERTopic
-- **LLM** (optional): `llama3.1:latest` (Ollama) for topic labels when using `--use-llm-labels`
+- **LLM**: `llama3.1:latest` (Ollama) for topic labels (default, use `--no-llm-labels` to disable)
 
 ### Storage
 
@@ -600,11 +700,11 @@ uv run python cli.py visualize --mode entity --entity "trump" --graph-id 2025111
 ### Building a graph
 
 ```bash
-# Fast build (default - keyword-based topic labels)
+# Default build (uses LLM for topic labels - more descriptive)
 uv run python cli.py build --max-docs 100
 
-# With LLM-generated topic labels (slower but more descriptive)
-uv run python cli.py build --max-docs 100 --use-llm-labels
+# Fast build with keyword-based topic labels (faster, less descriptive)
+uv run python cli.py build --max-docs 100 --no-llm-labels
 
 # With PostgreSQL storage
 uv run python cli.py build --max-docs 100 --use-postgres
@@ -679,95 +779,13 @@ uv run python cli.py visualize --mode entity --entity "trump" --graph-id 2025111
 **Visualization files** are saved as `graph_{mode}_{graph_id}.html` in `outputs/visualizations/`
 
 **Visualization features**:
-- **Chunk labels**: Display chunk IDs (no LLM summary for speed)
+- **Chunk labels**: Display chunk IDs
 - Hover to see full chunk text
 - Interactive legend: Click node types to hide/show
 - Normalized edge weights: All weights in [0, 1] range
 - Larger nodes and fonts for readability
 
----
-
-### Common Errors and Solutions
-
-**Error: `FileNotFoundError: Graph file not found`**
-
-This means the graph ID you specified doesn't exist. Solution:
-```bash
-# List all available graphs
-uv run python cli.py list-graphs
-
-# Use one of the IDs from the output
-uv run python cli.py visualize --mode entity --entity "trump" --graph-id <CORRECT_ID>
-```
-
-```bash
-uv run python cli.py visualize --mode entity --entity "trump" --graph-id 20251119_185707
-```
 
 ---
 
-## 5. Understanding Statistics
 
-### Topic Statistics Explained
-
-In the statistics reports, each topic shows:
-- **Chunks**: Number of text chunks (segments) assigned to this topic by BERTopic
-- **Documents**: Number of unique original documents that contain at least one chunk from this topic
-
-**Example interpretation**:
-```
-Topic 0: sri lanka photo misleading
-  Chunks: 44, Documents: 8
-  Keywords: image, photo, sri, lanka, sri lanka
-```
-
-This means:
-- 44 text chunks (of 500 characters each) discuss "sri lanka photo misleading"
-- These 44 chunks come from 8 different fact-check articles
-- On average, each document has ~5.5 chunks about this topic (44 ÷ 8)
-- The topic is recurrent across multiple fact-checks
-
-### Entity Degree (Connections)
-
-The **degree** (or **connections**) of a node represents the total number of edges connected to it:
-- High degree = central node with many relationships
-- For entities: shows how many chunks mention them + co-occurrence relationships
-- For themes: shows how many chunks belong to them + semantic similarities
-
-**Example**:
-```
-donald trump (PERSON) - 156 connections
-```
-This means Trump is mentioned in many chunks and has co-occurrence relationships with many other entities.
-
----
-
-## 6. Performance Improvements
-
-**LLM mode** (with `--use-llm-labels`):
-- Generates descriptive labels via Ollama (e.g., "middle east conflict")
-- Slower but more human-readable (5s per topic)
-- Use for final production graphs
-
----
-
-## 7. Configuration
-
-See [config.yaml](config.yaml) for all parameters:
-
-```yaml
-graph_construction:
-  topic_probability_threshold: 0.15
-  co_occurrence_threshold: 2
-  semantic_similarity_threshold: 0.6
-
-retrieval:
-  alpha: 0.3  # semantic weight (strategy 1)
-  beta: 0.2   # topic distribution weight (strategy 2)
-  gamma: 0.2  # thematic weight (strategy 3)
-  delta: 0.3  # entity weight (strategy 4)
-  entity_relevance_threshold: 0.1
-  theme_relevance_threshold: 0.1
-```
-
----
