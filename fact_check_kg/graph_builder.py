@@ -279,14 +279,30 @@ class KnowledgeGraphBuilder:
             # Try stripping each suffix to find potential root
             canonical_root = lemma  # Default to itself
 
-            for suffix in self.demonymic_suffixes:
-                if lemma.endswith(suffix) and len(lemma) > len(suffix) + 2:
-                    potential_root = lemma[:-len(suffix)]
-                    # Check if this root exists in our lemmas
-                    if potential_root in lemma_scores:
-                        # Use the shorter root as canonical
-                        canonical_root = potential_root
-                        break
+            # Handle multi-word phrases (n-grams) - check if last word has demonymic suffix
+            words = lemma.split()
+            if len(words) > 1:
+                # For n-grams, check if last word has a demonymic suffix
+                last_word = words[-1]
+                for suffix in self.demonymic_suffixes:
+                    if last_word.endswith(suffix) and len(last_word) > len(suffix) + 2:
+                        potential_last_word = last_word[:-len(suffix)]
+                        # Build potential root with stripped suffix
+                        potential_root = " ".join(words[:-1] + [potential_last_word])
+                        # Check if this root exists in our lemmas
+                        if potential_root in lemma_scores:
+                            canonical_root = potential_root
+                            break
+            else:
+                # For single words, check directly
+                for suffix in self.demonymic_suffixes:
+                    if lemma.endswith(suffix) and len(lemma) > len(suffix) + 2:
+                        potential_root = lemma[:-len(suffix)]
+                        # Check if this root exists in our lemmas
+                        if potential_root in lemma_scores:
+                            # Use the shorter root as canonical
+                            canonical_root = potential_root
+                            break
 
             lemma_to_root[lemma] = canonical_root
 

@@ -151,6 +151,10 @@ def visualize(mode, entity, max_nodes, output, graph_id, use_postgres, graph_fil
     from fact_check_kg.visualize_graph import analyze_graph_stats
     from fact_check_kg.config import DatabaseConfig
 
+    # Load retrieval configuration and initialize logger
+    config = get_retrieval_config()
+    logger = get_logger("cli", config.logging.level)
+
     logger.info("=" * 60)
     logger.info(f"VISUALIZING GRAPH - MODE: {mode.upper()}")
     logger.info("=" * 60)

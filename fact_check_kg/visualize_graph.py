@@ -193,49 +193,72 @@ def generate_legend_html(chunk_full_texts: dict = None) -> str:
         </div>
 
         <h4 style="margin: 15px 0 5px 0; color: #aaa;">Edge Types:</h4>
-        <div style="margin: 5px 0;">
+        <div id="filter-CONTAINS" style="margin: 5px 0; cursor: pointer; padding: 3px; border-radius: 3px;"
+             onclick="toggleEdgeType('CONTAINS')" data-active="true">
             <span style="display: inline-block; width: 25px; height: 3px; background-color: #666666;
                         margin-right: 8px; vertical-align: middle;"></span>
             <span>CONTAINS</span>
+            <span style="float: right;">✓</span>
         </div>
-        <div style="margin: 5px 0;">
+        <div id="filter-HAS_TOPIC" style="margin: 5px 0; cursor: pointer; padding: 3px; border-radius: 3px;"
+             onclick="toggleEdgeType('HAS_TOPIC')" data-active="true">
             <span style="display: inline-block; width: 25px; height: 3px; background-color: #ab47bc;
                         margin-right: 8px; vertical-align: middle;"></span>
             <span>HAS_TOPIC</span>
+            <span style="float: right;">✓</span>
         </div>
-        <div style="margin: 5px 0;">
+        <div id="filter-MENTIONS" style="margin: 5px 0; cursor: pointer; padding: 3px; border-radius: 3px;"
+             onclick="toggleEdgeType('MENTIONS')" data-active="true">
             <span style="display: inline-block; width: 25px; height: 3px; background-color: #66bb6a;
                         margin-right: 8px; vertical-align: middle;"></span>
             <span>MENTIONS</span>
+            <span style="float: right;">✓</span>
         </div>
-        <div style="margin: 5px 0;">
+        <div id="filter-CO_OCCURS" style="margin: 5px 0; cursor: pointer; padding: 3px; border-radius: 3px;"
+             onclick="toggleEdgeType('CO_OCCURS')" data-active="true">
             <span style="display: inline-block; width: 25px; height: 3px; background-color: #ef5350;
                         margin-right: 8px; vertical-align: middle;"></span>
             <span>CO_OCCURS</span>
+            <span style="float: right;">✓</span>
         </div>
-        <div style="margin: 5px 0;">
+        <div id="filter-SEMANTIC_SIM" style="margin: 5px 0; cursor: pointer; padding: 3px; border-radius: 3px;"
+             onclick="toggleEdgeType('SEMANTIC_SIM')" data-active="true">
             <span style="display: inline-block; width: 25px; height: 3px; background-color: #42a5f5;
                         margin-right: 8px; vertical-align: middle;"></span>
             <span>SEMANTIC_SIM</span>
+            <span style="float: right;">✓</span>
         </div>
-        <div style="margin: 5px 0;">
+        <div id="filter-CO_PRESENCE" style="margin: 5px 0; cursor: pointer; padding: 3px; border-radius: 3px;"
+             onclick="toggleEdgeType('CO_PRESENCE')" data-active="true">
             <span style="display: inline-block; width: 25px; height: 3px; background-color: #9c27b0;
                         margin-right: 8px; vertical-align: middle;"></span>
             <span>CO_PRESENCE</span>
+            <span style="float: right;">✓</span>
+        </div>
+        <div id="filter-TEMPORAL_DIST" style="margin: 5px 0; cursor: pointer; padding: 3px; border-radius: 3px;"
+             onclick="toggleEdgeType('TEMPORAL_DIST')" data-active="true">
+            <span style="display: inline-block; width: 25px; height: 3px; background-color: #ff9800;
+                        margin-right: 8px; vertical-align: middle;"></span>
+            <span>TEMPORAL_DIST</span>
+            <span style="float: right;">✓</span>
         </div>
     </div>
 
     {chunk_modal}
 
     <script type="text/javascript">
-        // Store node metadata and full texts
+        // Store node and edge metadata
         var nodeMetadata = {{}};
+        var edgeMetadata = {{}};
         var chunkFullTexts = {chunk_texts_js};
 
-        // Parse nodes from network
+        // Parse nodes and edges from network
         setTimeout(function() {{
             if (typeof network !== 'undefined') {{
                 var nodes = network.body.data.nodes;
+                var edges = network.body.data.edges;
+
+                // Parse nodes
                 nodes.forEach(function(node) {{
                     // Extract type from title (format: "type: node_id")
                     var title = node.title || '';
@@ -244,6 +267,21 @@ def generate_legend_html(chunk_full_texts: dict = None) -> str:
                         nodeMetadata[node.id] = {{type: typeMatch[1], originalHidden: node.hidden || false}};
                     }}
                 }});
+
+                // Parse edges
+                edges.forEach(function(edge) {{
+                    // Extract edge type from title (format: "edge_type (weight: X)")
+                    var title = edge.title || '';
+                    var typeMatch = title.match(/^([A-Z_]+)/);
+                    if (typeMatch) {{
+                        edgeMetadata[edge.id] = {{
+                            type: typeMatch[1],
+                            from: edge.from,
+                            to: edge.to
+                        }};
+                    }}
+                }});
+
                 {chunk_click_handler}
             }}
         }}, 500);
@@ -287,6 +325,46 @@ def generate_legend_html(chunk_full_texts: dict = None) -> str:
 
             if (nodesToUpdate.length > 0) {{
                 nodes.update(nodesToUpdate);
+            }}
+        }}
+
+        function toggleEdgeType(edgeType) {{
+            if (typeof network === 'undefined') {{
+                console.error('Network not loaded yet');
+                return;
+            }}
+
+            var filterElement = document.getElementById('filter-' + edgeType);
+            var isActive = filterElement.getAttribute('data-active') === 'true';
+
+            // Toggle state
+            var newState = !isActive;
+            filterElement.setAttribute('data-active', newState);
+
+            // Update visual feedback
+            if (newState) {{
+                filterElement.style.backgroundColor = '';
+                filterElement.querySelector('span:last-child').textContent = '✓';
+            }} else {{
+                filterElement.style.backgroundColor = 'rgba(255, 0, 0, 0.2)';
+                filterElement.querySelector('span:last-child').textContent = '✗';
+            }}
+
+            // Update network
+            var edges = network.body.data.edges;
+            var edgesToUpdate = [];
+
+            for (var edgeId in edgeMetadata) {{
+                if (edgeMetadata[edgeId].type === edgeType) {{
+                    edgesToUpdate.push({{
+                        id: edgeId,
+                        hidden: !newState
+                    }});
+                }}
+            }}
+
+            if (edgesToUpdate.length > 0) {{
+                edges.update(edgesToUpdate);
             }}
         }}
     </script>
