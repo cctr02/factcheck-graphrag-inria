@@ -168,7 +168,6 @@ def main():
         temporal_decay_rate=config.graph_construction.temporal_decay_rate,
         topic_keywords_initial=config.graph_construction.topic_keywords_initial,
         topic_keywords_final=config.graph_construction.topic_keywords_final,
-        demonymic_suffixes=config.graph_construction.demonymic_suffixes,
         llm_endpoint=config.models.llm_endpoint,
         llm_model=config.models.llm_model,
         llm_temperature=config.models.llm_temperature,

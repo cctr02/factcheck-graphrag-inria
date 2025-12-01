@@ -44,7 +44,6 @@ class GraphConstructionConfig:
     temporal_decay_rate: float
     topic_keywords_initial: int
     topic_keywords_final: int
-    demonymic_suffixes: List[str]
     entity_types: List[str]
 
 

@@ -30,15 +30,7 @@ graph_construction:
 
   # Topic keyword processing
   topic_keywords_initial: 15  # Number of keywords to retrieve from BERTopic initially
-  topic_keywords_final: 10  # Number of keywords after lemmatization and deduplication
-
-  # Demonymic suffixes for merging variants (e.g., nigeria/nigerian)
-  demonymic_suffixes:
-    - "ian"  # nigerian -> nigeria, australian -> australia
-    - "an"   # american -> america
-    - "ese"  # chinese -> china (sometimes), japanese -> japan
-    - "ish"  # british -> brit, spanish -> spain
-    - "i"    # iraqi -> iraq, pakistani -> pakistan
+  topic_keywords_final: 10  # Number of keywords after stemming and deduplication
 
   # Entity types to extract (spaCy)
   entity_types:

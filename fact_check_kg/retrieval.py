@@ -17,6 +17,7 @@ from sentence_transformers import SentenceTransformer
 from bertopic import BERTopic
 from scipy.spatial.distance import jensenshannon
 import logging
+import time
 
 
 class HybridRetriever:
@@ -619,6 +620,9 @@ class HybridRetriever:
             - config: Dict (complete configuration used for retrieval, included in first result only)
             - retrieval_timestamp: str (ISO format timestamp, included in first result only)
         """
+        # Start timing the retrieval process
+        start_time = time.time()
+
         self.logger.info("\n" + "=" * 60)
         self.logger.info(f"RETRIEVAL FOR CLAIM: {claim}")
         self.logger.info("=" * 60)
@@ -700,6 +704,10 @@ class HybridRetriever:
             if len(result['text']) > 150:
                 text_preview += "..."
             self.logger.info(f"{i}. [{result['chunk_id']}] {text_preview}")
+
+        # Calculate and display retrieval time
+        retrieval_time = time.time() - start_time
+        self.logger.info(f"\nRetrieval time: {retrieval_time:.3f} seconds")
 
         self.logger.info("=" * 60)
 

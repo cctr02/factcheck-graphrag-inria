@@ -18,6 +18,7 @@ from bertopic import BERTopic
 import logging
 from tqdm import tqdm
 import time as time
+from nltk.stem.snowball import SnowballStemmer
 
 
 from fact_check_kg.db_connector import GraphDatabaseConnector
@@ -53,7 +54,6 @@ class KnowledgeGraphBuilder:
         temporal_decay_rate: float = 0.3,
         topic_keywords_initial: int = 15,
         topic_keywords_final: int = 10,
-        demonymic_suffixes: Optional[List[str]] = None,
         llm_endpoint: str = "http://localhost:11434/api/generate",
         llm_model: str = "llama3.1:latest",
         llm_temperature: float = 0.3,
@@ -108,7 +108,9 @@ class KnowledgeGraphBuilder:
         # Topic keyword processing configuration
         self.topic_keywords_initial = topic_keywords_initial
         self.topic_keywords_final = topic_keywords_final
-        self.demonymic_suffixes = demonymic_suffixes or ['ian', 'an', 'ese', 'ish', 'i']
+
+        # Initialize NLTK stemmer
+        self.stemmer = SnowballStemmer('english')
 
         # LLM configuration
         self.llm_endpoint = llm_endpoint
@@ -246,133 +248,81 @@ class KnowledgeGraphBuilder:
         topic_words: List[Tuple[str, float]]
     ) -> List[Tuple[str, float]]:
         """
-        Process topic keywords with lemmatization and n-gram deduplication.
+        Process topic keywords with stemming and n-gram deduplication.
 
         Args:
             topic_words: List of (word, score) from BERTopic
 
         Returns:
-            List of (word, score) tuples, deduplicated and lemmatized
+            List of (word, score) tuples, deduplicated and stemmed
         """
         if not topic_words:
             return []
 
-        # Step 1: Lemmatize and merge variants (take top N initially)
-        lemma_scores = {}
-        original_forms = {}  # Map lemma to original form with highest score
+        # Step 1: Stem and merge variants (take top N initially)
+        stem_scores = {}
 
         for word, score in topic_words[:self.topic_keywords_initial]:
-            # Lemmatize using spaCy
-            doc = self.nlp(word)
-            lemma = " ".join([token.lemma_ for token in doc])
+            # Stem using NLTK SnowballStemmer
+            # For multi-word phrases, stem each word individually
+            words = word.split()
+            stemmed_words = [self.stemmer.stem(w.lower()) for w in words]
+            stem = " ".join(stemmed_words)
 
-            # Keep the form with the highest score
-            if lemma not in lemma_scores or score > lemma_scores[lemma]:
-                lemma_scores[lemma] = score
-                original_forms[lemma] = word
-
-        # Step 1b: Merge words with common roots (e.g., nigeria/nigerian, australia/australian)
-        # Create a mapping from each lemma to its canonical root
-        lemma_to_root = {}
-
-        for lemma in lemma_scores.keys():
-            # Try stripping each suffix to find potential root
-            canonical_root = lemma  # Default to itself
-
-            # Handle multi-word phrases (n-grams) - check if last word has demonymic suffix
-            words = lemma.split()
-            if len(words) > 1:
-                # For n-grams, check if last word has a demonymic suffix
-                last_word = words[-1]
-                for suffix in self.demonymic_suffixes:
-                    if last_word.endswith(suffix) and len(last_word) > len(suffix) + 2:
-                        potential_last_word = last_word[:-len(suffix)]
-                        # Build potential root with stripped suffix
-                        potential_root = " ".join(words[:-1] + [potential_last_word])
-                        # Check if this root exists in our lemmas
-                        if potential_root in lemma_scores:
-                            canonical_root = potential_root
-                            break
-            else:
-                # For single words, check directly
-                for suffix in self.demonymic_suffixes:
-                    if lemma.endswith(suffix) and len(lemma) > len(suffix) + 2:
-                        potential_root = lemma[:-len(suffix)]
-                        # Check if this root exists in our lemmas
-                        if potential_root in lemma_scores:
-                            # Use the shorter root as canonical
-                            canonical_root = potential_root
-                            break
-
-            lemma_to_root[lemma] = canonical_root
-
-        # Build root -> all variants mapping
-        root_variants = {}
-        for lemma, score in lemma_scores.items():
-            root = lemma_to_root[lemma]
-            if root not in root_variants:
-                root_variants[root] = []
-            root_variants[root].append((lemma, score))
-
-        # Merge scores for each root (sum all scores from variants)
-        merged_lemma_scores = {}
-        for root, variants in root_variants.items():
-            # Sum scores from all variants
-            total_score = sum(score for _, score in variants)
-            merged_lemma_scores[root] = total_score
-
-        # Update lemma_scores with merged version
-        lemma_scores = merged_lemma_scores
+            # Merge scores for same stem (sum the scores)
+            if stem not in stem_scores:
+                stem_scores[stem] = 0
+            stem_scores[stem] += score
 
         # Step 2: Filter redundant n-grams
         # Strategy: Keep longer n-grams, remove shorter ones that are substrings
         # Sort by length (descending) then score (descending)
         sorted_items = sorted(
-            lemma_scores.items(),
+            stem_scores.items(),
             key=lambda x: (len(x[0].split()), x[1]),  # Sort by word count, then score
             reverse=True
         )
 
         filtered = []
-        for lemma, score in sorted_items:
+        for stem, score in sorted_items:
             is_redundant = False
 
-            # Check if this lemma is a substring of any already kept lemma
-            for kept_lemma, kept_score in filtered:
-                # Check if current lemma is contained in a kept lemma
+            # Check if this stem is a substring of any already kept stem
+            for kept_stem, kept_score in filtered:
+                # Check if current stem is contained in a kept stem
                 # Use word boundary checks to avoid false positives
-                lemma_words = set(lemma.split())
-                kept_words = set(kept_lemma.split())
+                stem_words = set(stem.split())
+                kept_words = set(kept_stem.split())
 
-                # If all words in current lemma are in the kept lemma, it's redundant
-                if lemma_words.issubset(kept_words):
+                # If all words in current stem are in the kept stem, it's redundant
+                if stem_words.issubset(kept_words):
                     is_redundant = True
                     break
 
             if not is_redundant:
-                # Before adding, remove any kept lemmas that are substrings of current lemma
+                # Before adding, remove any kept stems that are substrings of current stem
                 to_remove = []
-                for kept_lemma, kept_score in filtered:
-                    kept_words = set(kept_lemma.split())
-                    lemma_words = set(lemma.split())
+                for kept_stem, kept_score in filtered:
+                    kept_words = set(kept_stem.split())
+                    stem_words = set(stem.split())
 
-                    # If kept lemma is subset of current lemma, mark for removal
-                    if kept_words.issubset(lemma_words) and kept_lemma != lemma:
-                        to_remove.append((kept_lemma, kept_score))
+                    # If kept stem is subset of current stem, mark for removal
+                    if kept_words.issubset(stem_words) and kept_stem != stem:
+                        to_remove.append((kept_stem, kept_score))
 
                 # Remove redundant kept items
                 for item in to_remove:
                     filtered.remove(item)
 
-                filtered.append((lemma, score))
+                filtered.append((stem, score))
 
         # Step 3: Re-sort by score and take top N
         filtered_sorted = sorted(filtered, key=lambda x: x[1], reverse=True)
         final_count = min(max(len(filtered_sorted), 3), self.topic_keywords_final)
         top_keywords = filtered_sorted[:final_count]
 
-        # Return with lemmatized forms (not original forms)
-        result = [(lemma, score) for lemma, score in top_keywords]
+        # Return with stemmed forms
+        result = [(stem, score) for stem, score in top_keywords]
 
         self.logger.debug(f"Processed keywords: {len(topic_words)} -> {len(result)} (removed {len(topic_words) - len(result)} redundant)")
 
