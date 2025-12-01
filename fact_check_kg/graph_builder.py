@@ -636,7 +636,19 @@ Topic label:"""
             idf = np.log(total_chunks / len(chunks_with_entity))
             entity_idf[entity_node] = idf
 
-        # Step 3: Add entity nodes and MENTIONS edges with TF-IDF weights
+        # Step 3: Calculate all TF-IDF weights first to find max for normalization
+        all_tf_idf_weights = []
+        for entity_node, chunks_with_counts in entity_mentions_in_chunks.items():
+            idf = entity_idf[entity_node]
+            for chunk_id, tf in chunks_with_counts.items():
+                tf_idf = tf * idf
+                all_tf_idf_weights.append(tf_idf)
+
+        # Find max TF-IDF for normalization
+        max_tf_idf = max(all_tf_idf_weights) if all_tf_idf_weights else 1.0
+        self.logger.info(f"Max TF-IDF weight: {max_tf_idf:.4f}, normalizing to [0, 1]")
+
+        # Step 4: Add entity nodes and MENTIONS edges with normalized weights
         start_time_mentions = time.time()
         for entity_node in tqdm(entity_mentions_in_chunks.keys(), desc="Adding entities and MENTIONS edges", disable=self.logger.level > logging.INFO):
             # Extract entity info from node name
@@ -653,19 +665,19 @@ Topic label:"""
                     entity_text=entity_text
                 )
 
-            # Add MENTIONS edges with TF-IDF weight
+            # Add MENTIONS edges with normalized weight (0 to 1)
             idf = entity_idf[entity_node]
             for chunk_id, tf in entity_mentions_in_chunks[entity_node].items():
                 # TF-IDF = TF * IDF
                 tf_idf = tf * idf
+                # Normalize to [0, 1]
+                normalized_weight = tf_idf / max_tf_idf
 
                 self.graph.add_edge(
                     chunk_id,
                     entity_node,
                     edge_type="MENTIONS",
-                    weight=float(tf_idf),
-                    tf=int(tf),
-                    idf=float(idf)
+                    weight=float(normalized_weight)
                 )
 
         self._log_step_completion("Adding entities and MENTIONS edges", start_time_mentions, len(entity_mentions_in_chunks))
@@ -1234,7 +1246,8 @@ Nodes by Type:
         database: str = "knowledge_graph",
         user: str = "postgres",
         password: str = "postgres",
-        metadata: dict = None
+        metadata: dict = None,
+        graph: nx.Graph = None
     ):
         """
         Save the graph to PostgreSQL database with timestamped tables.
@@ -1247,10 +1260,14 @@ Nodes by Type:
             user: Username
             password: Password
             metadata: Optional metadata dictionary to store
+            graph: Optional graph to save (if None, uses self.graph)
         """
         self.logger.info("\n" + "=" * 60)
         self.logger.info(f"SAVING GRAPH TO POSTGRESQL (Graph ID: {graph_id})")
         self.logger.info("=" * 60)
+
+        # Use provided graph or self.graph
+        graph_to_save = graph if graph is not None else self.graph
 
         # Initialize database connector with graph_id
         db = GraphDatabaseConnector(
@@ -1271,7 +1288,7 @@ Nodes by Type:
             db.create_tables()
 
             # Save the graph with metadata
-            db.save_graph(self.graph, metadata=metadata)
+            db.save_graph(graph_to_save, metadata=metadata)
 
             self.logger.info("=" * 60)
             self.logger.info(f"GRAPH SAVED SUCCESSFULLY TO POSTGRESQL")

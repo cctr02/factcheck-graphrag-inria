@@ -122,10 +122,10 @@ def build(max_docs, chunk_size, chunk_overlap, use_postgres, no_llm_labels, log_
 # ============================================================================
 
 @cli.command()
-@click.option('--mode', type=click.Choice(['full', 'entity', 'stats']),
+@click.option('--mode', type=click.Choice(['full', 'node', 'stats']),
               default='stats', help='Visualization mode')
-@click.option('--entity', type=str, default=None,
-              help='Entity name for entity mode')
+@click.option('--node', type=str, default=None,
+              help='Node ID for node mode (e.g., "entity::PERSON::trump", "chunk::0::5", "theme::2")')
 @click.option('--max-nodes', type=int, default=None,
               help='Maximum nodes to display (default: from config_retrieval.yaml)')
 @click.option('--output', type=str, default=None,
@@ -136,14 +136,19 @@ def build(max_docs, chunk_size, chunk_overlap, use_postgres, no_llm_labels, log_
               help='Load graph from PostgreSQL')
 @click.option('--graph-file', type=str, default=None,
               help='Path to graph pickle file (if not using postgres)')
-def visualize(mode, entity, max_nodes, output, graph_id, use_postgres, graph_file):
+def visualize(mode, node, max_nodes, output, graph_id, use_postgres, graph_file):
     """
     Visualize the knowledge graph.
 
     Modes:
     - stats: Display pre-computed statistics (fast)
     - full: Full graph visualization (interactive HTML)
-    - entity: Entity-centered subgraph visualization
+    - node: Node-centered subgraph visualization
+
+    Examples:
+    - uv run python cli.py visualize --mode node --node "entity::PERSON::trump" --graph-id 20251201_185321
+    - uv run python cli.py visualize --mode node --node "chunk::0::5" --graph-id 20251201_185321
+    - uv run python cli.py visualize --mode node --node "theme::2" --graph-id 20251201_185321
 
     Visualization files are saved as graph_{mode}_{graph_id}.html
     """
@@ -203,12 +208,14 @@ def visualize(mode, entity, max_nodes, output, graph_id, use_postgres, graph_fil
     # Add mode to command
     cmd.extend(["--mode", mode])
 
-    if mode == 'entity' and entity:
-        cmd.extend(["--entity", entity])
+    if mode == 'node' and node:
+        cmd.extend(["--entity", node])  # visualize_graph.py still uses --entity parameter
         if not output:
             # Use graph_id as timestamp for visualization
             vis_timestamp = graph_id if graph_id else datetime.now().strftime(config.export.timestamp_format)
-            output = f"{config.paths.visualizations_dir}/graph_entity_{entity}_{vis_timestamp}.html"
+            # Clean node ID for filename
+            node_clean = node.replace('::', '_').replace(' ', '_')
+            output = f"{config.paths.visualizations_dir}/graph_node_{node_clean}_{vis_timestamp}.html"
     elif mode == 'full':
         if not output:
             # Use graph_id as timestamp for visualization

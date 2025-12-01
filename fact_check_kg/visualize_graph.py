@@ -89,56 +89,65 @@ def extract_timestamp_from_path(file_path: str) -> str:
     return ""
 
 
-def generate_legend_html(chunk_full_texts: dict = None) -> str:
+def generate_legend_html(chunk_full_texts: dict = None, document_full_texts: dict = None) -> str:
     """
-    Generate interactive legend HTML with optional chunk popup functionality.
+    Generate interactive legend HTML with optional chunk and document popup functionality.
 
     Args:
         chunk_full_texts: Dictionary mapping chunk node IDs to full text (None for entity view)
+        document_full_texts: Dictionary mapping document node IDs to full text with chunk separators
 
     Returns:
-        HTML string with legend and optional chunk popup
+        HTML string with legend and optional chunk/document popup
     """
     # Chunk modal (only if chunk_full_texts provided)
     chunk_modal = ""
     chunk_texts_js = "{}"
+    document_texts_js = "{}"
     chunk_click_handler = ""
 
-    if chunk_full_texts:
+    if chunk_full_texts or document_full_texts:
         chunk_modal = """
-    <!-- Popup modal for chunk full text -->
+    <!-- Popup modal for chunk/document full text -->
     <div id="chunkModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
                                  background-color: rgba(0,0,0,0.8); z-index: 2000; overflow: auto;">
         <div style="background-color: #2a2a2a; margin: 5% auto; padding: 30px; width: 70%; max-width: 800px;
                     border-radius: 10px; border: 2px solid #666; color: white; font-family: Arial; position: relative;">
             <span onclick="closeChunkModal()" style="position: absolute; top: 15px; right: 20px; font-size: 32px;
                                                      font-weight: bold; cursor: pointer; color: #aaa;">&times;</span>
-            <h2 style="margin-top: 0; color: #fbc02d; border-bottom: 2px solid #666; padding-bottom: 10px;">Chunk Content</h2>
+            <h2 id="chunkModalTitle" style="margin-top: 0; color: #fbc02d; border-bottom: 2px solid #666; padding-bottom: 10px;">Content</h2>
             <div id="chunkModalContent" style="max-height: 500px; overflow-y: auto; line-height: 1.6; white-space: pre-wrap;">
             </div>
         </div>
     </div>
         """
-        chunk_texts_js = json.dumps(chunk_full_texts)
+        chunk_texts_js = json.dumps(chunk_full_texts) if chunk_full_texts else "{}"
+        document_texts_js = json.dumps(document_full_texts) if document_full_texts else "{}"
         chunk_click_handler = """
-                // Add click event listener for chunks
+                // Add click event listener for chunks and documents
                 network.on("click", function(params) {
                     if (params.nodes.length > 0) {
                         var nodeId = params.nodes[0];
                         var nodeData = nodeMetadata[nodeId];
 
-                        // If it's a chunk node, show the full text
+                        // If it's a chunk node, show the chunk text
                         if (nodeData && nodeData.type === 'chunk' && chunkFullTexts[nodeId]) {
-                            showChunkModal(chunkFullTexts[nodeId]);
+                            showChunkModal(chunkFullTexts[nodeId], 'Chunk Content');
+                        }
+                        // If it's a document node, show the full document text
+                        else if (nodeData && nodeData.type === 'document' && documentFullTexts[nodeId]) {
+                            showChunkModal(documentFullTexts[nodeId], 'Document Content');
                         }
                     }
                 });
         """
 
     chunk_functions = """
-        function showChunkModal(fullText) {
+        function showChunkModal(fullText, title) {
             var modal = document.getElementById('chunkModal');
+            var titleElement = document.getElementById('chunkModalTitle');
             var content = document.getElementById('chunkModalContent');
+            titleElement.textContent = title || 'Content';
             content.textContent = fullText;
             modal.style.display = 'block';
         }
@@ -154,7 +163,7 @@ def generate_legend_html(chunk_full_texts: dict = None) -> str:
                 closeChunkModal();
             }
         }
-    """ if chunk_full_texts else ""
+    """ if (chunk_full_texts or document_full_texts) else ""
 
     legend_html = f"""
     <div style="position: fixed; top: 10px; right: 10px; background-color: rgba(34, 34, 34, 0.9);
@@ -251,6 +260,7 @@ def generate_legend_html(chunk_full_texts: dict = None) -> str:
         var nodeMetadata = {{}};
         var edgeMetadata = {{}};
         var chunkFullTexts = {chunk_texts_js};
+        var documentFullTexts = {document_texts_js};
 
         // Parse nodes and edges from network
         setTimeout(function() {{
@@ -471,6 +481,31 @@ def visualize_full_graph(
             chunk_full_texts[node] = chunk_text
     print(f"Collected texts for {len(chunk_full_texts)} chunks")
 
+    # Store document full texts with chunk separators
+    print("Collecting document texts...")
+    document_full_texts = {}
+    document_nodes = [n for n, d in G_viz.nodes(data=True) if d.get('type') == 'document']
+
+    for doc_node in document_nodes:
+        # Get all chunks belonging to this document (connected by CONTAINS edges)
+        doc_chunks = []
+        for neighbor in G.neighbors(doc_node):
+            if G.nodes[neighbor].get('type') == 'chunk':
+                chunk_text = G.nodes[neighbor].get('text', '')
+                if chunk_text:
+                    doc_chunks.append((neighbor, chunk_text))
+
+        # Sort chunks by ID to maintain order
+        doc_chunks.sort(key=lambda x: x[0])
+
+        # Combine chunks with separators
+        if doc_chunks:
+            separator = "\n\n" + "="*80 + "\n\n"
+            full_text = separator.join([f"[{chunk_id}]\n\n{text}" for chunk_id, text in doc_chunks])
+            document_full_texts[doc_node] = full_text
+
+    print(f"Collected texts for {len(document_full_texts)} documents")
+
     # Create pyvis network with better font settings
     net = Network(height="900px", width="100%", bgcolor="#222222", font_color="white")
     net.barnes_hut(gravity=-8000, central_gravity=0.3, spring_length=100)
@@ -541,22 +576,23 @@ def visualize_full_graph(
         weight = edge[2].get('weight', 1)
 
         # Normalize weight to [0, 1] if > 1 (for CO_OCCURS and CO_PRESENCE edges)
-        if weight > 1:
+        # MENTIONS edges are already normalized in the graph
+        if edge_type in ['CO_OCCURS', 'CO_PRESENCE'] and weight > 1:
             normalized_weight = min(weight / 10.0, 1.0)  # Divide by 10 and cap at 1
         else:
-            normalized_weight = weight
+            normalized_weight = weight  # Already normalized for MENTIONS
 
         net.add_edge(
             edge[0],
             edge[1],
-            title=f"{edge_type} (weight: {weight:.2f}, normalized: {normalized_weight:.2f})",
-            label=f"{normalized_weight:.2f}",  # Display normalized weight on edge
+            title=f"{edge_type} (weight: {weight:.4f})",
+            label=f"{weight:.3f}",  # Display weight on edge
             color=edge_color_map.get(edge_type, 'gray'),
             width=min(normalized_weight * 3, 5)  # Increased multiplier from 2 to 3
         )
 
-    # Generate interactive legend with chunk popup functionality
-    legend_html = generate_legend_html(chunk_full_texts)
+    # Generate interactive legend with chunk and document popup functionality
+    legend_html = generate_legend_html(chunk_full_texts, document_full_texts)
 
     # Save
     net.save_graph(output_path)
@@ -582,10 +618,10 @@ def visualize_entity_subgraph(
     db_config: DatabaseConfig = None
 ):
     """
-    Visualize subgraph around a specific entity.
+    Visualize subgraph around a specific node.
 
     Args:
-        entity_name: Entity to center on (e.g., "gaza", "facebook")
+        entity_name: Node ID to center on (e.g., "entity::PERSON::trump", "chunk::0::5", "theme::3")
         output_path: Output HTML file (auto-generated with timestamp if not provided)
         max_neighbors: Max neighbors to include
         graph_path: Path to .gpickle file (if not using postgres)
@@ -597,26 +633,28 @@ def visualize_entity_subgraph(
     # Auto-generate output path with timestamp if not provided
     if output_path is None:
         timestamp = extract_timestamp_from_path(graph_path) if graph_path else ""
+        # Extract a clean name from node ID for filename
+        node_name_clean = entity_name.replace('::', '_').replace(' ', '_')
         if timestamp:
-            output_path = f"outputs/visualizations/graph_entity_{entity_name}_{timestamp}.html"
+            output_path = f"outputs/visualizations/graph_node_{node_name_clean}_{timestamp}.html"
         else:
-            output_path = f"outputs/visualizations/graph_entity_{entity_name}.html"
+            output_path = f"outputs/visualizations/graph_node_{node_name_clean}.html"
 
     # Ensure output directory exists
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-    # Find entity node
-    entity_nodes = [
-        n for n, d in G.nodes(data=True)
-        if d.get('type') == 'entity' and entity_name.lower() in d.get('entity_text', '').lower()
-    ]
-
-    if not entity_nodes:
-        print(f"Error: Entity '{entity_name}' not found in graph")
+    # Check if node exists in graph
+    if entity_name not in G.nodes():
+        print(f"Error: Node '{entity_name}' not found in graph")
+        print(f"Make sure to use the full node ID, e.g.:")
+        print(f"  - entity::PERSON::trump")
+        print(f"  - entity::GPE::manila")
+        print(f"  - chunk::0::5")
+        print(f"  - theme::2")
         return
 
-    entity_node = entity_nodes[0]
-    print(f"Found entity: {entity_node}")
+    entity_node = entity_name
+    print(f"Found node: {entity_node}")
 
     # Get neighbors (2-hop)
     neighbors_1hop = list(G.neighbors(entity_node))[:max_neighbors]
@@ -641,6 +679,31 @@ def visualize_entity_subgraph(
         if chunk_text:
             chunk_full_texts[node] = chunk_text
     print(f"Collected texts for {len(chunk_full_texts)} chunks")
+
+    # Store document full texts with chunk separators
+    print("Collecting document texts...")
+    document_full_texts = {}
+    document_nodes = [n for n, d in G_viz.nodes(data=True) if d.get('type') == 'document']
+
+    for doc_node in document_nodes:
+        # Get all chunks belonging to this document (connected by CONTAINS edges)
+        doc_chunks = []
+        for neighbor in G.neighbors(doc_node):
+            if G.nodes[neighbor].get('type') == 'chunk':
+                chunk_text = G.nodes[neighbor].get('text', '')
+                if chunk_text:
+                    doc_chunks.append((neighbor, chunk_text))
+
+        # Sort chunks by ID to maintain order
+        doc_chunks.sort(key=lambda x: x[0])
+
+        # Combine chunks with separators
+        if doc_chunks:
+            separator = "\n\n" + "="*80 + "\n\n"
+            full_text = separator.join([f"[{chunk_id}]\n\n{text}" for chunk_id, text in doc_chunks])
+            document_full_texts[doc_node] = full_text
+
+    print(f"Collected texts for {len(document_full_texts)} documents")
 
     # Create network with better font settings
     net = Network(height="900px", width="100%", bgcolor="#222222", font_color="white")
@@ -714,22 +777,23 @@ def visualize_entity_subgraph(
         weight = edge[2].get('weight', 1)
 
         # Normalize weight to [0, 1] if > 1 (for CO_OCCURS and CO_PRESENCE edges)
-        if weight > 1:
+        # MENTIONS edges are already normalized in the graph
+        if edge_type in ['CO_OCCURS', 'CO_PRESENCE'] and weight > 1:
             normalized_weight = min(weight / 10.0, 1.0)  # Divide by 10 and cap at 1
         else:
-            normalized_weight = weight
+            normalized_weight = weight  # Already normalized for MENTIONS
 
         net.add_edge(
             edge[0],
             edge[1],
-            title=f"{edge_type} (weight: {weight:.2f}, normalized: {normalized_weight:.2f})",
-            label=f"{normalized_weight:.2f}",  # Display normalized weight on edge
+            title=f"{edge_type} (weight: {weight:.4f})",
+            label=f"{weight:.3f}",  # Display weight on edge
             color=edge_color_map.get(edge_type, 'gray'),
             width=min(normalized_weight * 3, 5)  # Increased multiplier from 2 to 3
         )
 
-    # Generate interactive legend with chunk popup functionality
-    legend_html = generate_legend_html(chunk_full_texts)
+    # Generate interactive legend with chunk and document popup functionality
+    legend_html = generate_legend_html(chunk_full_texts, document_full_texts)
 
     # Save
     net.save_graph(output_path)
@@ -817,15 +881,15 @@ def main():
     parser.add_argument(
         "--mode",
         type=str,
-        choices=["full", "entity", "stats"],
+        choices=["full", "node", "entity", "stats"],  # Keep 'entity' for backward compatibility
         default="stats",
         help="Visualization mode"
     )
     parser.add_argument(
         "--entity",
         type=str,
-        default="gaza",
-        help="Entity name for entity mode"
+        default="entity::GPE::gaza",
+        help="Node ID for node/entity mode (e.g., 'entity::PERSON::trump', 'chunk::0::5', 'theme::2')"
     )
     parser.add_argument(
         "--output",
@@ -894,8 +958,9 @@ def main():
         # Pass None if output not specified - will auto-generate with timestamp
         visualize_full_graph(args.graph, args.output, args.max_nodes, args.use_postgres, db_config)
 
-    elif args.mode == "entity":
+    elif args.mode == "node" or args.mode == "entity":
         # Pass None if output not specified - will auto-generate with timestamp
+        # Both 'node' and 'entity' modes use the same function (entity kept for backward compatibility)
         visualize_entity_subgraph(args.entity, args.output, 50, args.graph, args.use_postgres, db_config)
 
 

@@ -283,7 +283,8 @@ def main():
             database=args.db_name,
             user=args.db_user,
             password=args.db_password,
-            metadata=metadata
+            metadata=metadata,
+            graph=graph  # Explicitly pass the same graph saved in pickle
         )
         logger.info(f"Graph (PostgreSQL) saved successfully with graph_id: {timestamp}")
         metadata["storage_type"] = "dual"
