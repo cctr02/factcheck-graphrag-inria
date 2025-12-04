@@ -19,5 +19,21 @@ dependencies = [
     "requests>=2.32.5",
     "psycopg2-binary>=2.9.11",
     "faiss-cpu>=1.7.4",
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "torchaudio>=2.0.0",
+    "gputil>=1.4.0",
+    "psutil>=6.1.1",
 ]
+
+[tool.uv.sources]
+# Force PyTorch with CUDA 11.8 support
+torch = { index = "pytorch-cu118" }
+torchvision = { index = "pytorch-cu118" }
+torchaudio = { index = "pytorch-cu118" }
+
+[[tool.uv.index]]
+name = "pytorch-cu118"
+url = "https://download.pytorch.org/whl/cu118"
+explicit = true
 

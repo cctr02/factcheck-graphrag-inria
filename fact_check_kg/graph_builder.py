@@ -213,9 +213,12 @@ class KnowledgeGraphBuilder:
         """
         start_time = time.time()
         self.logger.info("Training BERTopic model...")
+        self.logger.info(f"Computing embeddings for {len(chunk_texts)} chunks...")
 
         # Create vectorizer with stop words
         from sklearn.feature_extraction.text import CountVectorizer
+        from umap import UMAP
+        from hdbscan import HDBSCAN
 
         vectorizer_model = CountVectorizer(
             stop_words="english",
@@ -224,18 +227,44 @@ class KnowledgeGraphBuilder:
             max_features=1000     # More features
         )
 
-        # Initialize BERTopic with same embedding model and vectorizer
-        topic_model = BERTopic(
-            embedding_model=self.embedding_model,
-            vectorizer_model=vectorizer_model,
-            min_topic_size=min_topic_size,
-            nr_topics=nr_topics,
-            calculate_probabilities=True,
-            verbose=False
+        # Custom UMAP with verbose output
+        umap_model = UMAP(
+            n_neighbors=15,
+            n_components=5,
+            min_dist=0.0,
+            metric='cosine',
+            verbose=True  # Show UMAP progress
         )
 
-        # Fit and transform
+        # Custom HDBSCAN with verbose output
+        hdbscan_model = HDBSCAN(
+            min_cluster_size=min_topic_size,
+            metric='euclidean',
+            cluster_selection_method='eom',
+            prediction_data=True
+        )
+
+        # Initialize BERTopic with custom components
+        topic_model = BERTopic(
+            embedding_model=self.embedding_model,
+            umap_model=umap_model,
+            hdbscan_model=hdbscan_model,
+            vectorizer_model=vectorizer_model,
+            nr_topics=nr_topics,
+            calculate_probabilities=True,
+            verbose=True  # Enable verbose mode for progress
+        )
+
+        # Fit and transform with progress logging
+        self.logger.info(f"Starting BERTopic pipeline on {len(chunk_texts)} text chunks...")
+        self.logger.info("  → Stage 1/4: Computing embeddings (GPU-accelerated)...")
+        self.logger.info("  → Stage 2/4: UMAP dimensionality reduction (kNN-based)...")
+        self.logger.info("  → Stage 3/4: HDBSCAN clustering (no progress bar - typically 30s-2min)...")
+        self.logger.info("  → Stage 4/4: Computing topic probabilities...")
+
         topics, probabilities = topic_model.fit_transform(chunk_texts)
+
+        self.logger.info("✓ BERTopic pipeline completed!")
 
         n_topics = len(set(topics)) - 1  # excluding outliers
         self._log_step_completion(f"Training BERTopic model ({n_topics} topics found)", start_time, len(chunk_texts))

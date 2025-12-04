@@ -76,3 +76,5 @@ htmlcov/
 
 # Project specific
 uv.lock
+
+#!entitty_stats_2025....txt
