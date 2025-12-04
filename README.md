@@ -24,10 +24,10 @@ chunks = chunk_text(document, chunk_size=500, overlap=100)
 
 **Intelligent chunking features**:
 - Chunks are built by accumulating complete sentences until `chunk_size` is reached
-- Chunks end at sentence boundaries (detected via regex: `(?<=[.!?])\s+(?=[A-Z])`)
-- Overlap is calculated at sentence level (not character level)
-- 90%+ of chunks end at natural sentence boundaries
-- Preserves semantic coherence better than naive character-based chunking
+- Chunks end at sentence boundaries (detected via regex: `(?<=[.!?])\s+(?=[A-Z])|(?<=[.!?])$`)
+- Overlap is calculated at sentence level (sentences from end of previous chunk start the next chunk)
+- Preserves semantic coherence by never splitting mid-sentence
+- Context is maintained across chunks through sentence-level overlap
 
 **Node format**:
 - Document: `doc::{doc_id}`
@@ -52,44 +52,58 @@ topic_model = BERTopic(
 topics, probabilities = topic_model.fit_transform(chunk_texts)
 ```
 
-**Label generation**: Themes are labeled using **intelligent keyword processing** by default (fast), or optionally via LLM (slower but more descriptive):
+**Keyword processing**: Themes use **intelligent keyword processing** to create clean, informative representations:
 
 ```python
-# Intelligent keyword processing (default):
 # 1. Retrieve top 15 keywords from BERTopic
 keywords_raw = topic_model.get_topic(topic_id)[:15]
 
-# 2. Lemmatize keywords using spaCy (merge variants)
-# Example: "presidents" → "president", "running" → "run"
+# 2. Stem keywords using NLTK SnowballStemmer (merge morphological variants)
+# Example: "presidents" → "presid", "running" → "run"
+for word, score in keywords_raw:
+    stemmed = stemmer.stem(word.lower())
+    stem_scores[stemmed] += score  # Accumulate scores for same stem
 
 # 3. Remove redundant n-grams
-# Example: "sri lanka" (0.9) eliminates "sri" (0.8) and "lanka" (0.7)
+# Example: if "climate change" exists, remove "climate" and "change"
 # Keeps only the most informative keyword form
+sorted_stems = sorted(stem_scores.items(),
+                     key=lambda x: (len(x[0].split()), x[1]),
+                     reverse=True)
+
+for stem, score in sorted_stems:
+    is_subset = any(set(stem.split()).issubset(set(kept.split()))
+                    for kept, _ in filtered)
+    if not is_subset:
+        filtered.append((stem, score))
 
 # 4. Return top 10 deduplicated keywords
-keywords = process_keywords(keywords_raw)  # Top 10 after deduplication
-
-# 5. Create label from top 3 keywords
-# Default: LLM-generated labels (more descriptive)
-label = llm_generate_topic_label(keywords)  # e.g., "middle east conflict"
-
-# Alternative: Keyword-based labels (use --no-llm-labels flag for speed)
-# label = " ".join(keywords[:3])  # e.g., "gaza israel conflict"
+keywords = filtered[:10]
 ```
 
 **Keyword processing benefits**:
-- Removes morphological variants (e.g., "president" vs "presidents")
-- Eliminates redundant n-gram components (e.g., keeps "sri lanka", removes "sri" and "lanka")
+- Removes morphological variants (e.g., "president" vs "presidents" both become "presid")
+- Eliminates redundant n-gram components (e.g., keeps "climate change", removes "climate" and "change")
 - Results in cleaner, more informative topic representations
 - Reduces noise in topic labels
+
+**Label generation**: Themes are labeled using **LLM-generated labels** (default, more descriptive) or **keyword-based labels** (faster):
+
+```python
+# Default: LLM-generated labels via Ollama
+label = llm_generate_topic_label(keywords)  # e.g., "middle east conflict"
+
+# Alternative: Keyword-based labels (use --no-llm-labels flag)
+label = " ".join(keywords[:3])  # e.g., "gaza israel conflict"
+```
 
 **Node format**:
 - Theme: `theme::{topic_id}`
 
 Attributes:
 - `topic_id`: BERTopic topic ID
-- `label`: LLM-generated label
-- `keywords`: list of main keywords
+- `label`: LLM-generated or keyword-based label
+- `keywords`: list of processed keywords (top 10)
 
 #### **Entities**
 
@@ -103,14 +117,17 @@ doc = nlp(text)
 entities = []
 for ent in doc.ents:
     if ent.label_ in ['PERSON', 'ORG', 'GPE', 'LOC', 'DATE', 'EVENT', 'NORP']:
+        entity_text = ent.text.strip().lower()
+
         # Special handling for DATEs: extract only years
         if ent.label_ == "DATE":
-            year_match = re.search(r'\b(19|20)\d{2}\b', ent.text.lower())
+            year_match = re.search(r'\b(19|20)\d{2}\b', entity_text)
             if year_match:
                 year = year_match.group(0)
                 entities.append((year, "DATE"))
         else:
-            entities.append((ent.text.lower(), ent.label_))
+            if len(entity_text) > 2:  # Filter very short entities
+                entities.append((entity_text, ent.label_))
 ```
 
 **Extracted entity types**:
@@ -125,11 +142,13 @@ for ent in doc.ents:
 **Special DATE handling**:
 - Only 4-digit years (19xx or 20xx) are extracted from DATE entities
 - Detailed dates like "January 15, 2020" → year node "2020"
-- Reduces date nodes by 88% (218 dates → 26 unique years)
+- Reduces date nodes significantly while preserving temporal information
 - Enables temporal similarity connections between years
 
 **Node format**:
 - Entity: `entity::{entity_type}::{entity_text}`
+
+All entity text is **lowercased** for normalization.
 
 ---
 
@@ -137,7 +156,7 @@ for ent in doc.ents:
 
 #### **CONTAINS**: Document → Chunk
 
-Simple edge linking each document to its chunks.
+Simple structural edge linking each document to its chunks.
 
 ```
 Weight: 1.0 (unweighted)
@@ -173,35 +192,55 @@ weight_HAS_TOPIC = P(topic|chunk)
 
 where `P(topic|chunk)` is the BERTopic probability that the chunk belongs to the topic.
 
+A chunk can have HAS_TOPIC edges to multiple themes if multiple probabilities exceed the threshold.
+
 ---
 
 #### **MENTIONS**: Chunk → Entity
 
-Links chunks to entities they mention, weighted by **TF-IDF**.
+Links chunks to entities they mention, weighted by **normalized TF-IDF**.
 
 **Weight calculation**:
 
 ```python
-# TF (Term Frequency): number of entity occurrences in the chunk
-TF(entity, chunk) = count(entity in chunk)
+# Step 1-2: Calculate TF-IDF for all entity-chunk pairs
+for entity_node, chunks_with_counts in entity_mentions_in_chunks.items():
+    # TF: number of entity occurrences in the chunk
+    TF(entity, chunk) = count(entity in chunk)
 
-# IDF (Inverse Document Frequency): entity rarity
-IDF(entity) = log(total_chunks / chunks_containing_entity)
+    # IDF: entity rarity across all chunks
+    IDF(entity) = log(total_chunks / chunks_containing_entity)
 
-# Final TF-IDF
-weight_MENTIONS = TF(entity, chunk) × IDF(entity)
+    # TF-IDF
+    tf_idf = TF(entity, chunk) × IDF(entity)
+    all_tf_idf_weights.append(tf_idf)
+
+# Step 3: Global normalization to [0, 1]
+max_tf_idf = max(all_tf_idf_weights)
+
+for each edge:
+    normalized_weight = tf_idf / max_tf_idf
+
+    graph.add_edge(
+        chunk_id,
+        entity_node,
+        edge_type="MENTIONS",
+        weight=float(normalized_weight)  # Range: [0, 1]
+    )
 ```
 
 **Formula**:
 ```
-weight_MENTIONS(chunk, entity) = TF(entity, chunk) × log(N / df(entity))
+TF-IDF(chunk, entity) = TF(entity, chunk) × log(N / df(entity))
+weight_MENTIONS(chunk, entity) = TF-IDF(chunk, entity) / max(TF-IDF)
 ```
 
 where:
 - `N` = total number of chunks
 - `df(entity)` = number of chunks containing the entity
+- `max(TF-IDF)` = maximum TF-IDF value across all entity-chunk pairs
 
-**Advantage**: Rare entities (high informative value) receive higher weights.
+**Key feature**: Global normalization ensures MENTIONS weights are comparable across the entire graph and bounded in [0, 1].
 
 ---
 
@@ -222,7 +261,7 @@ freq2 = number of documents containing entity2
 # Weight inversely proportional to frequency
 inv_freq_weight = 1 / sqrt(freq1 × freq2)
 
-# Final weight
+# Final weight (only if co_occur_count >= threshold, default: 2)
 weight_CO_OCCURS = co_occur_count × inv_freq_weight
 ```
 
@@ -233,8 +272,9 @@ weight_CO_OCCURS(e1, e2) = count(e1, e2) × (1 / √(freq(e1) × freq(e2)))
 
 **Intuition**:
 - Entities that co-appear frequently have high weight
-- **But** omnipresent entities are penalized (divisor)
+- **But** omnipresent entities are penalized (inversely proportional to square root of frequencies)
 - Example: "Trump" and "France" rarely co-appear → high weight if co-occurrence detected
+- Example: "the" and "a" would co-occur often but have low weight due to high frequencies
 
 ---
 
@@ -274,14 +314,22 @@ Links semantically similar entities (or themes) via their embeddings.
 
 ```python
 # Embeddings of entity names (DATE entities excluded)
-embeddings = SentenceTransformer.encode([entity_text1, entity_text2, ...])
+entity_texts = [entity_text for entities excluding DATE type]
+embeddings = SentenceTransformer.encode(entity_texts, normalize_embeddings=True)
 
-# Cosine similarity
-sim = cosine_similarity(embedding1, embedding2) = embedding1 · embedding2
+# Cosine similarity (dot product for normalized embeddings)
+similarity_matrix = embeddings @ embeddings.T
 
-# Edge if sim > threshold (default: 0.8)
-if sim > semantic_similarity_threshold:
-    weight_SEMANTIC_SIM = sim
+# Edge if sim > threshold (default: 0.6)
+for i, j in pairs:
+    sim = similarity_matrix[i][j]
+    if sim > semantic_similarity_threshold:
+        graph.add_edge(
+            entity_i,
+            entity_j,
+            edge_type="SEMANTIC_SIM",
+            weight=float(sim)  # Range: [0.6, 1.0]
+        )
 
 # NOTE: DATE entities use TEMPORAL_DIST instead (see below)
 ```
@@ -289,22 +337,20 @@ if sim > semantic_similarity_threshold:
 **For themes**:
 
 ```python
-# Representation = concatenation of top 10 keywords
-theme_repr = " ".join(topic_keywords[:10])
+# Representation = concatenation of top 5 processed keywords
+theme_repr = " ".join(topic_keywords[:5])
 
 # Embeddings then cosine similarity
-sim = cosine_similarity(theme_embedding1, theme_embedding2)
+theme_embeddings = SentenceTransformer.encode(theme_reprs, normalize_embeddings=True)
+similarity_matrix = theme_embeddings @ theme_embeddings.T
 ```
 
 **Formula**:
 ```
-weight_SEMANTIC_SIM(n1, n2) = cos(emb(n1), emb(n2)) = (emb(n1) · emb(n2)) / (||emb(n1)|| × ||emb(n2)||)
+weight_SEMANTIC_SIM(n1, n2) = cos(emb(n1), emb(n2)) = emb(n1) · emb(n2)
 ```
 
-With normalized embeddings: `||emb|| = 1`, thus:
-```
-weight_SEMANTIC_SIM(n1, n2) = emb(n1) · emb(n2)
-```
+(Since embeddings are normalized: `||emb|| = 1`)
 
 ---
 
@@ -326,7 +372,15 @@ for year1 in years:
         if 0 < year_diff <= max_year_gap:  # default: 10
             # Exponential decay formula
             weight_TEMPORAL_DIST = exp(-decay_rate × year_diff)
-            # default decay_rate: 0.3
+            # default decay_rate: 0.5
+
+            graph.add_edge(
+                year_node1,
+                year_node2,
+                edge_type="TEMPORAL_DIST",
+                weight=float(weight),
+                year_diff=int(year_diff)
+            )
 ```
 
 **Formula**:
@@ -335,22 +389,21 @@ weight_TEMPORAL_DIST(y1, y2) = exp(-λ × |y1 - y2|)
 ```
 
 where:
-- `λ` = decay_rate (default: 0.3)
+- `λ` = decay_rate (default: 0.5)
 - `|y1 - y2|` = absolute year difference
 
-**Examples** (with decay_rate=0.3):
+**Examples** (with decay_rate=0.5):
 - Same year (diff=0): weight = 1.0
-- 1 year difference: weight ≈ 0.74
-- 2 years difference: weight ≈ 0.55
-- 3 years difference: weight ≈ 0.41
-- 5 years difference: weight ≈ 0.22
-- 10 years difference: weight ≈ 0.05
+- 1 year difference: weight ≈ 0.61
+- 2 years difference: weight ≈ 0.37
+- 3 years difference: weight ≈ 0.22
+- 5 years difference: weight ≈ 0.08
+- 10 years difference: weight ≈ 0.01
 
 **Rationale**:
 - Years closer in time are more related than distant years
 - Exponential decay creates smooth temporal neighborhood
 - Configurable max_year_gap limits connections to relevant temporal window
-- 26 year nodes create 134 temporal edges (vs. 1506 with previous approach)
 
 ---
 
@@ -359,12 +412,12 @@ where:
 The system uses **hybrid retrieval** combining 4 complementary strategies, fused by weighted average.
 
 **Strategy organization**:
-- **Strategies 1-2**: Direct comparison methods (no graph traversal)
+- **Strategies 1 & 4**: Direct comparison methods (no graph traversal)
   - Strategy 1: Semantic similarity via embeddings
-  - Strategy 2: Topic distribution similarity via Jensen-Shannon divergence
-- **Strategies 3-4**: Graph-based methods (with BFS traversal)
-  - Strategy 3: Thematic retrieval via theme graph traversal
-  - Strategy 4: Entity-based retrieval via entity graph traversal
+  - Strategy 4: Topic distribution similarity via Jensen-Shannon divergence
+- **Strategies 2 & 3**: Graph-based methods (with BFS traversal)
+  - Strategy 2: Thematic retrieval via theme graph traversal
+  - Strategy 3: Entity-based retrieval via entity graph traversal
 
 ### 2.1 Strategy 1: Semantic Retrieval
 
@@ -375,13 +428,13 @@ Based on embedding similarity between the claim and chunks.
 - Stored in FAISS (Facebook AI Similarity Search) index for fast retrieval
 - Saves to `outputs/graphs/embeddings_{graph_id}.faiss` + metadata pickle
 - Eliminates redundant embedding computation during retrieval
-- Supports fast similarity search via inner product (cosine similarity with normalized vectors)
+- Supports fast similarity search via inner product (equivalent to cosine similarity with normalized vectors)
 
 **Process**:
 
 ```python
 # 1. Encode the claim
-claim_embedding = SentenceTransformer.encode(claim)
+claim_embedding = SentenceTransformer.encode([claim], normalize_embeddings=True)[0]
 
 # 2. Load chunk embeddings from FAISS cache (or recompute if missing)
 if cache_exists:
@@ -389,12 +442,13 @@ if cache_exists:
     embedding_cache.load(cache_dir, graph_id)
     chunk_ids, chunk_embeddings = embedding_cache.get_all_embeddings()
 else:
-    chunk_embeddings = SentenceTransformer.encode(all_chunks)
+    # Fallback: compute on-the-fly
+    chunk_embeddings = SentenceTransformer.encode(all_chunks, normalize_embeddings=True)
 
-# 3. Compute cosine similarities
+# 3. Compute cosine similarities (dot product for normalized embeddings)
 similarities = chunk_embeddings @ claim_embedding
 
-# 4. Normalize (min-max)
+# 4. Min-max normalize to [0, 1]
 score_sem(chunk) = (sim(chunk) - min_sim) / (max_sim - min_sim)
 ```
 
@@ -403,11 +457,162 @@ score_sem(chunk) = (sim(chunk) - min_sim) / (max_sim - min_sim)
 score_sem(chunk) = normalize(cos(emb(claim), emb(chunk)))
 ```
 
-**Output**: Dictionary `{chunk_id: score_sem}` with normalized scores `[0, 1]`.
+**Output**: Dictionary `{chunk_id: score_sem}` with normalized scores in [0, 1].
 
 ---
 
-### 2.2 Strategy 2: Topic Distribution Retrieval
+### 2.2 Strategy 2: Thematic Retrieval
+
+Based on BERTopic topics and relevance propagation through the theme graph.
+
+**Process**:
+
+```python
+# 1. Classify the claim into topics
+topic_probs = BERTopic.transform([claim])[1][0]
+
+# 2. Select relevant themes (prob > threshold, default: 0.1)
+seed_themes = [(f"theme::{topic_id}", prob)
+               for topic_id, prob in enumerate(topic_probs)
+               if prob > theme_threshold]
+
+# 3. Propagate relevance through the theme graph (BFS)
+theme_relevance = {theme: prob for theme, prob in seed_themes}
+queue = deque(seed_themes)
+
+while queue:
+    current_theme, current_relevance = queue.popleft()
+
+    # Explore neighbors via CO_PRESENCE and SEMANTIC_SIM edges
+    for neighbor_theme in graph.neighbors(current_theme):
+        if graph.nodes[neighbor_theme]['type'] != 'theme':
+            continue
+
+        edge_type = graph[current_theme][neighbor_theme]['edge_type']
+        if edge_type not in ['CO_PRESENCE', 'SEMANTIC_SIM']:
+            continue
+
+        edge_weight = graph[current_theme][neighbor_theme]['weight']
+        propagated_relevance = current_relevance × edge_weight
+
+        # Only continue if above threshold (default: 0.1)
+        if propagated_relevance >= relevance_threshold:
+            # Update with max if already visited
+            theme_relevance[neighbor_theme] = max(
+                theme_relevance.get(neighbor_theme, 0),
+                propagated_relevance
+            )
+            queue.append((neighbor_theme, propagated_relevance))
+
+# 4. Score chunks via HAS_TOPIC edges
+chunk_scores = defaultdict(float)
+for theme, relevance in theme_relevance.items():
+    for chunk in graph.neighbors(theme):
+        if graph[chunk][theme]['edge_type'] == 'HAS_TOPIC':
+            prob_weight = graph[chunk][theme]['weight']  # BERTopic probability
+            chunk_scores[chunk] += relevance × prob_weight
+
+# 5. Min-max normalize to [0, 1]
+score_theme(chunk) = normalize(chunk_scores[chunk])
+```
+
+**Formulas**:
+
+1. **Relevance propagation** (BFS through theme graph):
+```
+relevance(theme_neighbor) = max(
+    current_relevance(theme_neighbor),
+    relevance(theme_current) × weight_edge(theme_current, theme_neighbor)
+)
+```
+
+2. **Final chunk score**:
+```
+score_theme(chunk) = normalize(∑_{theme} relevance(theme) × P(theme|chunk))
+```
+
+where `P(theme|chunk)` is the HAS_TOPIC edge weight (BERTopic probability).
+
+**Output**: Dictionary `{chunk_id: score_theme}` with normalized scores in [0, 1].
+
+---
+
+### 2.3 Strategy 3: Entity-based Retrieval
+
+Based on entity extraction from the claim and relevance propagation through the entity graph.
+
+**Process**:
+
+```python
+# 1. Extract entities from the claim (same NER as graph builder)
+entities_claim = extract_entities(claim)
+
+# 2. Find corresponding entities in the graph
+seed_entities = [f"entity::{ent_type}::{ent_text}"
+                 for ent_text, ent_type in entities_claim
+                 if graph.has_node(entity_node)]
+
+# 3. Propagate relevance through the entity graph (BFS)
+entity_relevance = {entity: 1.0 for entity in seed_entities}
+queue = deque([(entity, 1.0) for entity in seed_entities])
+
+while queue:
+    current_entity, current_relevance = queue.popleft()
+
+    # Explore neighbors via CO_OCCURS and SEMANTIC_SIM edges
+    for neighbor_entity in graph.neighbors(current_entity):
+        if graph.nodes[neighbor_entity]['type'] != 'entity':
+            continue
+
+        edge_type = graph[current_entity][neighbor_entity]['edge_type']
+        if edge_type not in ['CO_OCCURS', 'SEMANTIC_SIM']:
+            continue
+
+        edge_weight = graph[current_entity][neighbor_entity]['weight']
+        propagated_relevance = current_relevance × edge_weight
+
+        # Only continue if above threshold (default: 0.1)
+        if propagated_relevance >= relevance_threshold:
+            entity_relevance[neighbor_entity] = max(
+                entity_relevance.get(neighbor_entity, 0),
+                propagated_relevance
+            )
+            queue.append((neighbor_entity, propagated_relevance))
+
+# 4. Score chunks via MENTIONS edges
+chunk_scores = defaultdict(float)
+for entity, relevance in entity_relevance.items():
+    for chunk in graph.neighbors(entity):
+        if graph[chunk][entity]['edge_type'] == 'MENTIONS':
+            tf_idf_weight = graph[chunk][entity]['weight']  # Normalized TF-IDF
+            chunk_scores[chunk] += relevance × tf_idf_weight
+
+# 5. Min-max normalize to [0, 1]
+score_entity(chunk) = normalize(chunk_scores[chunk])
+```
+
+**Formulas**:
+
+1. **Relevance propagation** (BFS through entity graph):
+```
+relevance(entity_neighbor) = max(
+    current_relevance(entity_neighbor),
+    relevance(entity_current) × weight_edge(entity_current, entity_neighbor)
+)
+```
+
+2. **Final chunk score**:
+```
+score_entity(chunk) = normalize(∑_{entity} relevance(entity) × weight_MENTIONS(entity, chunk))
+```
+
+where `weight_MENTIONS` is the normalized TF-IDF from the MENTIONS edge.
+
+**Output**: Dictionary `{chunk_id: score_entity}` with normalized scores in [0, 1].
+
+---
+
+### 2.4 Strategy 4: Topic Distribution Retrieval
 
 Based on similarity between topic probability distributions (Jensen-Shannon divergence).
 
@@ -415,21 +620,29 @@ Based on similarity between topic probability distributions (Jensen-Shannon dive
 
 ```python
 # 1. Get the topic distribution of the claim
-claim_topic_dist = BERTopic.transform(claim)  # Probability vector
+_, claim_topic_probs = BERTopic.transform([claim])
+claim_distribution = claim_topic_probs[0]  # Shape: (n_topics,)
 
-# 2. Get distributions for all chunks (pre-computed)
-chunk_topic_dists = [BERTopic.transform(chunk) for chunk in chunks]
+# 2. Get distributions for all chunks (pre-computed during initialization)
+_, chunk_topic_probs = BERTopic.transform(chunk_texts)
+chunk_distributions = chunk_topic_probs  # Shape: (n_chunks, n_topics)
 
-# 3. Compute Jensen-Shannon divergence
-for chunk, chunk_dist in zip(chunks, chunk_topic_dists):
-    js_divergence = jensen_shannon(claim_topic_dist, chunk_dist)
+# 3. Compute Jensen-Shannon divergence for each chunk
+from scipy.spatial.distance import jensenshannon
 
-    # Convert to similarity (divergence ∈ [0, 1])
-    similarity = 1 - js_divergence
-    score_topic_dist[chunk] = similarity
+chunk_scores = {}
+for chunk_id, dist_idx in chunk_to_dist_idx.items():
+    chunk_distribution = chunk_distributions[dist_idx]
 
-# 4. Normalize
-score_topic_dist(chunk) = normalize(similarity)
+    # JS divergence: symmetric, bounded in [0, 1]
+    js_divergence = jensenshannon(claim_distribution, chunk_distribution)
+
+    # Convert to similarity (1 - divergence)
+    similarity = 1.0 - js_divergence
+    chunk_scores[chunk_id] = float(similarity)
+
+# 4. Min-max normalize to [0, 1]
+score_topic_dist(chunk) = normalize(chunk_scores[chunk])
 ```
 
 **Jensen-Shannon Divergence Formula**:
@@ -451,110 +664,9 @@ score_topic_dist(chunk) = normalize(1 - JS(P_claim || P_chunk))
 - Symmetric: `JS(P || Q) = JS(Q || P)`
 - Bounded: `JS ∈ [0, 1]`
 - `JS = 0` if distributions are identical
+- `JS = 1` if distributions are completely different
 
-**Output**: Dictionary `{chunk_id: score_topic_dist}`.
-
----
-
-### 2.3 Strategy 3: Thematic Retrieval
-
-Based on BERTopic topics and relevance propagation through the theme graph.
-
-**Process**:
-
-```python
-# 1. Classify the claim into topics
-topic_probs = BERTopic.transform(claim)
-
-# 2. Select relevant themes (prob > threshold)
-seed_themes = [(theme_id, prob) for theme_id, prob in topic_probs if prob > 0.1]
-
-# 3. Propagate relevance through the theme graph (BFS)
-for theme, relevance in BFS(seed_themes):
-    for neighbor_theme in graph.neighbors(theme):
-        edge_weight = graph[theme][neighbor_theme]['weight']  # CO_PRESENCE or SEMANTIC_SIM
-        propagated_relevance = relevance × edge_weight
-        if propagated_relevance > threshold:
-            update_relevance(neighbor_theme, propagated_relevance)
-
-# 4. Score chunks via HAS_TOPIC edges
-for theme, relevance in theme_relevance.items():
-    for chunk in chunks_with_HAS_TOPIC_to(theme):
-        prob_weight = graph[chunk][theme]['weight']  # BERTopic probability
-        score_theme[chunk] += relevance × prob_weight
-
-# 5. Normalize
-score_theme(chunk) = normalize(score_theme[chunk])
-```
-
-**Formulas**:
-
-1. **Relevance propagation** (BFS through theme graph):
-```
-relevance(theme_neighbor) = max(
-    current_relevance(theme_neighbor),
-    relevance(theme_current) × weight_edge(theme_current, theme_neighbor)
-)
-```
-
-2. **Final chunk score**:
-```
-score_theme(chunk) = normalize(∑_{theme} relevance(theme) × P(theme|chunk))
-```
-
-where `P(theme|chunk)` is the HAS_TOPIC edge weight (BERTopic probability).
-
-**Output**: Dictionary `{chunk_id: score_theme}`.
-
----
-
-### 2.4 Strategy 4: Entity-based Retrieval
-
-Based on entity extraction from the claim and relevance propagation through the entity graph.
-
-**Process**:
-
-```python
-# 1. Extract entities from the claim
-entities_claim = spaCy.extract_entities(claim)
-
-# 2. Find corresponding entities in the graph
-seed_entities = [entity_node for entity_text in entities_claim if entity_node in graph]
-
-# 3. Propagate relevance through the entity graph (BFS)
-for entity, relevance in BFS(seed_entities):
-    for neighbor_entity in graph.neighbors(entity):
-        edge_weight = graph[entity][neighbor_entity]['weight']  # CO_OCCURS or SEMANTIC_SIM
-        propagated_relevance = relevance × edge_weight
-        if propagated_relevance > threshold:
-            update_relevance(neighbor_entity, propagated_relevance)
-
-# 4. Score chunks via MENTIONS edges
-for entity, relevance in entity_relevance.items():
-    for chunk in chunks_with_MENTIONS_to(entity):
-        tf_idf_weight = graph[chunk][entity]['weight']  # TF-IDF
-        score_entity[chunk] += relevance × tf_idf_weight
-
-# 5. Normalize
-score_entity(chunk) = normalize(score_entity[chunk])
-```
-
-**Formulas**:
-
-1. **Relevance propagation** (BFS through entity graph):
-```
-relevance(entity_neighbor) = max(
-    current_relevance(entity_neighbor),
-    relevance(entity_current) × weight_edge(entity_current, entity_neighbor)
-)
-```
-
-2. **Final chunk score**:
-```
-score_entity(chunk) = normalize(∑_{entity} relevance(entity) × TF-IDF(entity, chunk))
-```
-
-**Output**: Dictionary `{chunk_id: score_entity}`.
+**Output**: Dictionary `{chunk_id: score_topic_dist}` with normalized scores in [0, 1].
 
 ---
 
@@ -566,18 +678,18 @@ The 4 scores are combined by **weighted average** with configurable weights.
 
 ```
 score_final(chunk) = α × score_sem(chunk)
-                   + β × score_topic_dist(chunk)
-                   + γ × score_theme(chunk)
-                   + δ × score_entity(chunk)
+                   + β × score_theme(chunk)
+                   + γ × score_entity(chunk)
+                   + δ × score_topic_dist(chunk)
 ```
 
 **Constraint**: `α + β + γ + δ = 1.0`
 
 **Default weights**:
 - `α = 0.3` (semantic)
-- `β = 0.2` (topic distribution)
-- `γ = 0.2` (thematic)
-- `δ = 0.3` (entities)
+- `β = 0.2` (thematic)
+- `γ = 0.3` (entity)
+- `δ = 0.2` (topic distribution)
 
 **Fusion process**:
 
@@ -589,19 +701,19 @@ all_chunks = set(S1) ∪ set(S2) ∪ set(S3) ∪ set(S4)
 results = []
 for chunk in all_chunks:
     score_sem = S1.get(chunk, 0)
-    score_topic_dist = S2.get(chunk, 0)
-    score_theme = S3.get(chunk, 0)
-    score_entity = S4.get(chunk, 0)
+    score_theme = S2.get(chunk, 0)
+    score_entity = S3.get(chunk, 0)
+    score_topic_dist = S4.get(chunk, 0)
 
-    score_final = α×score_sem + β×score_topic_dist + γ×score_theme + δ×score_entity
+    score_final = α×score_sem + β×score_theme + γ×score_entity + δ×score_topic_dist
 
     results.append({
         'chunk_id': chunk,
         'score_total': score_final,
         'score_sem': score_sem,
-        'score_topic_dist': score_topic_dist,
         'score_theme': score_theme,
-        'score_entity': score_entity
+        'score_entity': score_entity,
+        'score_topic_dist': score_topic_dist
     })
 
 # Sort by final score (descending)
@@ -619,83 +731,72 @@ return results[:top_k]
 
 ### Models used
 
-- **Embeddings**: `all-MiniLM-L6-v2` (SentenceTransformers)
+- **Embeddings**: `all-MiniLM-L6-v2` (SentenceTransformers, 384 dimensions)
 - **NER**: `en_core_web_sm` (spaCy)
 - **Topic Modeling**: BERTopic
-- **LLM**: `llama3.1:latest` (Ollama) for topic labels (default, use `--no-llm-labels` to disable)
+- **Stemming**: NLTK SnowballStemmer (English)
+- **LLM**: `llama3.1:latest` (Ollama, optional for topic labels)
 
 ### Storage
 
 - **Graph**: NetworkX (pickle) + PostgreSQL (versioned tables)
 - **Topic Model**: pickle (.pkl)
+- **Embeddings**: FAISS index (.faiss) + metadata (.pkl)
 - **Metadata**: JSON
 
 ### PostgreSQL table format
 
 **Table `graph_{timestamp}`** (edges):
 - `source`: source node
-- `predicate`: edge type (CONTAINS, HAS_TOPIC, etc.)
+- `predicate`: edge type (CONTAINS, HAS_TOPIC, MENTIONS, etc.)
 - `target`: target node
-- `weight`: edge weight
+- `weight`: edge weight (float)
+- `attributes`: JSONB with additional edge attributes
 
 **Table `nodes_{timestamp}`** (nodes):
 - `node_id`: unique identifier
 - `node_type`: type (document, chunk, theme, entity)
-- `attributes`: JSONB with all attributes
+- `attributes`: JSONB with all node attributes
 
 **Table `graph_metadata`**:
 - `graph_id`: creation timestamp
 - `num_nodes`: number of nodes
 - `num_edges`: number of edges
-- `metadata`: JSONB with configuration
+- `metadata`: JSONB with configuration and statistics
+
+**Indexes**:
+- `idx_graph_{timestamp}_source` on `source`
+- `idx_graph_{timestamp}_target` on `target`
+- `idx_graph_{timestamp}_predicate` on `predicate`
+- `idx_graph_{timestamp}_source_target` on `(source, target)`
+- `idx_nodes_{timestamp}_type` on `node_type`
+
+### Configuration
+
+**Three-layer configuration system**:
+
+1. **config.yaml** (common settings):
+   - Paths (data, outputs, logs)
+   - Models (embedding, NER, LLM)
+   - Database (PostgreSQL connection)
+   - Logging
+
+2. **config_build.yaml** (build-specific):
+   - Graph construction parameters (chunk size, thresholds, etc.)
+   - LLM settings for topic labeling
+   - Export patterns
+
+3. **config_retrieval.yaml** (retrieval-specific):
+   - Retrieval weights (alpha, beta, gamma, delta)
+   - Active graph selection
+   - Thresholds for BFS propagation
+   - Visualization settings
+
+**Deep merge**: Specific configs override common config values.
 
 ---
 
 ## 4. Usage
-
-### Quick Start Workflow
-
-**1. Build a graph:**
-```bash
-uv run python cli.py build --max-docs 100
-```
-This creates a graph with a unique ID like `20251119_185707` (timestamp-based).
-
-**2. List available graphs:**
-```bash
-uv run python cli.py list-graphs
-```
-
-Example output:
-```
-================================================================================
-AVAILABLE GRAPHS
-================================================================================
-
-1. Graph ID: 20251119_190959
-   Created: 2025-11-19T19:09:59
-   Documents: 20, Chunks: 161
-   Nodes: 762, Edges: 7042
-
-2. Graph ID: 20251119_185707
-   Created: 2025-11-19T18:57:28
-   Documents: 1000, Chunks: 9270
-   Nodes: 26272, Edges: 1510527
-================================================================================
-```
-
-**Copy the graph ID** you want to use (e.g., `20251119_185707`).
-
-**3. Use the graph for retrieval or visualization:**
-```bash
-# Retrieval (replace with your graph ID)
-uv run python cli.py retrieve "Your claim here" --graph-id 20251119_185707
-
-# Visualization (replace with your graph ID and entity)
-uv run python cli.py visualize --mode entity --entity "trump" --graph-id 20251119_185707
-```
-
----
 
 ### Building a graph
 
@@ -708,84 +809,97 @@ uv run python cli.py build --max-docs 100 --no-llm-labels
 
 # With PostgreSQL storage
 uv run python cli.py build --max-docs 100 --use-postgres
+
+# Custom chunking parameters
+uv run python cli.py build --max-docs 100 --chunk-size 500 --chunk-overlap 100
 ```
 
-**Graph ID**: Each graph is identified by its creation timestamp (e.g., `20251119_185707`). All related files (visualizations, retrievals) use this ID.
+**Graph ID**: Each graph is identified by its creation timestamp (e.g., `20251118_155115`). All related files (visualizations, retrievals) use this ID.
 
-**Important**: Always use `list-graphs` to get the correct graph ID before running retrieval or visualization commands.
+**Outputs**:
+- `outputs/graphs/graph_{graph_id}.gpickle` - NetworkX graph
+- `outputs/graphs/topic_model_{graph_id}.pkl` - BERTopic model
+- `outputs/graphs/embeddings_{graph_id}.faiss` - FAISS index
+- `outputs/graphs/embeddings_{graph_id}.pkl` - FAISS metadata
+- `outputs/graphs/metadata_{graph_id}.json` - Build metadata
+- `outputs/statistics/general_stats_{graph_id}.json` - Node/edge counts
+- `outputs/statistics/topic_stats_{graph_id}.json` - Topic details
+- `outputs/statistics/entity_stats_{graph_id}.json` - Entity statistics
+- `outputs/statistics/summary_{graph_id}.txt` - Human-readable summary
 
-**Note**: Statistics are automatically generated during graph build and saved to `outputs/statistics/{graph_id}/`:
-- `general_stats_{graph_id}.json` - Node/edge counts by type
-- `topic_stats_{graph_id}.json` - Topic details with chunks/documents
-- `entity_stats_{graph_id}.json` - Entity statistics with top entities by degree
-- `summary_{graph_id}.txt` - Human-readable summary report
-
-### Retrieval
-
-**Use `list-graphs` to get the correct graph ID, then retrieve:**
-
-```bash
-# Basic retrieval (use your actual graph ID from list-graphs)
-uv run python cli.py retrieve "Trump met Macron in France" --graph-id 20251119_185707
-
-# Custom parameters with named retrieval
-uv run python cli.py retrieve "claim text" \
-  --graph-id 20251119_185707 \
-  --top-k 10 \
-  --alpha 0.3 --beta 0.2 --gamma 0.3 --delta 0.2 \
-  --name "my_experiment"
-```
-
-**Retrieval results** are saved in `outputs/retrieval_results/` as `results_{graph_id}_{name}.json/txt`:
-- Without `--name`: Auto-incremented (e.g., `results_20251119_185707_1.json`, `results_20251119_185707_2.json`)
-- With `--name "test"`: Custom name (e.g., `results_20251119_185707_test.json`)
-
-**Result files include**:
-- Top-ranked chunks with scores (semantic, thematic, entity, topic distribution)
-- Alternative rankings (by semantic score, by entity score, etc.)
-- Statistics (score distributions, component dominance)
-- **Full text of ALL retrieved chunks** (at the end of the file)
-
-### Visualization
-
-**First, list available graphs to get the correct graph ID:**
+### List available graphs
 
 ```bash
 uv run python cli.py list-graphs
 ```
 
-This will show all available graphs with their IDs, creation dates, and statistics. Example output:
+Example output:
 ```
-Available graphs:
-  - 20251119_185707 (created: 2025-11-19 18:57:07)
-  - 20251117_213022 (created: 2025-11-17 21:30:22)
+================================================================================
+AVAILABLE GRAPHS
+================================================================================
+
+1. Graph ID: 20251118_190959
+   Created: 2025-11-18T19:09:59
+   Documents: 20, Chunks: 161
+   Nodes: 762, Edges: 7042
+
+2. Graph ID: 20251118_155115
+   Created: 2025-11-18T15:51:15
+   Documents: 1000, Chunks: 9270
+   Nodes: 26272, Edges: 1510527
+================================================================================
 ```
 
-**Then visualize using the correct graph ID:**
+### Retrieval
+
+```bash
+# Basic retrieval (use graph ID from list-graphs)
+uv run python cli.py retrieve "Trump met Macron in France" --graph-id 20251118_155115
+
+# Custom parameters with named retrieval
+uv run python cli.py retrieve "claim text" \
+  --graph-id 20251118_155115 \
+  --top-k 10 \
+  --alpha 0.3 --beta 0.2 --gamma 0.3 --delta 0.2 \
+  --name "my_experiment"
+```
+
+**Retrieval results** are saved in `outputs/retrieval_results/`:
+- Without `--name`: Auto-incremented (e.g., `results_{graph_id}_1.json`)
+- With `--name "test"`: Custom name (e.g., `results_{graph_id}_test.json`)
+
+**Result files include**:
+- Top-ranked chunks with scores (semantic, thematic, entity, topic distribution)
+- Alternative rankings (by semantic score, by entity score, etc.)
+- Statistics (score distributions, component dominance)
+- Full text of all retrieved chunks
+
+### Visualization
 
 ```bash
 # Display pre-computed statistics
-uv run python cli.py visualize --mode stats --graph-id 20251119_185707
+uv run python cli.py visualize --mode stats --graph-id 20251118_155115
 
-# Full graph visualization
-uv run python cli.py visualize --mode full --graph-id 20251119_185707
+# Full graph visualization (interactive HTML)
+uv run python cli.py visualize --mode full --graph-id 20251118_155115
 
-# Entity-centered subgraph (replace "trump" with your entity of interest)
-uv run python cli.py visualize --mode entity --entity "trump" --graph-id 20251119_185707
+# Node-centered subgraph (any node type: entity, chunk, theme, document)
+uv run python cli.py visualize --mode node --node "entity::PERSON::trump" --graph-id 20251118_155115
+uv run python cli.py visualize --mode node --node "chunk::0::5" --graph-id 20251118_155115
+uv run python cli.py visualize --mode node --node "theme::2" --graph-id 20251118_155115
+uv run python cli.py visualize --mode node --node "doc::0" --graph-id 20251118_155115
 ```
 
-**Important**: The `--graph-id` must match an existing graph. Use `list-graphs` to see available IDs.
-
-**Visualization files** are saved as `graph_{mode}_{graph_id}.html` in `outputs/visualizations/`
+**Visualization files** are saved as `graph_{mode}_{node_id}_{graph_id}.html` in `outputs/visualizations/`
 
 **Visualization features**:
-- **Chunk labels**: Display chunk IDs
-- Hover to see full chunk text
-- Interactive legend: Click node types to hide/show
-- Normalized edge weights: All weights in [0, 1] range
-- Larger nodes and fonts for readability
-
+- Interactive legend: Click node/edge types to hide/show
+- Hover nodes to see details
+- Click chunks to see full text in popup
+- Click documents to see all chunks with separators
+- Normalized edge weights displayed
+- Physics simulation for layout
+- Color-coded by node/edge type
 
 ---
-
-
