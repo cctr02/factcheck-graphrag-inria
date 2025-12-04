@@ -903,3 +903,133 @@ uv run python cli.py visualize --mode node --node "doc::0" --graph-id 20251118_1
 - Color-coded by node/edge type
 
 ---
+
+## 5. Installation
+
+### Prerequisites
+
+- Python 3.8 or higher
+- [uv](https://docs.astral.sh/uv/) - Fast Python package manager
+
+### Install uv
+
+If you don't have `uv` installed yet:
+
+```bash
+# On macOS and Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# On Windows
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+### Clone and Setup
+
+1. **Clone the repository**:
+
+```bash
+git clone <repository-url>
+cd PRL
+```
+
+2. **Initialize uv project** (creates virtual environment automatically):
+
+```bash
+uv init
+```
+
+3. **Install all dependencies**:
+
+```bash
+uv pip install -r requirements.txt
+```
+
+4. **Download spaCy language model**:
+
+```bash
+uv run python -m spacy download en_core_web_sm
+```
+
+### Configuration
+
+The system uses YAML configuration files in the `config/` directory:
+
+- `config/config.yaml` - Common settings (paths, database, models)
+- `config/config_build.yaml` - Build-specific settings (topic modeling, entity types)
+- `config/config_retrieval.yaml` - Retrieval-specific settings (weights, thresholds)
+
+**Optional: Setup PostgreSQL**
+
+If you want to use PostgreSQL storage:
+
+```bash
+# Initialize database tables
+uv run python cli.py init --postgres
+
+# Or manually configure connection in config/config.yaml
+database:
+  host: localhost
+  port: 5432
+  database: knowledge_graph
+  user: postgres
+  password: your_password
+```
+
+### Verify Installation
+
+Test that everything is working:
+
+```bash
+# Check Python version
+uv run python --version
+
+# Verify dependencies
+uv pip list
+
+# Run help command
+uv run python cli.py --help
+```
+
+### Managing Dependencies with uv
+
+**Add new dependency**:
+```bash
+uv pip install <package-name>
+```
+
+**Update dependencies**:
+```bash
+uv pip install -r requirements.txt --upgrade
+```
+
+**Sync environment** (ensures exact match with requirements.txt):
+```bash
+uv sync
+```
+
+**Activate virtual environment** (if needed):
+```bash
+# uv creates and manages .venv automatically
+# On Unix/macOS
+source .venv/bin/activate
+
+# On Windows
+.venv\Scripts\activate
+```
+
+### Quick Start
+
+Once installed, build your first graph:
+
+```bash
+# Build a small test graph
+uv run python cli.py build --max-docs 20 --no-llm-labels
+
+# List available graphs
+uv run python cli.py list-graphs
+
+# Try a retrieval query
+uv run python cli.py retrieve "your query here" --graph-id <graph_id_from_list>
+```
+
+---
