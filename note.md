@@ -2,8 +2,11 @@ Connexion
 ssh cedric.trinh@albatros.polytechnique.fr
 ssh ctrinh@bb8.lix.polytechnique.fr
 
+/mnt/disk5/prl_cedrictom/factcheckrag 
+tmux
+ctrl b then d
+tmux attach -t 0
 
-/mnt/disk4/younes/fcbureau_data
 
 articles.csv       claims.csv              embeddings_french.pt       english_corpus.json       french_corpus.json
 bm25_english.pkl   embeddings_english.npy  embeddings.ipynb           english_fact_checks.csv   french_fact_checks.csv
@@ -56,3 +59,8 @@ mettre que le relevance propagation s'arrête quand ça atteint un threshold
 to keep
 20251119_185707
 20251125_011509
+
+
+dans MENTIONS on fait le idf sur les mentions par documents mais il faut normaliser par le nombre de chunks dans ce documents 
+
+

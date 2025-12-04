@@ -950,6 +950,44 @@ uv pip install -r requirements.txt
 uv run python -m spacy download en_core_web_sm
 ```
 
+5. **Install Ollama (for LLM-generated topic labels)**:
+
+Ollama is required only if you want to use LLM-generated topic labels (more descriptive). If you use `--no-llm-labels` flag, you can skip this step.
+
+```bash
+# On macOS and Linux
+curl -fsSL https://ollama.com/install.sh | sh
+
+# On Windows
+# Download and install from: https://ollama.com/download/windows
+```
+
+6. **Download the LLM model**:
+
+```bash
+# Pull the llama3.1 model (default model used by the system)
+ollama pull llama3.1:latest
+
+# Start Ollama service (if not already running)
+ollama serve
+```
+
+**Verify Ollama installation**:
+```bash
+# Check if Ollama is running
+ollama list
+
+# Test the model
+ollama run llama3.1:latest "Hello, world!"
+```
+
+**Note**: If you want to use a different model, update the `llm_model` setting in `config/config_build.yaml`:
+```yaml
+models:
+  llm_model: "llama3.1:latest"  # Change to your preferred model
+  llm_endpoint: "http://localhost:11434"
+```
+
 ### Configuration
 
 The system uses YAML configuration files in the `config/` directory:
@@ -973,48 +1011,6 @@ database:
   database: knowledge_graph
   user: postgres
   password: your_password
-```
-
-### Verify Installation
-
-Test that everything is working:
-
-```bash
-# Check Python version
-uv run python --version
-
-# Verify dependencies
-uv pip list
-
-# Run help command
-uv run python cli.py --help
-```
-
-### Managing Dependencies with uv
-
-**Add new dependency**:
-```bash
-uv pip install <package-name>
-```
-
-**Update dependencies**:
-```bash
-uv pip install -r requirements.txt --upgrade
-```
-
-**Sync environment** (ensures exact match with requirements.txt):
-```bash
-uv sync
-```
-
-**Activate virtual environment** (if needed):
-```bash
-# uv creates and manages .venv automatically
-# On Unix/macOS
-source .venv/bin/activate
-
-# On Windows
-.venv\Scripts\activate
 ```
 
 ### Quick Start
