@@ -762,8 +762,17 @@ Topic label:"""
         # Add edges above threshold with weighted score
         start_time_add = time.time()
         edges_added = 0
+        edges_skipped_date_date = 0
         for (entity1, entity2), co_occur_count in tqdm(co_occur_counter.items(), desc="Adding CO_OCCURS edges", disable=self.logger.level > logging.INFO):
             if co_occur_count >= self.co_occur_threshold:
+                # Skip DATE-DATE co-occurrences (they use TEMPORAL_DIST edges instead)
+                entity1_type = self.graph.nodes[entity1].get('entity_type')
+                entity2_type = self.graph.nodes[entity2].get('entity_type')
+
+                if entity1_type == 'DATE' and entity2_type == 'DATE':
+                    edges_skipped_date_date += 1
+                    continue
+
                 # Entity frequencies (number of documents they appear in)
                 freq1 = entity_document_frequency[entity1]
                 freq2 = entity_document_frequency[entity2]
@@ -788,6 +797,9 @@ Topic label:"""
                     inv_freq_weight=float(inv_freq_weight)
                 )
                 edges_added += 1
+
+        if edges_skipped_date_date > 0:
+            self.logger.info(f"Skipped {edges_skipped_date_date} DATE-DATE co-occurrences (use TEMPORAL_DIST instead)")
 
         self._log_step_completion("Adding CO_OCCURS edges", start_time_add, edges_added)
 

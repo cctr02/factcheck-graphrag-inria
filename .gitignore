@@ -1,80 +1,25 @@
 # Python
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
 lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-pip-wheel-metadata/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
 
 # Virtual environments
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
+.venv/
 
 # IDEs
 .vscode/
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
 .claude/
 
 # Logs
 logs/
-*.log
 
 # Outputs
-outputs/graphs/*.gpickle
-outputs/graphs/*.pkl
-outputs/visualizations/*.html
-outputs/exports/*
-outputs/models/*
-outputs/statistics/*
-outputs/retrieval_results/*
-
-# Cache
-.cache/
-*.cache
-
-# Database
-*.db
-*.sqlite
-*.sqlite3
+outputs/
 
 # Large data files
 *.csv
 *.json
 *.faiss
 
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
 
 # Project specific
 uv.lock
-
-#!entitty_stats_2025....txt

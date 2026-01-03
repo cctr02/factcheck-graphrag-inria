@@ -2,10 +2,10 @@
 Retrieval module for fact-checking using the Knowledge Graph.
 
 This module implements a hybrid retrieval strategy combining:
-1. Semantic retrieval (embedding similarity)
-2. Thematic retrieval (via topic model and graph traversal)
-3. Entity-based retrieval (via entity extraction and graph traversal)
-4. Topic distribution retrieval (via Jensen-Shannon divergence)
+1. Semantic Similarity (embedding similarity)
+2. Topic Distribution Similarity (Jensen-Shannon divergence)
+3. Thematic Graph Traversal (BFS over theme graph)
+4. Entity Graph Traversal (BFS over entity graph)
 """
 
 import networkx as nx
@@ -25,10 +25,10 @@ class HybridRetriever:
     Hybrid retrieval system for fact-checking claims.
 
     Combines four retrieval strategies:
-    - Semantic: Direct embedding similarity
-    - Thematic: Topic classification + graph traversal
-    - Entity: Entity extraction + graph traversal (3 paths)
-    - Topic Distribution: Jensen-Shannon divergence between topic distributions
+    - Strategy 1 (Semantic Similarity): Direct embedding similarity
+    - Strategy 2 (Topic Distribution Similarity): Jensen-Shannon divergence between topic distributions
+    - Strategy 3 (Thematic Graph Traversal): BFS over theme graph
+    - Strategy 4 (Entity Graph Traversal): BFS over entity graph
 
     The final score is a weighted combination of all four.
     """
@@ -62,10 +62,10 @@ class HybridRetriever:
             embedding_model: SentenceTransformer model
             nlp: spaCy model for entity extraction
             entity_types: List of entity types to extract
-            alpha: Weight for semantic score (default: 0.3)
-            beta: Weight for thematic score (default: 0.2)
-            gamma: Weight for entity score (default: 0.3)
-            delta: Weight for topic distribution score (default: 0.2)
+            alpha: Weight for semantic score (S1, default: 0.3)
+            beta: Weight for topic distribution score (S2, default: 0.2)
+            gamma: Weight for thematic score (S3, default: 0.3)
+            delta: Weight for entity score (S4, default: 0.2)
             top_k: Number of chunks to return
             theme_threshold: Minimum confidence for theme detection
             entity_relevance_threshold: Minimum relevance to continue entity traversal
@@ -328,7 +328,7 @@ class HybridRetriever:
 
     def retrieve_semantic(self, claim: str) -> Dict[str, float]:
         """
-        Step 1: Semantic retrieval using embedding similarity.
+        Strategy 1: Semantic Similarity using embedding similarity.
 
         Args:
             claim: Claim text to verify
@@ -336,7 +336,7 @@ class HybridRetriever:
         Returns:
             Dictionary mapping chunk_id to semantic score (normalized)
         """
-        self.logger.info("\n--- Step 1: Semantic Retrieval ---")
+        self.logger.info("\n--- Strategy 1: Semantic Similarity ---")
 
         # Embed claim
         claim_embedding = self.embedding_model.encode(
@@ -369,7 +369,7 @@ class HybridRetriever:
 
     def retrieve_thematic(self, claim: str) -> Dict[str, float]:
         """
-        Step 2: Thematic retrieval using topic model and graph traversal with relevance propagation.
+        Strategy 3: Thematic Graph Traversal using topic model and graph traversal with relevance propagation.
 
         Uses BFS to propagate relevance through theme graph (CO_PRESENCE, SEMANTIC_SIM edges),
         then scores chunks based on theme relevance weighted by probabilities from HAS_TOPIC edges.
@@ -380,7 +380,7 @@ class HybridRetriever:
         Returns:
             Dictionary mapping chunk_id to thematic score (normalized)
         """
-        self.logger.info("\n--- Step 2: Thematic Retrieval ---")
+        self.logger.info("\n--- Strategy 3: Thematic Graph Traversal ---")
 
         # Classify claim into topics
         topic_probs = self.topic_model.transform([claim])[1][0]
@@ -451,7 +451,7 @@ class HybridRetriever:
                     for k, v in scores.items()
                 }
 
-        self.logger.info(f"Found {len(scores)} chunks via thematic retrieval")
+        self.logger.info(f"Found {len(scores)} chunks via thematic graph traversal")
         if scores:
             self.logger.info(f"Top score: {max(scores.values()):.3f}")
 
@@ -459,7 +459,7 @@ class HybridRetriever:
 
     def retrieve_entity(self, claim: str) -> Dict[str, float]:
         """
-        Step 3: Entity-based retrieval using graph traversal with relevance propagation.
+        Strategy 4: Entity Graph Traversal using graph traversal with relevance propagation.
 
         Uses BFS to propagate relevance through entity graph (CO_OCCURS, SEMANTIC_SIM edges),
         then scores chunks based on entity relevance weighted by TF-IDF from MENTIONS edges.
@@ -470,7 +470,7 @@ class HybridRetriever:
         Returns:
             Dictionary mapping chunk_id to entity score (normalized)
         """
-        self.logger.info("\n--- Step 3: Entity-based Retrieval ---")
+        self.logger.info("\n--- Strategy 4: Entity Graph Traversal ---")
 
         # Extract entities from claim
         entities_claim = self.extract_entities(claim)
@@ -532,7 +532,7 @@ class HybridRetriever:
                     for k, v in scores.items()
                 }
 
-        self.logger.info(f"Found {len(scores)} chunks via entity retrieval")
+        self.logger.info(f"Found {len(scores)} chunks via entity graph traversal")
         if scores:
             self.logger.info(f"Top score: {max(scores.values()):.3f}")
 
@@ -540,7 +540,7 @@ class HybridRetriever:
 
     def retrieve_topic_distribution(self, claim: str) -> Dict[str, float]:
         """
-        Step 4: Topic distribution similarity using Jensen-Shannon divergence.
+        Strategy 2: Topic Distribution Similarity using Jensen-Shannon divergence.
 
         Compares the topic probability distribution of the claim with each chunk's
         topic distribution. Uses Jensen-Shannon divergence (symmetric, bounded [0,1]).
@@ -551,7 +551,7 @@ class HybridRetriever:
         Returns:
             Dictionary mapping chunk_id to distribution similarity score (normalized)
         """
-        self.logger.info("\n--- Step 4: Topic Distribution Retrieval ---")
+        self.logger.info("\n--- Strategy 2: Topic Distribution Similarity ---")
 
         # Get topic distribution for claim
         _, claim_topic_probs = self.topic_model.transform([claim])
@@ -627,17 +627,17 @@ class HybridRetriever:
         self.logger.info(f"RETRIEVAL FOR CLAIM: {claim}")
         self.logger.info("=" * 60)
 
-        # Step 1: Semantic retrieval
+        # Strategy 1: Semantic Similarity
         S1 = self.retrieve_semantic(claim)
 
-        # Step 2: Thematic retrieval
-        S2 = self.retrieve_thematic(claim)
+        # Strategy 2: Topic Distribution Similarity
+        S2 = self.retrieve_topic_distribution(claim)
 
-        # Step 3: Entity retrieval
-        S3 = self.retrieve_entity(claim)
+        # Strategy 3: Thematic Graph Traversal
+        S3 = self.retrieve_thematic(claim)
 
-        # Step 4: Topic distribution retrieval
-        S4 = self.retrieve_topic_distribution(claim)
+        # Strategy 4: Entity Graph Traversal
+        S4 = self.retrieve_entity(claim)
 
         # Fusion: combine scores
         all_chunks = set(S1.keys()) | set(S2.keys()) | set(S3.keys()) | set(S4.keys())
@@ -649,16 +649,16 @@ class HybridRetriever:
         results = []
         for chunk_id in all_chunks:
             score_sem = S1.get(chunk_id, 0)
-            score_theme = S2.get(chunk_id, 0)
-            score_entity = S3.get(chunk_id, 0)
-            score_topic_dist = S4.get(chunk_id, 0)
+            score_topic_dist = S2.get(chunk_id, 0)
+            score_theme = S3.get(chunk_id, 0)
+            score_entity = S4.get(chunk_id, 0)
 
             # Final weighted score
             final_score = (
                 self.alpha * score_sem +
-                self.beta * score_theme +
-                self.gamma * score_entity +
-                self.delta * score_topic_dist
+                self.beta * score_topic_dist +
+                self.gamma * score_theme +
+                self.delta * score_entity
             )
 
             # Get document ID
