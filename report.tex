@@ -229,8 +229,6 @@ Each entity node is uniquely identified as \texttt{entity::\{entity\_type\}::\{e
 \section{Edge Construction}
 \label{sec:edges}
 
-Edges in the knowledge graph encode relationships between nodes, capturing structural hierarchy, thematic associations, entity mentions, co-occurrence patterns, semantic similarity, and temporal proximity. This section details the construction and weighting of each edge type.
-
 \subsection{CONTAINS: Document $\to$ Chunk}
 
 CONTAINS edges form the structural backbone of the graph, representing the hierarchical containment relationship between documents and their constituent chunks.
@@ -279,9 +277,9 @@ This produces smooth, bounded weights that emphasize salient and discriminative 
 
 CO\_OCCURS edges capture entity co-occurrence patterns at the document level, connecting entities that frequently appear together in fact-check articles. These edges enable entity-based retrieval to expand from a query entity to related entities.
 
-\paragraph{Document-level co-occurrence counting.} We group chunks by their parent document and aggregate all entities mentioned in each document. For each pair of entities $(e_1, e_2)$ appearing in at least one common document, we count the number of documents containing both: $\text{count}(e_1, e_2)$. We also track the marginal document frequencies $\text{freq}(e_1)$ and $\text{freq}(e_2)$ (number of documents containing each entity individually).
-
 \paragraph{Special DATE entity handling.} DATE-DATE co-occurrences are \emph{excluded} from CO\_OCCURS edges because temporal relationships between years are captured by dedicated TEMPORAL\_DIST edges. However, DATE entities may co-occur with non-DATE entities (e.g., PERSON-DATE, ORG-DATE, GPE-DATE), which capture event-year associations valuable for retrieval.
+
+\paragraph{Document-level co-occurrence counting.} We group chunks by their parent document and aggregate all entities mentioned in each document. For each pair of entities $(e_1, e_2)$ appearing in at least one common document, we count the number of documents containing both: $\text{count}(e_1, e_2)$. We also track the marginal document frequencies $\text{freq}(e_1)$ and $\text{freq}(e_2)$ (number of documents containing each entity individually).
 
 \paragraph{PMI weighting with sigmoid.} Raw co-occurrence counts favor ubiquitous entities. To emphasize statistically significant associations, we compute Pointwise Mutual Information (PMI):
 \[
