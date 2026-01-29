@@ -45,7 +45,7 @@ class HybridRetriever:
         gamma: float = 0.3,
         delta: float = 0.2,
         top_k: int = 10,
-        theme_threshold: float = 0.1,
+        theme_threshold: float = 0.01,
         entity_relevance_threshold: float = 0.1,
         theme_relevance_threshold: float = 0.1,
         graph_id: Optional[str] = None,
@@ -103,7 +103,7 @@ class HybridRetriever:
         # Pre-compute chunk embeddings and topic distributions for efficiency
         self.logger.info("Pre-computing chunk embeddings and topic distributions...")
         self._precompute_chunk_embeddings(graph_id, cache_dir)
-        self._precompute_chunk_topic_distributions()
+        self._precompute_chunk_topic_distributions(graph_id, cache_dir)
 
     def _precompute_chunk_embeddings(self, graph_id: Optional[str] = None, cache_dir: Optional[str] = None):
         """
@@ -161,10 +161,50 @@ class HybridRetriever:
 
         self.logger.info(f"Computed embeddings for {len(self.chunk_nodes)} chunks")
 
-    def _precompute_chunk_topic_distributions(self):
+    def _precompute_chunk_topic_distributions(self, graph_id: Optional[str] = None, cache_dir: Optional[str] = None):
         """Pre-compute topic probability distributions for all chunks."""
-        # Get topic distributions from BERTopic
+        from pathlib import Path
+
+        # Try to load pre-computed probabilities from cache
+        if graph_id and cache_dir:
+            try:
+                cache_path = Path(cache_dir)
+                probs_file = cache_path / f"topic_probs_{graph_id}.npz"
+
+                if probs_file.exists():
+                    self.logger.info(f"Loading topic probabilities from cache: {probs_file}")
+                    data = np.load(probs_file)
+                    cached_chunk_ids = data['chunk_ids'].tolist()
+                    cached_probs = data['probabilities']
+
+                    # Verify chunk IDs match
+                    if cached_chunk_ids == self.chunk_nodes:
+                        self.chunk_topic_distributions = cached_probs
+
+                        # Create mapping from chunk_id to distribution index
+                        self.chunk_to_dist_idx = {
+                            chunk_id: idx
+                            for idx, chunk_id in enumerate(self.chunk_nodes)
+                        }
+
+                        self.logger.info(f"✓ Loaded topic distributions for {len(self.chunk_nodes)} chunks")
+                        self.logger.info(f"Number of topics: {cached_probs.shape[1]}")
+                        return
+                    else:
+                        self.logger.warning("Cached chunk IDs don't match current graph, recomputing...")
+                else:
+                    self.logger.warning(f"Topic probabilities cache not found: {probs_file}")
+            except Exception as e:
+                self.logger.warning(f"Error loading topic probabilities cache: {e}")
+
+        # Fallback: compute topic distributions (slow!)
+        self.logger.info(f"Computing topic distributions for {len(self.chunk_texts)} chunks...")
+        self.logger.info("This may take 2-5 minutes depending on number of topics. Please wait...")
+        self.logger.warning("⚠️ Consider rebuilding graph to generate cached probabilities for faster loading")
+
         _, chunk_topic_probs = self.topic_model.transform(self.chunk_texts)
+
+        self.logger.info("✓ Topic distributions computed successfully")
 
         # Store as numpy array for efficient computation
         self.chunk_topic_distributions = chunk_topic_probs

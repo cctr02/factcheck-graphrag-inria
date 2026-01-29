@@ -4,6 +4,42 @@ Fact-checking system based on a multi-level knowledge graph combining topic mode
 
 ---
 
+## Quick Start
+
+```bash
+# 1. Initialize system (create directories)
+uv run python cli.py init --dirs
+
+# 2. Build a knowledge graph from your data
+uv run python cli.py build --max-docs 100
+
+# 3. List available graphs
+uv run python cli.py list-graphs
+
+# 4. Retrieve relevant chunks for a claim
+uv run python cli.py retrieve "Your claim here" --graph-id GRAPH_ID
+
+# 5. Visualize graph statistics
+uv run python cli.py stats --graph-id GRAPH_ID
+```
+
+## Table of Contents
+
+1. [Graph Construction](#1-graph-construction)
+2. [Graph Retrieval](#2-graph-retrieval)
+3. [Technical Architecture](#3-technical-architecture)
+4. [Usage](#4-usage)
+   - [Initialize system](#initialize-system)
+   - [Building a graph](#building-a-graph)
+   - [List available graphs](#list-available-graphs)
+   - [Display graph statistics](#display-graph-statistics)
+   - [Retrieval](#retrieval)
+   - [Visualization](#visualization)
+   - [Relabel topics with LLM](#relabel-topics-with-llm)
+   - [Configuration management](#configuration-management)
+
+---
+
 ## 1. Graph Construction
 
 The knowledge graph is built in several steps, creating a multi-level network linking documents, chunks, themes, and entities.
@@ -166,17 +202,22 @@ Weight: 1.0 (unweighted)
 
 #### **HAS_TOPIC**: Chunk → Theme
 
-Links each chunk to themes detected by BERTopic, with a probability threshold.
+Links each chunk to its **top-3 most probable themes** detected by BERTopic.
 
 **Weight calculation**:
 
 ```python
-# BERTopic probability for each topic
+# BERTopic probability distribution for the chunk
 topic_probs = topic_model.transform([chunk_text])[1][0]
 
-# Create edges only if prob > threshold
-for topic_id, prob in enumerate(topic_probs):
-    if prob > topic_probability_threshold:  # default: 0.15
+# Get top-3 topic indices sorted by probability
+top_k_topics = 3
+top_k_indices = np.argsort(topic_probs)[-top_k_topics:][::-1]
+
+# Create edges for top-K topics (skip if prob < 1%)
+for topic_id in top_k_indices:
+    prob = topic_probs[topic_id]
+    if prob >= 0.01:  # Minimum threshold to filter noise
         graph.add_edge(
             chunk_id,
             f"theme::{topic_id}",
@@ -192,89 +233,127 @@ weight_HAS_TOPIC = P(topic|chunk)
 
 where `P(topic|chunk)` is the BERTopic probability that the chunk belongs to the topic.
 
-A chunk can have HAS_TOPIC edges to multiple themes if multiple probabilities exceed the threshold.
+**Key features**:
+- **Multi-label assignment**: Each chunk is assigned to its top-3 topics (not just the dominant one)
+- **Weighted by probability**: Probabilities are preserved as edge weights
+- **Enables CO_PRESENCE**: Multiple topics per chunk allow theme-theme co-occurrence edges
+- **Noise filtering**: Topics with probability < 1% are excluded
 
 ---
 
 #### **MENTIONS**: Chunk → Entity
 
-Links chunks to entities they mention, weighted by **normalized TF-IDF**.
+Links chunks to entities they mention, weighted by **local normalized TF-IDF with sigmoid transformation**.
 
 **Weight calculation**:
 
 ```python
-# Step 1-2: Calculate TF-IDF for all entity-chunk pairs
-for entity_node, chunks_with_counts in entity_mentions_in_chunks.items():
-    # TF: number of entity occurrences in the chunk
-    TF(entity, chunk) = count(entity in chunk)
+# Step 1: Calculate TF for each entity-chunk pair
+for chunk in chunks:
+    for entity in chunk.entities:
+        TF(entity, chunk) = count(entity in chunk)
 
-    # IDF: entity rarity across all chunks
+# Step 2: Calculate IDF for each entity
+for entity in all_entities:
     IDF(entity) = log(total_chunks / chunks_containing_entity)
 
-    # TF-IDF
-    tf_idf = TF(entity, chunk) × IDF(entity)
-    all_tf_idf_weights.append(tf_idf)
+# Step 3: Normalize TF locally within each chunk
+for chunk in chunks:
+    max_TF_in_chunk = max(TF values for all entities in this chunk)
+    for entity in chunk.entities:
+        normalized_TF = TF(entity, chunk) / max_TF_in_chunk
 
-# Step 3: Global normalization to [0, 1]
-max_tf_idf = max(all_tf_idf_weights)
+# Step 4: Calculate raw weight and apply sigmoid
+scale = 3.0  # Sigmoid steepness parameter
+for entity, chunk in entity_chunk_pairs:
+    # Combine local importance (normalized TF) with global rarity (IDF)
+    raw_weight = normalized_TF × IDF(entity)
 
-for each edge:
-    normalized_weight = tf_idf / max_tf_idf
+    # Map to [0, 1] with sigmoid (soft boundaries)
+    weight = 1.0 / (1.0 + exp(-raw_weight / scale))
 
     graph.add_edge(
         chunk_id,
         entity_node,
         edge_type="MENTIONS",
-        weight=float(normalized_weight)  # Range: [0, 1]
+        weight=float(weight)  # Range: ≈[0, 1]
     )
 ```
 
 **Formula**:
 ```
-TF-IDF(chunk, entity) = TF(entity, chunk) × log(N / df(entity))
-weight_MENTIONS(chunk, entity) = TF-IDF(chunk, entity) / max(TF-IDF)
+normalized_TF(entity, chunk) = TF(entity, chunk) / max_TF(chunk)
+raw_weight = normalized_TF × log(N / df(entity))
+weight_MENTIONS = σ(raw_weight / scale) = 1 / (1 + exp(-raw_weight / scale))
 ```
 
 where:
 - `N` = total number of chunks
 - `df(entity)` = number of chunks containing the entity
-- `max(TF-IDF)` = maximum TF-IDF value across all entity-chunk pairs
+- `max_TF(chunk)` = maximum TF among all entities in this specific chunk
+- `scale = 3.0` = sigmoid steepness parameter
 
-**Key feature**: Global normalization ensures MENTIONS weights are comparable across the entire graph and bounded in [0, 1].
+**Key features**:
+- **Local TF normalization**: Each chunk's TF values are normalized relative to the most frequent entity in that chunk
+- **Sigmoid transformation**: Soft mapping to [0, 1] (avoids hard clipping, smoother weight distribution)
+- **Hybrid importance**: Combines local entity importance (within chunk) with global rarity (across corpus)
 
 ---
 
 #### **CO_OCCURS**: Entity ↔ Entity
 
-Links entities that appear together in the same documents.
+Links entities that appear together in the same documents, weighted by **PMI (Pointwise Mutual Information) with sigmoid transformation**.
 
 **Weight calculation**:
 
 ```python
-# Co-occurrence at document level (not chunk)
+# Step 1: Count co-occurrences at document level (not chunk)
 co_occur_count = number of documents containing (entity1 AND entity2)
 
-# Entity frequencies
+# Step 2: Count entity document frequencies
 freq1 = number of documents containing entity1
 freq2 = number of documents containing entity2
+total_docs = total number of documents
 
-# Weight inversely proportional to frequency
-inv_freq_weight = 1 / sqrt(freq1 × freq2)
+# Step 3: Calculate PMI (Pointwise Mutual Information)
+# Measures how much more often entities co-occur than expected by chance
+PMI = log((co_occur_count × total_docs) / (freq1 × freq2))
 
-# Final weight (only if co_occur_count >= threshold, default: 2)
-weight_CO_OCCURS = co_occur_count × inv_freq_weight
+# Step 4: Apply sigmoid to map PMI to [0, 1]
+scale = 2.0  # Sigmoid steepness parameter
+weight_CO_OCCURS = 1.0 / (1.0 + exp(-PMI / scale))
+
+# Only create edge if co_occur_count >= threshold (default: 2)
+if co_occur_count >= threshold:
+    graph.add_edge(
+        entity1,
+        entity2,
+        edge_type="CO_OCCURS",
+        weight=float(weight),
+        co_occur_count=int(co_occur_count),
+        pmi=float(PMI)
+    )
 ```
 
 **Formula**:
 ```
-weight_CO_OCCURS(e1, e2) = count(e1, e2) × (1 / √(freq(e1) × freq(e2)))
+PMI(e1, e2) = log((count(e1, e2) × N) / (freq(e1) × freq(e2)))
+weight_CO_OCCURS = σ(PMI / scale) = 1 / (1 + exp(-PMI / scale))
 ```
 
+where:
+- `N` = total number of documents
+- `count(e1, e2)` = number of documents containing both entities
+- `freq(e1)`, `freq(e2)` = number of documents containing each entity
+- `scale = 2.0` = sigmoid steepness parameter
+
 **Intuition**:
-- Entities that co-appear frequently have high weight
-- **But** omnipresent entities are penalized (inversely proportional to square root of frequencies)
-- Example: "Trump" and "France" rarely co-appear → high weight if co-occurrence detected
-- Example: "the" and "a" would co-occur often but have low weight due to high frequencies
+- **High PMI (positive)**: Entities co-occur much more than expected by chance → high weight
+  - Example: "Trump" and "White House" appear together often relative to their individual frequencies
+- **Low/negative PMI**: Entities co-occur randomly or less than expected → low weight
+  - Example: Two common entities that just happen to appear in same documents by chance
+- **Sigmoid transformation**: Smoothly maps PMI to [0, 1], handling both positive and negative PMI values
+- **Advantages over count-based**: PMI is independent of corpus size and accounts for entity popularity
 
 ---
 
@@ -308,7 +387,9 @@ weight_CO_PRESENCE(t1, t2) = count(t1, t2) × (1 / √(freq(t1) × freq(t2)))
 
 #### **SEMANTIC_SIM**: Entity ↔ Entity / Theme ↔ Theme
 
-Links semantically similar entities (or themes) via their embeddings.
+Links semantically similar entities or themes via their embeddings.
+
+**Important**: SEMANTIC_SIM edges exist **only between entities** and **between themes**, **NOT between chunks**. Chunk similarity is computed on-the-fly during retrieval, not stored in the graph.
 
 **For entities** (excluding DATE entities):
 
@@ -320,7 +401,7 @@ embeddings = SentenceTransformer.encode(entity_texts, normalize_embeddings=True)
 # Cosine similarity (dot product for normalized embeddings)
 similarity_matrix = embeddings @ embeddings.T
 
-# Edge if sim > threshold (default: 0.6)
+# Edge if sim > threshold (default from config: 0.8)
 for i, j in pairs:
     sim = similarity_matrix[i][j]
     if sim > semantic_similarity_threshold:
@@ -328,7 +409,7 @@ for i, j in pairs:
             entity_i,
             entity_j,
             edge_type="SEMANTIC_SIM",
-            weight=float(sim)  # Range: [0.6, 1.0]
+            weight=float(sim)  # Range: [0.8, 1.0]
         )
 
 # NOTE: DATE entities use TEMPORAL_DIST instead (see below)
@@ -372,7 +453,7 @@ for year1 in years:
         if 0 < year_diff <= max_year_gap:  # default: 10
             # Exponential decay formula
             weight_TEMPORAL_DIST = exp(-decay_rate × year_diff)
-            # default decay_rate: 0.5
+            # default decay_rate: 0.3
 
             graph.add_edge(
                 year_node1,
@@ -389,16 +470,16 @@ weight_TEMPORAL_DIST(y1, y2) = exp(-λ × |y1 - y2|)
 ```
 
 where:
-- `λ` = decay_rate (default: 0.5)
+- `λ` = decay_rate (default from config: 0.15, slower decay)
 - `|y1 - y2|` = absolute year difference
 
-**Examples** (with decay_rate=0.5):
+**Examples** (with decay_rate=0.15 from config):
 - Same year (diff=0): weight = 1.0
-- 1 year difference: weight ≈ 0.61
-- 2 years difference: weight ≈ 0.37
-- 3 years difference: weight ≈ 0.22
-- 5 years difference: weight ≈ 0.08
-- 10 years difference: weight ≈ 0.01
+- 1 year difference: weight ≈ 0.86
+- 2 years difference: weight ≈ 0.74
+- 3 years difference: weight ≈ 0.64
+- 5 years difference: weight ≈ 0.47
+- 10 years difference: weight ≈ 0.22
 
 **Rationale**:
 - Years closer in time are more related than distant years
@@ -851,6 +932,25 @@ AVAILABLE GRAPHS
 ================================================================================
 ```
 
+### Display graph statistics
+
+```bash
+# Show statistics for latest graph
+uv run python cli.py stats
+
+# Show statistics for specific graph
+uv run python cli.py stats --graph-id 20251118_155115
+
+# Show detailed statistics
+uv run python cli.py stats --graph-id 20251118_155115 --detailed
+```
+
+**Output includes**:
+- Total number of nodes and edges
+- Breakdown by node type (document, chunk, theme, entity)
+- Breakdown by edge type (CONTAINS, HAS_TOPIC, MENTIONS, etc.)
+- Graph metadata (creation time, storage type)
+
 ### Retrieval
 
 ```bash
@@ -901,6 +1001,60 @@ uv run python cli.py visualize --mode node --node "doc::0" --graph-id 20251118_1
 - Normalized edge weights displayed
 - Physics simulation for layout
 - Color-coded by node/edge type
+
+### Relabel topics with LLM
+
+If you initially built the graph with `--no-llm-labels` (keyword-based labels), you can retroactively generate more descriptive LLM labels:
+
+```bash
+# Relabel topics with LLM (default model from config)
+uv run python cli.py relabel
+
+# Use specific LLM model
+uv run python cli.py relabel --llm-model llama3.1:latest
+
+# With PostgreSQL storage
+uv run python cli.py relabel --use-postgres
+```
+
+**Note**: This updates the topic labels in the graph and topic model files, replacing keyword-based labels with LLM-generated descriptions.
+
+### Configuration management
+
+```bash
+# Show current configuration
+uv run python cli.py config --show
+
+# Validate configuration files
+uv run python cli.py config --validate
+```
+
+The system uses a three-layer configuration system (see section 3 for details).
+
+### Initialize system
+
+Before first use, initialize the system to create necessary directories and optionally set up PostgreSQL:
+
+```bash
+# Create directory structure
+uv run python cli.py init --dirs
+
+# Initialize PostgreSQL database
+uv run python cli.py init --postgres
+
+# Do both
+uv run python cli.py init --dirs --postgres
+```
+
+**Created directories**:
+- `logs/` - Log files
+- `outputs/` - All output files
+- `outputs/graphs/` - Graph files (.gpickle, .pkl, .faiss)
+- `outputs/visualizations/` - HTML visualizations
+- `outputs/statistics/` - Statistics JSON files
+- `outputs/retrieval_results/` - Retrieval result JSON files
+- `outputs/exports/` - Exported graph files
+- `models/` - Downloaded models (optional)
 
 ---
 

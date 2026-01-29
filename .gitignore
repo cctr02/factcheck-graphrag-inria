@@ -23,3 +23,12 @@ outputs/
 
 # Project specific
 uv.lock
+
+topic_extraction_results/
+
+outputs/
+*.npz
+
+outputs/
+*.npz
+topic_extraction_results/

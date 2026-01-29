@@ -19,6 +19,9 @@ import logging
 from tqdm import tqdm
 import time as time
 from nltk.stem.snowball import SnowballStemmer
+import threading
+import sys
+import types
 
 
 from fact_check_kg.db_connector import GraphDatabaseConnector
@@ -187,6 +190,31 @@ class KnowledgeGraphBuilder:
 
         return entities
 
+    def _show_clustering_progress(self, stop_event, n_samples):
+        """
+        Affiche une barre de progression simulée pendant le clustering HDBSCAN.
+
+        Args:
+            stop_event: Threading event pour arrêter la barre
+            n_samples: Nombre d'échantillons à clustériser
+        """
+        # Estimation du temps basée sur la taille des données
+        # ~0.5-2 secondes pour 1000 samples
+        estimated_time = max(30, int(n_samples * 0.001 * 60))  # en secondes
+
+        with tqdm(total=100, desc="HDBSCAN Clustering", bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}]') as pbar:
+            start = time.time()
+            while not stop_event.is_set():
+                elapsed = time.time() - start
+                # Progress simulé basé sur le temps estimé
+                progress = min(95, int((elapsed / estimated_time) * 100))
+                pbar.n = progress
+                pbar.refresh()
+                time.sleep(0.5)
+            # Compléter à 100% quand fini
+            pbar.n = 100
+            pbar.refresh()
+
     def build_topic_model(
         self,
         chunk_texts: List[str],
@@ -236,22 +264,26 @@ class KnowledgeGraphBuilder:
             verbose=True  # Show UMAP progress
         )
 
-        # Custom HDBSCAN with verbose output
+        # Créer le modèle HDBSCAN standard
+        # Note: prediction_data=True requis pour calculate_probabilities (multi-topic assignment)
+        # Optimisé pour grands datasets avec core_dist_n_jobs=1
         hdbscan_model = HDBSCAN(
             min_cluster_size=min_topic_size,
             metric='euclidean',
             cluster_selection_method='eom',
-            prediction_data=True
+            prediction_data=True,  # Nécessaire pour probabilités multi-topics
+            core_dist_n_jobs=1  # Réduit pics mémoire (séquentiel au lieu de parallèle)
         )
 
         # Initialize BERTopic with custom components
+        # Note: calculate_probabilities=True pour permettre l'assignation multi-topics
         topic_model = BERTopic(
             embedding_model=self.embedding_model,
             umap_model=umap_model,
             hdbscan_model=hdbscan_model,
             vectorizer_model=vectorizer_model,
             nr_topics=nr_topics,
-            calculate_probabilities=True,
+            calculate_probabilities=True,  # Active les probabilités pour chaque chunk-topic
             verbose=True  # Enable verbose mode for progress
         )
 
@@ -259,11 +291,24 @@ class KnowledgeGraphBuilder:
         self.logger.info(f"Starting BERTopic pipeline on {len(chunk_texts)} text chunks...")
         self.logger.info("  → Stage 1/4: Computing embeddings (GPU-accelerated)...")
         self.logger.info("  → Stage 2/4: UMAP dimensionality reduction (kNN-based)...")
-        self.logger.info("  → Stage 3/4: HDBSCAN clustering (no progress bar - typically 30s-2min)...")
-        self.logger.info("  → Stage 4/4: Computing topic probabilities...")
+        self.logger.info("  → Stage 3/4: HDBSCAN clustering (CPU, typically 30s-2min)...")
+
+        # Wrapper pour afficher un message après HDBSCAN
+        original_extract_topics = topic_model._extract_topics
+
+        def extract_topics_with_logging(*args, **kwargs):
+            self.logger.info("  → Stage 4/5: Computing c-TF-IDF representations (CPU-intensive, may take 1-5min)...")
+            self.logger.info("              This step is working even if GPU usage is 0% - please be patient...")
+            return original_extract_topics(*args, **kwargs)
+
+        topic_model._extract_topics = extract_topics_with_logging
 
         topics, probabilities = topic_model.fit_transform(chunk_texts)
 
+        # Restaurer la méthode originale pour permettre le pickle
+        topic_model._extract_topics = original_extract_topics
+
+        self.logger.info("  → Stage 5/5: Topic probabilities computed!")
         self.logger.info("✓ BERTopic pipeline completed!")
 
         n_topics = len(set(topics)) - 1  # excluding outliers
@@ -439,7 +484,7 @@ Topic label:"""
         min_topic_size: int = 10,
         nr_topics: Optional[int] = None,
         use_llm_labels: bool = False
-    ) -> nx.Graph:
+    ) -> Tuple[nx.Graph, np.ndarray, List[str]]:
         """
         Build the complete knowledge graph.
 
@@ -450,11 +495,14 @@ Topic label:"""
             use_llm_labels: Whether to use LLM for topic labeling (default: False)
 
         Returns:
-            NetworkX graph with all nodes and edges
+            Tuple of (graph, topic_probabilities, chunk_ids)
+            - graph: NetworkX graph with all nodes and edges
+            - topic_probabilities: numpy array of shape (n_chunks, n_topics)
+            - chunk_ids: list of chunk IDs matching probability rows
 
         Example:
             >>> chunks = [{"chunk_id": "chunk::0::0", "doc_id": "0", ...}]
-            >>> graph = builder.build_graph(chunks)
+            >>> graph, probs, chunk_ids = builder.build_graph(chunks)
             >>> graph.number_of_nodes()
             150
         """
@@ -514,7 +562,8 @@ Topic label:"""
         self._log_graph_statistics()
         self._save_statistics_reports(topic_model, topics, chunks)
 
-        return self.graph
+        # Return graph, probabilities, and chunk_ids for saving
+        return self.graph, probabilities, chunk_ids
 
     def _add_documents_and_chunks(self, chunks: List[Dict]):
         """Add document and chunk nodes with CONTAINS edges."""
@@ -591,25 +640,34 @@ Topic label:"""
 
         self._log_step_completion("Creating theme nodes", start_time_themes, len(unique_topics))
 
-        # Step 2: Add HAS_TOPIC edges for all topics above threshold
+        # Step 2: Add HAS_TOPIC edges for all topics above threshold OR top-K topics
         start_time_edges = time.time()
         edges_added = 0
+        top_k_topics = 3  # Assign top-3 topics to each chunk for better multi-label coverage
+
         for idx, chunk_id in enumerate(tqdm(chunk_ids, desc="Adding HAS_TOPIC edges", disable=self.logger.level > logging.INFO)):
-            # For each chunk, check ALL topics
-            if probabilities.ndim > 1:
-                # probabilities shape: (n_chunks, n_topics)
-                chunk_probs = probabilities[idx]
-            else:
-                # If only 1D array, skip (shouldn't happen with calculate_probabilities=True)
+            # Skip outliers (topic -1)
+            if topics[idx] == -1:
                 continue
 
-            # Iterate through all topics
-            for topic_id in unique_topics:
-                # Get probability for this chunk-topic pair
-                prob = chunk_probs[topic_id]
+            # Multi-topic assignment avec probabilités
+            if probabilities is not None and probabilities.ndim > 1:
+                # probabilities shape: (n_chunks, n_topics)
+                chunk_probs = probabilities[idx]
 
-                # Only create edge if probability is above threshold
-                if prob >= self.topic_prob_threshold:
+                # Strategy: Use TOP-K topics (with their probabilities as weights)
+                # This ensures every chunk has multiple topics for CO_PRESENCE edges
+
+                # Get top-K topic indices sorted by probability
+                top_k_indices = np.argsort(chunk_probs)[-top_k_topics:][::-1]
+
+                for topic_id in top_k_indices:
+                    prob = chunk_probs[topic_id]
+
+                    # Skip if topic is -1 (outlier) or probability is too low (< 1%)
+                    if topic_id == -1 or prob < 0.01:
+                        continue
+
                     theme_node = f"theme::{topic_id}"
 
                     # Add edge with probability weight
@@ -620,8 +678,18 @@ Topic label:"""
                         weight=float(prob)
                     )
                     edges_added += 1
+            else:
+                # Fallback: Hard assignment si pas de probabilités
+                theme_node = f"theme::{topics[idx]}"
+                self.graph.add_edge(
+                    chunk_id,
+                    theme_node,
+                    edge_type="HAS_TOPIC",
+                    weight=1.0
+                )
+                edges_added += 1
 
-        self._log_step_completion("Adding HAS_TOPIC edges", start_time_edges, edges_added)
+        self._log_step_completion("Adding HAS_TOPIC edges (top-3 per chunk)", start_time_edges, edges_added)
 
     def _add_entities_and_mentions(self, chunks: List[Dict]) -> Dict[str, Set[str]]:
         """
@@ -665,20 +733,25 @@ Topic label:"""
             idf = np.log(total_chunks / len(chunks_with_entity))
             entity_idf[entity_node] = idf
 
-        # Step 3: Calculate all TF-IDF weights first to find max for normalization
-        all_tf_idf_weights = []
-        for entity_node, chunks_with_counts in entity_mentions_in_chunks.items():
-            idf = entity_idf[entity_node]
-            for chunk_id, tf in chunks_with_counts.items():
-                tf_idf = tf * idf
-                all_tf_idf_weights.append(tf_idf)
+        # Step 3: Calculate max_TF per chunk for local normalization
+        chunk_max_tf = {}
+        for chunk in chunks:
+            chunk_id = chunk['chunk_id']
+            # Get all TF values for entities in this chunk
+            tf_values = []
+            for entity_node, chunks_with_counts in entity_mentions_in_chunks.items():
+                if chunk_id in chunks_with_counts:
+                    tf_values.append(chunks_with_counts[chunk_id])
 
-        # Find max TF-IDF for normalization
-        max_tf_idf = max(all_tf_idf_weights) if all_tf_idf_weights else 1.0
-        self.logger.info(f"Max TF-IDF weight: {max_tf_idf:.4f}, normalizing to [0, 1]")
+            # Store max TF for this chunk
+            chunk_max_tf[chunk_id] = max(tf_values) if tf_values else 1.0
 
-        # Step 4: Add entity nodes and MENTIONS edges with normalized weights
+        self.logger.info(f"Calculated max TF for {len(chunk_max_tf)} chunks")
+
+        # Step 4: Add entity nodes and MENTIONS edges with hybrid sigmoid weights
         start_time_mentions = time.time()
+        scale = 3.0  # Sigmoid scale parameter (controls curve steepness)
+
         for entity_node in tqdm(entity_mentions_in_chunks.keys(), desc="Adding entities and MENTIONS edges", disable=self.logger.level > logging.INFO):
             # Extract entity info from node name
             parts = entity_node.split("::")
@@ -694,19 +767,24 @@ Topic label:"""
                     entity_text=entity_text
                 )
 
-            # Add MENTIONS edges with normalized weight (0 to 1)
+            # Add MENTIONS edges with hybrid sigmoid weight
             idf = entity_idf[entity_node]
             for chunk_id, tf in entity_mentions_in_chunks[entity_node].items():
-                # TF-IDF = TF * IDF
-                tf_idf = tf * idf
-                # Normalize to [0, 1]
-                normalized_weight = tf_idf / max_tf_idf
+                # Normalize TF locally within chunk
+                max_tf_in_chunk = chunk_max_tf.get(chunk_id, 1.0)
+                normalized_tf = tf / max_tf_in_chunk
+
+                # Calculate raw weight (local importance × global rarity)
+                raw_weight = normalized_tf * idf
+
+                # Apply sigmoid transformation to [0, 1]
+                weight = 1.0 / (1.0 + np.exp(-raw_weight / scale))
 
                 self.graph.add_edge(
                     chunk_id,
                     entity_node,
                     edge_type="MENTIONS",
-                    weight=float(normalized_weight)
+                    weight=float(weight)
                 )
 
         self._log_step_completion("Adding entities and MENTIONS edges", start_time_mentions, len(entity_mentions_in_chunks))
@@ -759,10 +837,12 @@ Topic label:"""
             self.logger.warning("No entity co-occurrences found")
             return
 
-        # Add edges above threshold with weighted score
+        # Add edges above threshold with PMI-based weighted score
         start_time_add = time.time()
         edges_added = 0
-        edges_skipped_date_date = 0
+        total_docs = len(doc_to_entities)
+        scale = 2.0  # Sigmoid scale parameter for PMI
+
         for (entity1, entity2), co_occur_count in tqdm(co_occur_counter.items(), desc="Adding CO_OCCURS edges", disable=self.logger.level > logging.INFO):
             if co_occur_count >= self.co_occur_threshold:
                 # Skip DATE-DATE co-occurrences (they use TEMPORAL_DIST edges instead)
@@ -777,14 +857,15 @@ Topic label:"""
                 freq1 = entity_document_frequency[entity1]
                 freq2 = entity_document_frequency[entity2]
 
-                # Inverse frequency weight (penalize entities that appear everywhere)
-                # Using sqrt to soften the penalty
-                inv_freq_weight = 1.0 / np.sqrt(freq1 * freq2)
+                # Calculate PMI (Pointwise Mutual Information)
+                # PMI = log((co_occur × total) / (freq1 × freq2))
+                # Measures how much more often entities co-occur than expected by chance
+                pmi = np.log((co_occur_count * total_docs) / (freq1 * freq2))
 
-                # Final weight: co-occurrence count weighted by entity rarity
-                # High co-occurrence = high weight
-                # But penalized if entities appear in too many documents
-                weight = co_occur_count * inv_freq_weight
+                # Apply sigmoid to map PMI to [0, 1]
+                # High PMI (rare entities co-occurring) → high weight
+                # Low/negative PMI (common entities, random co-occurrence) → low weight
+                weight = 1.0 / (1.0 + np.exp(-pmi / scale))
 
                 self.graph.add_edge(
                     entity1,
@@ -794,7 +875,7 @@ Topic label:"""
                     co_occur_count=int(co_occur_count),
                     entity1_freq=int(freq1),
                     entity2_freq=int(freq2),
-                    inv_freq_weight=float(inv_freq_weight)
+                    pmi=float(pmi)
                 )
                 edges_added += 1
 
@@ -841,11 +922,20 @@ Topic label:"""
             for j in range(i + 1, len(entity_nodes)):
                 sim = similarity_matrix[i, j]
                 if sim >= self.semantic_sim_threshold:
+                    # Clamp to [0, 1] to fix floating-point rounding errors
+                    # If sim is slightly above 1.0 (e.g., 1.0000006), set to 1.0
+                    if sim > 1.0 and sim <= 1.001:
+                        sim = 1.0
+                    elif sim > 1.001:
+                        self.logger.warning(f"Similarity value {sim} > 1.001 detected, clamping to 1.0")
+                        sim = 1.0
+
                     self.graph.add_edge(
                         entity_nodes[i],
                         entity_nodes[j],
                         edge_type="SEMANTIC_SIM",
-                        weight=float(sim)
+                        weight=float(sim),
+                        semantic_type="entity"  # Mark as entity-entity similarity
                     )
                     edge_count += 1
 
@@ -974,11 +1064,19 @@ Topic label:"""
             for j in range(i + 1, len(theme_nodes)):
                 sim = similarity_matrix[i, j]
                 if sim >= self.semantic_sim_threshold:
+                    # Clamp to [0, 1] to fix floating-point rounding errors
+                    if sim > 1.0 and sim <= 1.001:
+                        sim = 1.0
+                    elif sim > 1.001:
+                        self.logger.warning(f"Theme similarity value {sim} > 1.001 detected, clamping to 1.0")
+                        sim = 1.0
+
                     self.graph.add_edge(
                         theme_nodes[i],
                         theme_nodes[j],
                         edge_type="SEMANTIC_SIM",
-                        weight=float(sim)
+                        weight=float(sim),
+                        semantic_type="theme"  # Mark as theme-theme similarity
                     )
                     edge_count += 1
 
@@ -1072,14 +1170,39 @@ Topic label:"""
         for ntype, count in sorted(node_types.items()):
             self.logger.info(f"  {ntype}: {count}")
 
-        # Edge counts by type
+        # Edge counts by type (with SEMANTIC_SIM breakdown)
         edge_types = defaultdict(int)
+        semantic_sim_entity = 0
+        semantic_sim_theme = 0
+
         for u, v, data in self.graph.edges(data=True):
-            edge_types[data.get('edge_type', 'unknown')] += 1
+            edge_type = data.get('edge_type', 'unknown')
+            if edge_type == 'SEMANTIC_SIM':
+                # Separate SEMANTIC_SIM by semantic_type attribute
+                sem_type = data.get('semantic_type', 'unknown')
+                if sem_type == 'entity':
+                    semantic_sim_entity += 1
+                elif sem_type == 'theme':
+                    semantic_sim_theme += 1
+                else:
+                    edge_types[edge_type] += 1
+            else:
+                edge_types[edge_type] += 1
 
         self.logger.info(f"\nTotal edges: {self.graph.number_of_edges()}")
         for etype, count in sorted(edge_types.items()):
+            if etype == 'SEMANTIC_SIM':
+                continue  # Skip, we'll show breakdown
             self.logger.info(f"  {etype}: {count}")
+
+        # Show SEMANTIC_SIM breakdown
+        if semantic_sim_entity > 0 or semantic_sim_theme > 0:
+            total_sem = semantic_sim_entity + semantic_sim_theme
+            self.logger.info(f"  SEMANTIC_SIM (total): {total_sem}")
+            if semantic_sim_entity > 0:
+                self.logger.info(f"    - Entity-Entity: {semantic_sim_entity}")
+            if semantic_sim_theme > 0:
+                self.logger.info(f"    - Theme-Theme: {semantic_sim_theme}")
 
         self.logger.info("=" * 60)
 
@@ -1123,10 +1246,20 @@ Topic label:"""
             node_type = data.get('type', 'unknown')
             general_stats["nodes_by_type"][node_type] = general_stats["nodes_by_type"].get(node_type, 0) + 1
 
-        # Count edges by type
+        # Count edges by type (with SEMANTIC_SIM breakdown)
         for u, v, data in self.graph.edges(data=True):
             edge_type = data.get('edge_type', 'unknown')
-            general_stats["edges_by_type"][edge_type] = general_stats["edges_by_type"].get(edge_type, 0) + 1
+            if edge_type == 'SEMANTIC_SIM':
+                # Separate SEMANTIC_SIM by semantic_type
+                sem_type = data.get('semantic_type', 'unknown')
+                if sem_type == 'entity':
+                    general_stats["edges_by_type"]["SEMANTIC_SIM_ENTITY"] = general_stats["edges_by_type"].get("SEMANTIC_SIM_ENTITY", 0) + 1
+                elif sem_type == 'theme':
+                    general_stats["edges_by_type"]["SEMANTIC_SIM_THEME"] = general_stats["edges_by_type"].get("SEMANTIC_SIM_THEME", 0) + 1
+                else:
+                    general_stats["edges_by_type"][edge_type] = general_stats["edges_by_type"].get(edge_type, 0) + 1
+            else:
+                general_stats["edges_by_type"][edge_type] = general_stats["edges_by_type"].get(edge_type, 0) + 1
 
         # Save general statistics
         with open(stats_dir / f"general_stats_{timestamp}.json", 'w') as f:

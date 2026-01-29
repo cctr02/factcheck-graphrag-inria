@@ -11,6 +11,7 @@ import logging
 import pickle
 import argparse
 import json
+import numpy as np
 from datetime import datetime
 from pathlib import Path
 
@@ -185,7 +186,7 @@ def main():
     else:
         logger.info("Using keyword-based topic labels (top 3 words)")
 
-    graph = builder.build_graph(
+    graph, topic_probabilities, chunk_ids = builder.build_graph(
         chunks=chunks,
         min_topic_size=config.graph_construction.min_topic_size,
         nr_topics=config.graph_construction.nr_topics,
@@ -225,6 +226,16 @@ def main():
     with open(topic_model_path, 'wb') as f:
         pickle.dump(builder.topic_model, f)
     logger.info(f"Topic model saved to: {topic_model_path}")
+
+    # 2b. Save topic probabilities for efficient retrieval
+    topic_probs_filename = f"topic_probs_{timestamp}.npz"
+    topic_probs_path = graphs_dir / topic_probs_filename
+    np.savez_compressed(
+        topic_probs_path,
+        probabilities=topic_probabilities,
+        chunk_ids=chunk_ids
+    )
+    logger.info(f"Topic probabilities saved to: {topic_probs_path} (shape: {topic_probabilities.shape})")
 
     # 3. Save chunk embeddings to FAISS index
     logger.info("Computing and saving chunk embeddings to FAISS...")

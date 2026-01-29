@@ -60,7 +60,7 @@ class RetrievalConfig:
 
     # Retrieval parameters
     top_k: int = 10
-    theme_threshold: float = 0.1  # Min confidence for theme detection
+    theme_threshold: float = 0.01  # Min confidence for theme detection (lowered for graphs with fewer topics)
 
     # Path penalties (already in edge weights, kept for reference)
     direct_path_weight: float = 1.0

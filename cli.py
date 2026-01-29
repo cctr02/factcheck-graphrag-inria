@@ -6,9 +6,13 @@ Centralized command-line interface for all Knowledge Graph operations.
 
 Usage:
     python cli.py build --help
+    python cli.py list-graphs
+    python cli.py stats --help
     python cli.py visualize --help
     python cli.py retrieve --help
-    python cli.py export --help
+    python cli.py relabel --help
+    python cli.py config --help
+    python cli.py init --help
 """
 
 import click

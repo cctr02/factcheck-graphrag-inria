@@ -16,7 +16,7 @@ graph_construction:
   chunk_overlap: 100  # Overlap between chunks in characters
 
   # Topic modeling (BERTopic)
-  min_topic_size: 10  # Minimum size for a topic
+  min_topic_size: 25  # Minimum size for a topic (trade-off between granularity and number of topics)
   nr_topics: null  # Number of topics (null = auto-detect)
   topic_probability_threshold: 0.15  # Minimum probability to create HAS_TOPIC edge
 
@@ -26,7 +26,8 @@ graph_construction:
 
   # Temporal similarity (for DATE entities)
   temporal_max_year_gap: 10  # Maximum year difference to create TEMPORAL_DIST edges
-  temporal_decay_rate: 0.5  # Exponential decay rate for temporal similarity (weight = exp(-rate * year_diff))
+  temporal_decay_rate: 0.15  # Exponential decay rate for temporal similarity (weight = exp(-rate * year_diff))
+  # Lower rate = slower decay (0.15 recommended: 1yr→0.86, 5yr→0.47, 10yr→0.22)
 
   # Topic keyword processing
   topic_keywords_initial: 15  # Number of keywords to retrieve from BERTopic initially
