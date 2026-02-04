@@ -18,7 +18,7 @@ paths:
   exports_dir: "outputs/exports"
 
   # Logs directory
-  logs_dir: "logs"
+  logs_dir: "outputs/logs"
 
 # ============================================================================
 # MODEL CONFIGURATION

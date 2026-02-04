@@ -251,6 +251,8 @@ def visualize(mode, node, max_nodes, output, graph_id, use_postgres, graph_file)
               help='Weight for entity score (default: from config_retrieval.yaml)')
 @click.option('--delta', type=float, default=None,
               help='Weight for topic distribution score (default: from config_retrieval.yaml)')
+@click.option('--epsilon', type=float, default=None,
+              help='Weight for claim-document score (default: from config_retrieval.yaml)')
 @click.option('--top-k', type=int, default=None,
               help='Number of results (default: from config_retrieval.yaml)')
 @click.option('--graph-id', type=str, default=None,
@@ -263,15 +265,18 @@ def visualize(mode, node, max_nodes, output, graph_id, use_postgres, graph_file)
               help='Save results to files (default: True)')
 @click.option('--name', type=str, default=None,
               help='Custom name for this retrieval (e.g., "test1"). If not specified, uses _1, _2, etc.')
-def retrieve(claim, alpha, beta, gamma, delta, top_k, graph_id, use_postgres, top_n, save_results, name):
+def retrieve(claim, alpha, beta, gamma, delta, epsilon, top_k, graph_id, use_postgres, top_n, save_results, name):
     """
     Retrieve relevant chunks for a fact-checking claim with detailed scoring.
 
-    Uses 4 retrieval strategies:
+    Uses 5 retrieval strategies:
     - Semantic (alpha): Embedding similarity
     - Thematic (beta): Topic-based graph traversal
     - Entity (gamma): Entity-based graph traversal
     - Topic Distribution (delta): Jensen-Shannon divergence
+    - Claim-Document (epsilon): Chunks from documents linked to similar claims
+
+    Weights must sum to 1.0.
 
     Results are saved as:
     - results_{graph_id}_1.json/txt (auto-incremented)
@@ -309,7 +314,9 @@ def retrieve(claim, alpha, beta, gamma, delta, top_k, graph_id, use_postgres, to
     beta = beta or retrieval_config.retrieval.beta
     gamma = gamma or retrieval_config.retrieval.gamma
     delta = delta or retrieval_config.retrieval.delta
+    epsilon = epsilon or retrieval_config.retrieval.epsilon
     top_k = top_k or retrieval_config.retrieval.top_k
+    claim_top_k = retrieval_config.retrieval.claim_top_k
 
     # Get claim
     if not claim:
@@ -422,10 +429,12 @@ def retrieve(claim, alpha, beta, gamma, delta, top_k, graph_id, use_postgres, to
             beta=beta,
             gamma=gamma,
             delta=delta,
+            epsilon=epsilon,
             top_k=top_k,
             theme_threshold=retrieval_config.retrieval.theme_threshold,
             entity_relevance_threshold=retrieval_config.retrieval.entity_relevance_threshold,
             theme_relevance_threshold=retrieval_config.retrieval.theme_relevance_threshold,
+            claim_top_k=claim_top_k,
             graph_id=graph_id,
             cache_dir=retrieval_config.paths.embeddings_dir,
             models_dir=retrieval_config.paths.models_dir,

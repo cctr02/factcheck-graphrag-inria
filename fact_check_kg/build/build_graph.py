@@ -7,7 +7,6 @@ multi-level knowledge graph with documents, chunks, themes, and entities.
 
 import os
 import sys
-import logging
 import pickle
 import argparse
 import json
@@ -19,26 +18,9 @@ from pathlib import Path
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from fact_check_kg.core.config_loader import get_build_config, load_raw_config
+from fact_check_kg.core.logger import get_logger
 from fact_check_kg.build.data_loader import load_and_chunk_documents, load_claims
 from fact_check_kg.build.graph_builder import KnowledgeGraphBuilder
-
-
-def setup_logging(log_level: str = "INFO") -> logging.Logger:
-    """
-    Setup logging configuration.
-
-    Args:
-        log_level: Logging level (DEBUG, INFO, WARNING, ERROR)
-
-    Returns:
-        Logger instance
-    """
-    logging.basicConfig(
-        level=getattr(logging, log_level.upper()),
-        format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    return logging.getLogger("build_graph")
 
 
 def main():
@@ -116,8 +98,8 @@ def main():
     # Load build configuration
     config = get_build_config()
 
-    # Setup logging
-    logger = setup_logging(args.log_level)
+    # Setup logging using centralized logger
+    logger = get_logger("build_graph", args.log_level)
 
     logger.info("=" * 60)
     logger.info("KNOWLEDGE GRAPH BUILDER")

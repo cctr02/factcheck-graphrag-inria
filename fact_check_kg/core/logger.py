@@ -10,10 +10,30 @@ This module provides a unified logging configuration with:
 
 import logging
 import sys
+import yaml
 from pathlib import Path
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from typing import Optional
+
+
+def _get_logs_dir_from_config() -> Path:
+    """
+    Read logs directory from config.yaml.
+
+    Returns:
+        Path to logs directory from config, or default 'outputs/logs' if not found.
+    """
+    try:
+        config_path = Path(__file__).parent.parent.parent / "config" / "config.yaml"
+        if config_path.exists():
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f) or {}
+            logs_dir = config.get('paths', {}).get('logs_dir', 'outputs/logs')
+            return Path(logs_dir)
+    except Exception:
+        pass
+    return Path("outputs/logs")
 
 
 class ColoredFormatter(logging.Formatter):
@@ -68,8 +88,8 @@ class LoggerManager:
     def __init__(self):
         """Initialize the logger manager (only once)."""
         if not LoggerManager._initialized:
-            self.logs_dir = Path("logs")
-            self.logs_dir.mkdir(exist_ok=True)
+            self.logs_dir = _get_logs_dir_from_config()
+            self.logs_dir.mkdir(parents=True, exist_ok=True)
             self.loggers = {}
             LoggerManager._initialized = True
 

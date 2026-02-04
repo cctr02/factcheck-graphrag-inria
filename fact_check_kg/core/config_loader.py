@@ -85,6 +85,7 @@ class RetrievalConfig:
     beta: float
     gamma: float
     delta: float
+    epsilon: float
     top_k: int
     theme_threshold: float
     entity_relevance_threshold: float
@@ -92,10 +93,11 @@ class RetrievalConfig:
     direct_path_weight: float
     co_occurrence_path_weight: float
     theme_path_weight: float
+    claim_top_k: int = 5
 
     def __post_init__(self):
         """Validate that weights sum to 1.0."""
-        total = self.alpha + self.beta + self.gamma + self.delta
+        total = self.alpha + self.beta + self.gamma + self.delta + self.epsilon
         if abs(total - 1.0) > 0.01:
             raise ConfigError(f"Retrieval weights must sum to 1.0, got {total}")
 

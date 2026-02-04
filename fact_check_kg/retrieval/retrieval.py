@@ -6,6 +6,7 @@ This module implements a hybrid retrieval strategy combining:
 2. Topic Distribution Similarity (Jensen-Shannon divergence)
 3. Thematic Graph Traversal (BFS over theme graph)
 4. Entity Graph Traversal (BFS over entity graph)
+5. Claim-Document Retrieval (semantic similarity with claims, then linked documents)
 """
 
 import networkx as nx
@@ -24,13 +25,14 @@ class HybridRetriever:
     """
     Hybrid retrieval system for fact-checking claims.
 
-    Combines four retrieval strategies:
+    Combines five retrieval strategies:
     - Strategy 1 (Semantic Similarity): Direct embedding similarity
     - Strategy 2 (Topic Distribution Similarity): Jensen-Shannon divergence between topic distributions
     - Strategy 3 (Thematic Graph Traversal): BFS over theme graph
     - Strategy 4 (Entity Graph Traversal): BFS over entity graph
+    - Strategy 5 (Claim-Document Retrieval): Chunks from documents linked to semantically similar claims
 
-    The final score is a weighted combination of all four.
+    The final score is a weighted combination of all five (weights must sum to 1.0).
     """
 
     def __init__(
@@ -40,14 +42,16 @@ class HybridRetriever:
         embedding_model: SentenceTransformer,
         nlp: spacy.Language,
         entity_types: List[str],
-        alpha: float = 0.3,
+        alpha: float = 0.25,
         beta: float = 0.2,
-        gamma: float = 0.3,
-        delta: float = 0.2,
+        gamma: float = 0.25,
+        delta: float = 0.15,
+        epsilon: float = 0.15,
         top_k: int = 10,
         theme_threshold: float = 0.01,
         entity_relevance_threshold: float = 0.1,
         theme_relevance_threshold: float = 0.1,
+        claim_top_k: int = 5,
         graph_id: Optional[str] = None,
         cache_dir: Optional[str] = None,
         models_dir: Optional[str] = None,
@@ -63,14 +67,16 @@ class HybridRetriever:
             embedding_model: SentenceTransformer model
             nlp: spaCy model for entity extraction
             entity_types: List of entity types to extract
-            alpha: Weight for semantic score (S1, default: 0.3)
+            alpha: Weight for semantic score (S1, default: 0.25)
             beta: Weight for topic distribution score (S2, default: 0.2)
-            gamma: Weight for thematic score (S3, default: 0.3)
-            delta: Weight for entity score (S4, default: 0.2)
+            gamma: Weight for thematic score (S3, default: 0.25)
+            delta: Weight for entity score (S4, default: 0.15)
+            epsilon: Weight for claim-document score (S5, default: 0.15)
             top_k: Number of chunks to return
             theme_threshold: Minimum confidence for theme detection
             entity_relevance_threshold: Minimum relevance to continue entity traversal
             theme_relevance_threshold: Minimum relevance to continue theme traversal
+            claim_top_k: Number of top claims to consider for Strategy 5
             graph_id: Optional graph ID for loading cached data
             cache_dir: Optional directory containing FAISS embeddings cache
             models_dir: Optional directory containing topic models and probabilities
@@ -89,12 +95,14 @@ class HybridRetriever:
         self.beta = beta
         self.gamma = gamma
         self.delta = delta
+        self.epsilon = epsilon
 
         # Parameters
         self.top_k = top_k
         self.theme_threshold = theme_threshold
         self.entity_relevance_threshold = entity_relevance_threshold
         self.theme_relevance_threshold = theme_relevance_threshold
+        self.claim_top_k = claim_top_k
 
         # Cache parameters
         self.graph_id = graph_id
@@ -107,6 +115,7 @@ class HybridRetriever:
         self.logger.info("Pre-computing chunk embeddings and topic distributions...")
         self._precompute_chunk_embeddings(graph_id, cache_dir)
         self._precompute_chunk_topic_distributions(graph_id, models_dir)
+        self._precompute_claim_embeddings()
 
     def _precompute_chunk_embeddings(self, graph_id: Optional[str] = None, cache_dir: Optional[str] = None):
         """
@@ -220,6 +229,40 @@ class HybridRetriever:
 
         self.logger.info(f"Pre-computed topic distributions for {len(self.chunk_nodes)} chunks")
         self.logger.info(f"Number of topics: {chunk_topic_probs.shape[1]}")
+
+    def _precompute_claim_embeddings(self):
+        """
+        Pre-compute embeddings for all claim nodes in the graph.
+
+        Used by Strategy 5 (Claim-Document retrieval) to find semantically
+        similar claims to the query.
+        """
+        # Get all claim nodes
+        self.claim_nodes = [
+            n for n, d in self.graph.nodes(data=True)
+            if d.get('type') == 'claim'
+        ]
+
+        if not self.claim_nodes:
+            self.logger.warning("No claim nodes found in graph. Strategy 5 will be disabled.")
+            self.claim_embeddings = None
+            self.claim_texts = []
+            return
+
+        self.claim_texts = [
+            self.graph.nodes[n].get('text', '')
+            for n in self.claim_nodes
+        ]
+
+        # Compute embeddings for all claims
+        self.logger.info(f"Computing embeddings for {len(self.claim_nodes)} claims...")
+        self.claim_embeddings = self.embedding_model.encode(
+            self.claim_texts,
+            show_progress_bar=True,
+            normalize_embeddings=True
+        )
+
+        self.logger.info(f"Pre-computed embeddings for {len(self.claim_nodes)} claims")
 
     def extract_entities(self, text: str) -> List[Tuple[str, str]]:
         """
@@ -642,9 +685,95 @@ class HybridRetriever:
 
         return scores
 
+    def retrieve_claim_document(self, query: str) -> Dict[str, float]:
+        """
+        Strategy 5: Claim-Document Retrieval.
+
+        Finds claims semantically similar to the query, then retrieves chunks
+        from documents linked to those claims via REVIEWS edges.
+
+        Args:
+            query: Query text to match against claims
+
+        Returns:
+            Dictionary mapping chunk_id to score based on claim similarity
+        """
+        self.logger.info("\n--- Strategy 5: Claim-Document Retrieval ---")
+
+        # Check if claims exist
+        if self.claim_embeddings is None or len(self.claim_nodes) == 0:
+            self.logger.warning("No claims in graph, skipping Strategy 5")
+            return {}
+
+        # Embed query
+        query_embedding = self.embedding_model.encode(
+            [query],
+            normalize_embeddings=True
+        )[0]
+
+        # Compute similarities with all claims
+        similarities = np.matmul(self.claim_embeddings, query_embedding)
+
+        # Get top-k claims
+        top_indices = np.argsort(similarities)[-self.claim_top_k:][::-1]
+
+        self.logger.info(f"Top {self.claim_top_k} claims by similarity:")
+        top_claims_with_scores = []
+        for idx in top_indices:
+            claim_node = self.claim_nodes[idx]
+            sim = similarities[idx]
+            claim_text = self.claim_texts[idx][:100] + "..." if len(self.claim_texts[idx]) > 100 else self.claim_texts[idx]
+            self.logger.info(f"  {claim_node}: {sim:.3f} - {claim_text}")
+            top_claims_with_scores.append((claim_node, float(sim)))
+
+        # Get documents linked to these claims via REVIEWS edges
+        doc_scores = {}  # doc_node -> max similarity score
+        for claim_node, sim in top_claims_with_scores:
+            for neighbor in self.graph.neighbors(claim_node):
+                edge_data = self.graph[claim_node][neighbor]
+                if edge_data.get('edge_type') == 'REVIEWS':
+                    # neighbor is a document node
+                    if self.graph.nodes[neighbor].get('type') == 'document':
+                        if neighbor not in doc_scores:
+                            doc_scores[neighbor] = sim
+                        else:
+                            doc_scores[neighbor] = max(doc_scores[neighbor], sim)
+
+        self.logger.info(f"Found {len(doc_scores)} documents linked to top claims")
+
+        # Get chunks from these documents via CONTAINS edges
+        scores = {}
+        for doc_node, doc_sim in doc_scores.items():
+            for neighbor in self.graph.neighbors(doc_node):
+                edge_data = self.graph[doc_node][neighbor]
+                if (edge_data.get('edge_type') == 'CONTAINS' and
+                    self.graph.nodes[neighbor].get('type') == 'chunk'):
+                    # Score = semantic similarity between query and claim
+                    chunk_id = neighbor
+                    if chunk_id not in scores:
+                        scores[chunk_id] = doc_sim
+                    else:
+                        scores[chunk_id] = max(scores[chunk_id], doc_sim)
+
+        # Normalize scores (min-max)
+        if scores:
+            min_score = min(scores.values())
+            max_score = max(scores.values())
+            if max_score > min_score:
+                scores = {
+                    k: (v - min_score) / (max_score - min_score)
+                    for k, v in scores.items()
+                }
+
+        self.logger.info(f"Found {len(scores)} chunks via claim-document retrieval")
+        if scores:
+            self.logger.info(f"Top score: {max(scores.values()):.3f}")
+
+        return scores
+
     def retrieve(self, claim: str) -> List[Dict]:
         """
-        Hybrid retrieval: combine all four strategies.
+        Hybrid retrieval: combine all five strategies.
 
         Args:
             claim: Claim text to verify
@@ -659,6 +788,7 @@ class HybridRetriever:
             - score_theme: float (thematic score)
             - score_entity: float (entity score)
             - score_topic_dist: float (topic distribution score)
+            - score_claim_doc: float (claim-document score)
             - claim: str (the original claim)
             - config: Dict (complete configuration used for retrieval, included in first result only)
             - retrieval_timestamp: str (ISO format timestamp, included in first result only)
@@ -682,12 +812,15 @@ class HybridRetriever:
         # Strategy 4: Entity Graph Traversal
         S4 = self.retrieve_entity(claim)
 
+        # Strategy 5: Claim-Document Retrieval
+        S5 = self.retrieve_claim_document(claim)
+
         # Fusion: combine scores
-        all_chunks = set(S1.keys()) | set(S2.keys()) | set(S3.keys()) | set(S4.keys())
+        all_chunks = set(S1.keys()) | set(S2.keys()) | set(S3.keys()) | set(S4.keys()) | set(S5.keys())
 
         self.logger.info("\n--- Fusion ---")
         self.logger.info(f"Total unique chunks: {len(all_chunks)}")
-        self.logger.info(f"Weights: alpha={self.alpha}, beta={self.beta}, gamma={self.gamma}, delta={self.delta}")
+        self.logger.info(f"Weights: alpha={self.alpha}, beta={self.beta}, gamma={self.gamma}, delta={self.delta}, epsilon={self.epsilon}")
 
         results = []
         for chunk_id in all_chunks:
@@ -695,13 +828,15 @@ class HybridRetriever:
             score_topic_dist = S2.get(chunk_id, 0)
             score_theme = S3.get(chunk_id, 0)
             score_entity = S4.get(chunk_id, 0)
+            score_claim_doc = S5.get(chunk_id, 0)
 
             # Final weighted score
             final_score = (
                 self.alpha * score_sem +
                 self.beta * score_topic_dist +
                 self.gamma * score_theme +
-                self.delta * score_entity
+                self.delta * score_entity +
+                self.epsilon * score_claim_doc
             )
 
             # Get document ID
@@ -716,7 +851,8 @@ class HybridRetriever:
                 'score_sem': score_sem,
                 'score_theme': score_theme,
                 'score_entity': score_entity,
-                'score_topic_dist': score_topic_dist
+                'score_topic_dist': score_topic_dist,
+                'score_claim_doc': score_claim_doc
             })
 
         # Sort by total score
@@ -737,7 +873,8 @@ class HybridRetriever:
                 f"Sem: {result['score_sem']:.3f} | "
                 f"Theme: {result['score_theme']:.3f} | "
                 f"Entity: {result['score_entity']:.3f} | "
-                f"TopicDist: {result['score_topic_dist']:.3f}"
+                f"TopicDist: {result['score_topic_dist']:.3f} | "
+                f"ClaimDoc: {result['score_claim_doc']:.3f}"
             )
 
         # Display text previews of top 3 results
