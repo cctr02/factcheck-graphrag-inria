@@ -25,6 +25,7 @@ class PathsConfig:
     graphs_dir: str
     visualizations_dir: str
     models_dir: str
+    embeddings_dir: str
     exports_dir: str
     logs_dir: str
 

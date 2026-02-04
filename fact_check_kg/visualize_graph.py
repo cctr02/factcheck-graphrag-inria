@@ -23,7 +23,7 @@ import json
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
 from fact_check_kg.db_connector import GraphDatabaseConnector
-from fact_check_kg.config import DatabaseConfig
+from fact_check_kg.config_loader import DatabaseConfig
 
 
 def summarize_chunk_with_ollama(chunk_text: str, model: str = "llama3.1:latest", max_length: int = 30) -> str:

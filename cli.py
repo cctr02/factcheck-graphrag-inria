@@ -56,16 +56,13 @@ def cli():
               help='Overlap between chunks (default: from config_build.yaml)')
 @click.option('--use-postgres', is_flag=True,
               help='Save graph to PostgreSQL instead of pickle')
-@click.option('--no-llm-labels', is_flag=True,
-              help='Use keyword-based topic labels instead of LLM (faster but less descriptive)')
 @click.option('--log-level', type=click.Choice(['DEBUG', 'INFO', 'WARNING', 'ERROR']),
               default='INFO', help='Logging level')
-def build(max_docs, chunk_size, chunk_overlap, use_postgres, no_llm_labels, log_level):
+def build(max_docs, chunk_size, chunk_overlap, use_postgres, log_level):
     """
     Build the knowledge graph from CSV data.
 
-    By default, uses LLM to generate topic labels (more descriptive).
-    Use --no-llm-labels for keyword-based labels (top 3 words, faster).
+    Requires Ollama running for LLM-based topic labeling.
 
     Graph files are saved with a timestamp ID (e.g., graph_20251118_155115.gpickle).
     """
@@ -100,15 +97,12 @@ def build(max_docs, chunk_size, chunk_overlap, use_postgres, no_llm_labels, log_
     if use_postgres:
         cmd.extend([
             "--use-postgres",
-            "--db-host", config.database.host,
-            "--db-port", str(config.database.port),
-            "--db-name", config.database.database,
-            "--db-user", config.database.user,
-            "--db-password", config.database.password
+            "--db-host", build_config.database.host,
+            "--db-port", str(build_config.database.port),
+            "--db-name", build_config.database.database,
+            "--db-user", build_config.database.user,
+            "--db-password", build_config.database.password
         ])
-
-    if not no_llm_labels:
-        cmd.append("--use-llm-labels")
 
     try:
         result = subprocess.run(cmd, check=True, capture_output=False)
@@ -158,7 +152,7 @@ def visualize(mode, node, max_nodes, output, graph_id, use_postgres, graph_file)
     """
     import subprocess
     from fact_check_kg.visualize_graph import analyze_graph_stats
-    from fact_check_kg.config import DatabaseConfig
+    from fact_check_kg.config_loader import DatabaseConfig
 
     # Load retrieval configuration and initialize logger
     config = get_retrieval_config()
@@ -346,11 +340,11 @@ def retrieve(claim, alpha, beta, gamma, delta, top_k, graph_id, use_postgres, to
             graph_id_str = f" (graph_id: {graph_id})" if graph_id else ""
             logger.info(f"Graph loaded from PostgreSQL{graph_id_str}: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
 
-            # Load topic model with graph_id if specified
+            # Load topic model with graph_id if specified (from models_dir)
             if graph_id:
-                topic_model_path = Path(f"{retrieval_config.paths.graphs_dir}/topic_model_{graph_id}.pkl")
+                topic_model_path = Path(f"{retrieval_config.paths.models_dir}/topic_model_{graph_id}.pkl")
             else:
-                topic_model_path = Path(f"{retrieval_config.paths.graphs_dir}/topic_model.pkl")
+                topic_model_path = Path(f"{retrieval_config.paths.models_dir}/topic_model.pkl")
 
             with open(topic_model_path, 'rb') as f:
                 topic_model = pickle.load(f)
@@ -385,15 +379,14 @@ def retrieve(claim, alpha, beta, gamma, delta, top_k, graph_id, use_postgres, to
                 graph = pickle.load(f)
             logger.info(f"Graph loaded from {graph_path}: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
 
-            # Load topic model with matching graph_id if available
+            # Load topic model with matching graph_id if available (from models_dir)
             if graph_id:
                 topic_model_paths = [
-                    Path(f"{retrieval_config.paths.graphs_dir}/topic_model_{graph_id}.pkl"),
+                    Path(f"{retrieval_config.paths.models_dir}/topic_model_{graph_id}.pkl"),
                 ]
             else:
                 topic_model_paths = [
-                    graph_path.parent / "topic_model.pkl",  # Default naming
-                    graph_path.parent / "knowledge_graph_topic_model.pkl",  # Legacy naming
+                    Path(f"{retrieval_config.paths.models_dir}/topic_model.pkl"),  # Default naming
                 ]
 
             topic_model_path = None
@@ -434,7 +427,8 @@ def retrieve(claim, alpha, beta, gamma, delta, top_k, graph_id, use_postgres, to
             entity_relevance_threshold=retrieval_config.retrieval.entity_relevance_threshold,
             theme_relevance_threshold=retrieval_config.retrieval.theme_relevance_threshold,
             graph_id=graph_id,
-            cache_dir=retrieval_config.paths.graphs_dir,
+            cache_dir=retrieval_config.paths.embeddings_dir,
+            models_dir=retrieval_config.paths.models_dir,
             config=retrieval_config.to_dict(),  # Pass complete configuration
             logger=logger
         )
@@ -537,7 +531,7 @@ def list_graphs():
 def stats(graph_id, use_postgres, detailed):
     """Display statistics about the knowledge graph."""
     from fact_check_kg.visualize_graph import analyze_graph_stats
-    from fact_check_kg.config import DatabaseConfig
+    from fact_check_kg.config_loader import DatabaseConfig
     from fact_check_kg.graph_manager import get_latest_graph_id, load_graph_by_id
     import pickle
 

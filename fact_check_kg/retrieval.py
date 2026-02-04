@@ -50,6 +50,7 @@ class HybridRetriever:
         theme_relevance_threshold: float = 0.1,
         graph_id: Optional[str] = None,
         cache_dir: Optional[str] = None,
+        models_dir: Optional[str] = None,
         config: Optional[Dict] = None,
         logger: Optional[logging.Logger] = None
     ):
@@ -70,8 +71,9 @@ class HybridRetriever:
             theme_threshold: Minimum confidence for theme detection
             entity_relevance_threshold: Minimum relevance to continue entity traversal
             theme_relevance_threshold: Minimum relevance to continue theme traversal
-            graph_id: Optional graph ID for loading cached embeddings
-            cache_dir: Optional directory containing FAISS cache
+            graph_id: Optional graph ID for loading cached data
+            cache_dir: Optional directory containing FAISS embeddings cache
+            models_dir: Optional directory containing topic models and probabilities
             config: Optional complete configuration dictionary
             logger: Optional logger instance
         """
@@ -97,13 +99,14 @@ class HybridRetriever:
         # Cache parameters
         self.graph_id = graph_id
         self.cache_dir = cache_dir
+        self.models_dir = models_dir
 
         self.logger = logger or logging.getLogger(__name__)
 
         # Pre-compute chunk embeddings and topic distributions for efficiency
         self.logger.info("Pre-computing chunk embeddings and topic distributions...")
         self._precompute_chunk_embeddings(graph_id, cache_dir)
-        self._precompute_chunk_topic_distributions(graph_id, cache_dir)
+        self._precompute_chunk_topic_distributions(graph_id, models_dir)
 
     def _precompute_chunk_embeddings(self, graph_id: Optional[str] = None, cache_dir: Optional[str] = None):
         """
@@ -161,15 +164,15 @@ class HybridRetriever:
 
         self.logger.info(f"Computed embeddings for {len(self.chunk_nodes)} chunks")
 
-    def _precompute_chunk_topic_distributions(self, graph_id: Optional[str] = None, cache_dir: Optional[str] = None):
+    def _precompute_chunk_topic_distributions(self, graph_id: Optional[str] = None, models_dir: Optional[str] = None):
         """Pre-compute topic probability distributions for all chunks."""
         from pathlib import Path
 
-        # Try to load pre-computed probabilities from cache
-        if graph_id and cache_dir:
+        # Try to load pre-computed probabilities from models directory
+        if graph_id and models_dir:
             try:
-                cache_path = Path(cache_dir)
-                probs_file = cache_path / f"topic_probs_{graph_id}.npz"
+                models_path = Path(models_dir)
+                probs_file = models_path / f"topic_probs_{graph_id}.npz"
 
                 if probs_file.exists():
                     self.logger.info(f"Loading topic probabilities from cache: {probs_file}")

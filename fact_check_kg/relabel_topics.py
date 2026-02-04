@@ -17,7 +17,7 @@ import argparse
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
 from fact_check_kg.db_connector import GraphDatabaseConnector
-from fact_check_kg.config import DatabaseConfig
+from fact_check_kg.config_loader import DatabaseConfig
 
 
 def label_topic_with_llm(topic_words, model='llama3.1:latest'):

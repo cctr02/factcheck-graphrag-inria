@@ -312,6 +312,9 @@ class KnowledgeGraphBuilder:
         self.logger.info("✓ BERTopic pipeline completed!")
 
         n_topics = len(set(topics)) - 1  # excluding outliers
+        n_outliers = sum(1 for t in topics if t == -1)
+        outlier_pct = (n_outliers / len(topics)) * 100 if topics else 0
+        self.logger.info(f"  → Outliers (topic -1): {n_outliers}/{len(topics)} chunks ({outlier_pct:.1f}%)")
         self._log_step_completion(f"Training BERTopic model ({n_topics} topics found)", start_time, len(chunk_texts))
 
         self.topic_model = topic_model
@@ -404,46 +407,34 @@ class KnowledgeGraphBuilder:
 
     def label_topic_with_llm(
         self,
-        topic_words: List[Tuple[str, float]],
-        use_llm: bool = False
+        topic_words: List[Tuple[str, float]]
     ) -> str:
         """
-        Label a topic using processed keywords (or optionally LLM).
+        Label a topic using LLM.
 
         Args:
             topic_words: List of (word, score) tuples from BERTopic
-            use_llm: Whether to use LLM for labeling (default: False)
 
         Returns:
             Topic label string
 
-        Example:
-            >>> words = [("gaza", 0.8), ("israel", 0.7), ("conflict", 0.6)]
-            >>> label = builder.label_topic_with_llm(words, use_llm=False)
-            >>> label
-            "gaza israel conflict"
+        Raises:
+            RuntimeError: If LLM labeling fails (no fallback)
         """
+        import requests
+
         # Process keywords: lemmatize and remove redundant n-grams
         processed_keywords = self._process_topic_keywords(topic_words)
 
         # Extract top words from processed keywords
         top_words = [word for word, score in processed_keywords]
 
-        # If LLM is not requested, use fallback immediately
-        if not use_llm:
-            label = " ".join(top_words[:3])
-            self.logger.debug(f"Keyword-based label: {label}")
-            return label
-
-        # Try Ollama with Llama (only if use_llm=True)
-        try:
-            import requests
-
-            prompt = f"""Based on these keywords, provide a short, clear topic label (2-4 words maximum):
+        prompt = f"""Based on these keywords, provide a short, clear topic label (2-4 words maximum):
 Keywords: {', '.join(top_words)}
 
 Topic label:"""
 
+        try:
             response = requests.post(
                 self.llm_endpoint,
                 json={
@@ -458,32 +449,39 @@ Topic label:"""
                 timeout=self.llm_timeout
             )
 
-            if response.status_code == 200:
-                label = response.json()['response'].strip()
-                # Clean up the response
-                label = label.replace('\n', ' ').strip()
-                # Remove quotes if present
-                label = label.strip('"\'')
-                # Limit length
-                if len(label) > self.llm_label_max_length:
-                    label = ' '.join(label.split()[:self.llm_label_max_words])
+            if response.status_code != 200:
+                raise RuntimeError(
+                    f"LLM request failed with status {response.status_code}: {response.text}"
+                )
 
-                self.logger.debug(f"LLM labeled topic: {top_words[:3]} -> '{label}'")
-                return label.lower()
+            label = response.json()['response'].strip()
+            # Clean up the response
+            label = label.replace('\n', ' ').strip()
+            # Remove quotes if present
+            label = label.strip('"\'')
+            # Limit length
+            if len(label) > self.llm_label_max_length:
+                label = ' '.join(label.split()[:self.llm_label_max_words])
 
+            self.logger.debug(f"LLM labeled topic: {top_words[:3]} -> '{label}'")
+            return label.lower()
+
+        except requests.exceptions.RequestException as e:
+            raise RuntimeError(
+                f"LLM labeling failed (connection error): {e}. "
+                f"Ensure Ollama is running at {self.llm_endpoint}"
+            ) from e
         except Exception as e:
-            self.logger.warning(f"LLM labeling failed: {e}, using fallback")
-
-        # Fallback: concatenate top 3 words
-        label = " ".join(top_words[:3])
-        return label
+            raise RuntimeError(f"LLM labeling failed: {e}") from e
 
     def build_graph(
         self,
         chunks: List[Dict],
         min_topic_size: int = 10,
         nr_topics: Optional[int] = None,
-        use_llm_labels: bool = False
+        claims: Optional[List[Dict]] = None,
+        claim_to_docs: Optional[Dict[str, List[str]]] = None,
+        doc_metadata: Optional[Dict[str, Dict]] = None
     ) -> Tuple[nx.Graph, np.ndarray, List[str]]:
         """
         Build the complete knowledge graph.
@@ -492,7 +490,11 @@ Topic label:"""
             chunks: List of chunk dictionaries from data_loader
             min_topic_size: Minimum topic size for BERTopic
             nr_topics: Number of topics (None = auto)
-            use_llm_labels: Whether to use LLM for topic labeling (default: False)
+            claims: Optional list of claim dictionaries with keys:
+                claim_id, text, rating, claimant, claimant_norm, review_date, language
+            claim_to_docs: Optional mapping of claim_id to list of doc_ids
+            doc_metadata: Optional mapping of doc_id to metadata dict with keys:
+                text (title\\nbody), review_date, language
 
         Returns:
             Tuple of (graph, topic_probabilities, chunk_ids)
@@ -517,7 +519,7 @@ Topic label:"""
 
         # Step 1: Add document and chunk nodes
         self.logger.info("\nStep 1: Adding documents and chunks...")
-        self._add_documents_and_chunks(chunks)
+        self._add_documents_and_chunks(chunks, doc_metadata)
 
         # Step 2: Topic modeling
         self.logger.info("\nStep 2: Running topic modeling...")
@@ -527,9 +529,9 @@ Topic label:"""
             nr_topics=nr_topics
         )
 
-        # Step 3: Add themes and HAS_TOPIC edges
+        # Step 3: Add themes and HAS_TOPIC edges (requires LLM for labeling)
         self.logger.info("\nStep 3: Adding themes and HAS_TOPIC edges...")
-        self._add_themes_and_edges(topic_model, topics, probabilities, chunk_ids, use_llm_labels)
+        self._add_themes_and_edges(topic_model, topics, probabilities, chunk_ids)
 
         # Step 4: Extract entities and add MENTIONS edges
         self.logger.info("\nStep 4: Extracting entities and adding MENTIONS edges...")
@@ -558,6 +560,11 @@ Topic label:"""
         self.logger.info("\nStep 8: Adding CO_PRESENCE edges (Theme ↔ Theme)...")
         self._add_theme_co_presence(chunk_ids)
 
+        # Step 9: Add claim nodes and REVIEWS edges (Claim → Document)
+        if claims and claim_to_docs:
+            self.logger.info("\nStep 9: Adding claims and REVIEWS edges (Claim → Document)...")
+            self._add_claims_and_edges(claims, claim_to_docs)
+
         # Log statistics and save detailed reports
         self._log_graph_statistics()
         self._save_statistics_reports(topic_model, topics, chunks)
@@ -565,8 +572,14 @@ Topic label:"""
         # Return graph, probabilities, and chunk_ids for saving
         return self.graph, probabilities, chunk_ids
 
-    def _add_documents_and_chunks(self, chunks: List[Dict]):
-        """Add document and chunk nodes with CONTAINS edges."""
+    def _add_documents_and_chunks(self, chunks: List[Dict], doc_metadata: Optional[Dict[str, Dict]] = None):
+        """Add document and chunk nodes with CONTAINS edges.
+
+        Args:
+            chunks: List of chunk dictionaries
+            doc_metadata: Optional mapping of doc_id to metadata dict with keys:
+                text (title\\nbody), review_date, language
+        """
         start_time = time.time()
         doc_ids_seen = set()
 
@@ -578,12 +591,25 @@ Topic label:"""
             # Add document node (once per document)
             doc_node = f"doc::{doc_id}"
             if doc_node not in doc_ids_seen:
+                # Get document metadata if available
+                meta = doc_metadata.get(doc_id, {}) if doc_metadata else {}
+                doc_text = meta.get("text", "")
+                review_date = meta.get("review_date", "")
+                language = meta.get("language", "")
+
                 self.graph.add_node(
                     doc_node,
                     type="document",
-                    doc_id=doc_id
+                    doc_id=doc_id,
+                    text=doc_text,
+                    review_date=review_date,
+                    language=language
                 )
                 doc_ids_seen.add(doc_node)
+
+            # Get chunk metadata
+            chunk_review_date = chunk.get('review_date', '')
+            chunk_language = chunk.get('language', '')
 
             # Add chunk node
             self.graph.add_node(
@@ -591,7 +617,9 @@ Topic label:"""
                 type="chunk",
                 doc_id=doc_id,
                 text=text,
-                chunk_idx=chunk['chunk_idx']
+                chunk_idx=chunk['chunk_idx'],
+                review_date=chunk_review_date,
+                language=chunk_language
             )
 
             # Add CONTAINS edge
@@ -599,13 +627,58 @@ Topic label:"""
 
         self._log_step_completion("Adding documents and chunks", start_time, len(chunks))
 
+    def _add_claims_and_edges(
+        self,
+        claims: List[Dict],
+        claim_to_docs: Dict[str, List[str]]
+    ):
+        """Add claim nodes and REVIEWS edges linking claims to documents.
+
+        Args:
+            claims: List of claim dictionaries with keys:
+                claim_id, text, rating, claimant, claimant_norm, review_date, language
+            claim_to_docs: Mapping of claim_id to list of doc_ids
+        """
+        start_time = time.time()
+        edges_added = 0
+
+        for claim in tqdm(claims, desc="Adding claims and REVIEWS edges", disable=self.logger.level > logging.INFO):
+            claim_id = claim['claim_id']
+            claim_node = f"claim::{claim_id}"
+
+            # Add claim node with all attributes
+            self.graph.add_node(
+                claim_node,
+                type="claim",
+                claim_id=claim_id,
+                text=claim.get('text', ''),
+                rating=claim.get('rating', ''),
+                claimant=claim.get('claimant', ''),
+                claimant_norm=claim.get('claimant_norm', ''),
+                review_date=claim.get('review_date', ''),
+                language=claim.get('language', '')
+            )
+
+            # Add REVIEWS edges to linked documents
+            doc_ids = claim_to_docs.get(claim_id, [])
+            for doc_id in doc_ids:
+                doc_node = f"doc::{doc_id}"
+                if self.graph.has_node(doc_node):
+                    self.graph.add_edge(
+                        claim_node,
+                        doc_node,
+                        edge_type="REVIEWS"
+                    )
+                    edges_added += 1
+
+        self._log_step_completion("Adding claims and REVIEWS edges", start_time, edges_added)
+
     def _add_themes_and_edges(
         self,
         topic_model: BERTopic,
         topics: List[int],
         probabilities: np.ndarray,
-        chunk_ids: List[str],
-        use_llm_labels: bool = False
+        chunk_ids: List[str]
     ):
         """Add theme nodes and HAS_TOPIC edges."""
         # Get unique topics (excluding -1 which is outlier)
@@ -625,8 +698,8 @@ Topic label:"""
             # Process keywords: lemmatize and deduplicate n-grams
             processed_keywords = self._process_topic_keywords(topic_words)
 
-            # Label topic (with LLM or simple concatenation) using processed keywords
-            label = self.label_topic_with_llm(topic_words, use_llm=use_llm_labels)
+            # Label topic with LLM (mandatory - will raise error if LLM fails)
+            label = self.label_topic_with_llm(topic_words)
 
             # Add theme node with processed keywords
             theme_node = f"theme::{topic_id}"

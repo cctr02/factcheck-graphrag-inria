@@ -19,7 +19,7 @@ from pathlib import Path
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
 from fact_check_kg.config_loader import get_build_config, load_raw_config
-from fact_check_kg.data_loader import load_and_chunk_documents
+from fact_check_kg.data_loader import load_and_chunk_documents, load_claims
 from fact_check_kg.graph_builder import KnowledgeGraphBuilder
 
 
@@ -111,11 +111,6 @@ def main():
         default="postgres",
         help="PostgreSQL password"
     )
-    parser.add_argument(
-        "--use-llm-labels",
-        action="store_true",
-        help="Use LLM to generate topic labels (slower but more descriptive)"
-    )
     args = parser.parse_args()
 
     # Load build configuration
@@ -148,11 +143,19 @@ def main():
         else:
             csv_path = args.csv
 
-    chunks, n_docs = load_and_chunk_documents(
+    chunks, n_docs, doc_metadata = load_and_chunk_documents(
         csv_path=csv_path,
         chunk_size=args.chunk_size,
         chunk_overlap=args.chunk_overlap,
         max_docs=args.max_docs,
+        logger=logger
+    )
+
+    # Step 1b: Load claims from the same CSV
+    logger.info("\n### STEP 1b: Loading claims ###")
+    claims, claim_to_docs = load_claims(
+        csv_path=csv_path,
+        max_claims=args.max_docs,  # Use same limit as documents
         logger=logger
     )
 
@@ -181,16 +184,15 @@ def main():
 
     # Step 3: Build graph
     logger.info("\n### STEP 3: Building knowledge graph ###")
-    if args.use_llm_labels:
-        logger.info("Using LLM for topic labeling (this may take a while)...")
-    else:
-        logger.info("Using keyword-based topic labels (top 3 words)")
+    logger.info("Using LLM for topic labeling (requires Ollama running)...")
 
     graph, topic_probabilities, chunk_ids = builder.build_graph(
         chunks=chunks,
         min_topic_size=config.graph_construction.min_topic_size,
         nr_topics=config.graph_construction.nr_topics,
-        use_llm_labels=args.use_llm_labels
+        claims=claims,
+        claim_to_docs=claim_to_docs,
+        doc_metadata=doc_metadata
     )
 
     # Step 4: Save graph and models
@@ -201,7 +203,11 @@ def main():
 
     # Ensure output directories exist
     graphs_dir = Path(config.paths.graphs_dir)
+    models_dir = Path(config.paths.models_dir)
+    embeddings_dir = Path(config.paths.embeddings_dir)
     graphs_dir.mkdir(parents=True, exist_ok=True)
+    models_dir.mkdir(parents=True, exist_ok=True)
+    embeddings_dir.mkdir(parents=True, exist_ok=True)
 
     # Get edge counts from the graph
     edge_type_counts = {}
@@ -220,16 +226,16 @@ def main():
         pickle.dump(graph, f)
     logger.info(f"Graph (pickle) saved to: {pickle_path}")
 
-    # 2. Save topic model in outputs/graphs
+    # 2. Save topic model in outputs/models
     topic_model_filename = f"topic_model_{timestamp}.pkl"
-    topic_model_path = graphs_dir / topic_model_filename
+    topic_model_path = models_dir / topic_model_filename
     with open(topic_model_path, 'wb') as f:
         pickle.dump(builder.topic_model, f)
     logger.info(f"Topic model saved to: {topic_model_path}")
 
-    # 2b. Save topic probabilities for efficient retrieval
+    # 2b. Save topic probabilities for efficient retrieval in outputs/models
     topic_probs_filename = f"topic_probs_{timestamp}.npz"
-    topic_probs_path = graphs_dir / topic_probs_filename
+    topic_probs_path = models_dir / topic_probs_filename
     np.savez_compressed(
         topic_probs_path,
         probabilities=topic_probabilities,
@@ -237,7 +243,7 @@ def main():
     )
     logger.info(f"Topic probabilities saved to: {topic_probs_path} (shape: {topic_probabilities.shape})")
 
-    # 3. Save chunk embeddings to FAISS index
+    # 3. Save chunk embeddings to FAISS index in outputs/embeddings
     logger.info("Computing and saving chunk embeddings to FAISS...")
     from fact_check_kg.embedding_cache import EmbeddingCache
 
@@ -258,7 +264,7 @@ def main():
         logger=logger
     )
     embedding_cache.build_index(chunk_nodes, embeddings)
-    embedding_cache.save(graphs_dir, timestamp)
+    embedding_cache.save(embeddings_dir, timestamp)
 
     logger.info(f"Chunk embeddings saved for {len(chunk_nodes)} chunks")
 
@@ -270,8 +276,13 @@ def main():
     metadata = {
         "timestamp": timestamp,
         "created_at": datetime.now().isoformat(),
-        "pickle_path": str(pickle_path),
-        "topic_model_path": str(topic_model_path),
+        "paths": {
+            "graph": str(pickle_path),
+            "topic_model": str(topic_model_path),
+            "topic_probs": str(topic_probs_path),
+            "embeddings_faiss": str(embeddings_dir / f"embeddings_{timestamp}.faiss"),
+            "embeddings_meta": str(embeddings_dir / f"embeddings_{timestamp}.pkl"),
+        },
         "max_documents": args.max_docs,
         "chunk_size": args.chunk_size,
         "chunk_overlap": args.chunk_overlap,
@@ -279,6 +290,7 @@ def main():
         "num_edges": graph.number_of_edges(),
         "num_documents": n_docs,
         "num_chunks": len(chunks),
+        "num_claims": len(claims) if claims else 0,
         "edge_types": edge_type_counts,
         "config": load_raw_config(base_config_path),  # Save common configuration
         "config_build": load_raw_config(build_config_path)  # Save build-specific configuration

@@ -14,6 +14,7 @@ paths:
   graphs_dir: "outputs/graphs"
   visualizations_dir: "outputs/visualizations"
   models_dir: "outputs/models"
+  embeddings_dir: "outputs/embeddings"
   exports_dir: "outputs/exports"
 
   # Logs directory
