@@ -24,7 +24,7 @@ import sys
 import types
 
 
-from fact_check_kg.db_connector import GraphDatabaseConnector
+from fact_check_kg.core.db_connector import GraphDatabaseConnector
 
 
 class KnowledgeGraphBuilder:
@@ -879,6 +879,7 @@ Topic label:"""
         """
         co_occur_counter = Counter()
         entity_document_frequency = Counter()
+        edges_skipped_date_date = 0
 
         # Step 1: Count co-occurrences and entity frequencies across documents
         doc_to_entities = defaultdict(set)

@@ -14,10 +14,10 @@ import sys
 import argparse
 
 # Add parent directory to path
-sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from fact_check_kg.db_connector import GraphDatabaseConnector
-from fact_check_kg.config_loader import DatabaseConfig
+from fact_check_kg.core.db_connector import GraphDatabaseConnector
+from fact_check_kg.core.config_loader import DatabaseConfig
 
 
 def label_topic_with_llm(topic_words, model='llama3.1:latest'):
@@ -145,12 +145,12 @@ def relabel_graph(
         db.clear_graph()
         db.save_graph(G)
         db.disconnect()
-        print(f"✓ Done! Graph saved to PostgreSQL with LLM-generated labels.")
+        print(f"Done! Graph saved to PostgreSQL with LLM-generated labels.")
     else:
         print(f"Saving updated graph to {output_path}...")
         with open(output_path, 'wb') as f:
             pickle.dump(G, f)
-        print(f"✓ Done! Graph saved with LLM-generated labels.")
+        print(f"Done! Graph saved with LLM-generated labels.")
 
 
 if __name__ == "__main__":

@@ -199,7 +199,7 @@ def get_logger(
         Configured logger instance
 
     Example:
-        >>> from fact_check_kg.logger import get_logger
+        >>> from fact_check_kg.core.logger import get_logger
         >>> logger = get_logger(__name__)
         >>> logger.info("Processing started")
     """

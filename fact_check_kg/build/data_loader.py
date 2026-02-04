@@ -10,7 +10,7 @@ from typing import List, Tuple, Optional, Dict, Any
 import logging
 
 # Add parent directory to path for imports
-sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
 from utils.io_utils import load_corpus_from_csv, load_claims_from_csv
 
 

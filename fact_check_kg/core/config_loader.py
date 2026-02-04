@@ -156,6 +156,11 @@ class TestingConfig:
     test_chunk_size: int
 
 
+def _get_project_root() -> Path:
+    """Get project root directory (3 levels up from this file: core -> fact_check_kg -> project)."""
+    return Path(__file__).parent.parent.parent
+
+
 class Config:
     """
     Main configuration class.
@@ -180,7 +185,7 @@ class Config:
         """
         # Load base config first (common settings)
         if base_config_path is None:
-            base_config_path = Path(__file__).parent.parent / "config" / "config.yaml"
+            base_config_path = _get_project_root() / "config" / "config.yaml"
         else:
             base_config_path = Path(base_config_path)
 
@@ -328,7 +333,7 @@ def get_build_config(config_path: Optional[str] = None) -> Config:
         Config instance for building graphs
 
     Example:
-        >>> from fact_check_kg.config_loader import get_build_config
+        >>> from fact_check_kg.core.config_loader import get_build_config
         >>> config = get_build_config()
         >>> print(config.graph_construction.chunk_size)
     """
@@ -336,7 +341,7 @@ def get_build_config(config_path: Optional[str] = None) -> Config:
 
     if _config_build_instance is None:
         if config_path is None:
-            config_path = Path(__file__).parent.parent / "config" / "config_build.yaml"
+            config_path = _get_project_root() / "config" / "config_build.yaml"
         # Load base config.yaml and merge with config_build.yaml
         _config_build_instance = Config(config_path=config_path)
 
@@ -356,7 +361,7 @@ def get_retrieval_config(config_path: Optional[str] = None) -> Config:
         Config instance for retrieval
 
     Example:
-        >>> from fact_check_kg.config_loader import get_retrieval_config
+        >>> from fact_check_kg.core.config_loader import get_retrieval_config
         >>> config = get_retrieval_config()
         >>> print(config.retrieval.top_k)
     """
@@ -364,7 +369,7 @@ def get_retrieval_config(config_path: Optional[str] = None) -> Config:
 
     if _config_retrieval_instance is None:
         if config_path is None:
-            config_path = Path(__file__).parent.parent / "config" / "config_retrieval.yaml"
+            config_path = _get_project_root() / "config" / "config_retrieval.yaml"
         # Load base config.yaml and merge with config_retrieval.yaml
         _config_retrieval_instance = Config(config_path=config_path)
 
@@ -384,7 +389,7 @@ def get_config(config_path: Optional[str] = None) -> Config:
         Config instance
 
     Example:
-        >>> from fact_check_kg.config_loader import get_config
+        >>> from fact_check_kg.core.config_loader import get_config
         >>> config = get_config()
         >>> print(config.paths.logs_dir)
     """
@@ -430,7 +435,7 @@ def reload_build_config(config_path: Optional[str] = None):
     """
     global _config_build_instance
     if config_path is None:
-        config_path = Path(__file__).parent.parent / "config" / "config_build.yaml"
+        config_path = _get_project_root() / "config" / "config_build.yaml"
     _config_build_instance = Config(config_path)
 
 
@@ -443,5 +448,5 @@ def reload_retrieval_config(config_path: Optional[str] = None):
     """
     global _config_retrieval_instance
     if config_path is None:
-        config_path = Path(__file__).parent.parent / "config" / "config_retrieval.yaml"
+        config_path = _get_project_root() / "config" / "config_retrieval.yaml"
     _config_retrieval_instance = Config(config_path)

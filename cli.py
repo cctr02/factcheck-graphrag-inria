@@ -23,8 +23,8 @@ from datetime import datetime
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from fact_check_kg.config_loader import get_build_config, get_retrieval_config
-from fact_check_kg.logger import get_logger
+from fact_check_kg.core.config_loader import get_build_config, get_retrieval_config
+from fact_check_kg.core.logger import get_logger
 
 
 # Initialize logger (will be reconfigured by each command as needed)
@@ -86,7 +86,7 @@ def build(max_docs, chunk_size, chunk_overlap, use_postgres, log_level):
     # Build command
     cmd = [
         sys.executable,
-        "fact_check_kg/build_graph.py",
+        "fact_check_kg/build/build_graph.py",
         "--csv", build_config.paths.csv_file,
         "--max-docs", str(max_docs),
         "--chunk-size", str(chunk_size),
@@ -151,8 +151,8 @@ def visualize(mode, node, max_nodes, output, graph_id, use_postgres, graph_file)
     Visualization files are saved as graph_{mode}_{graph_id}.html
     """
     import subprocess
-    from fact_check_kg.visualize_graph import analyze_graph_stats
-    from fact_check_kg.config_loader import DatabaseConfig
+    from fact_check_kg.analysis.visualize_graph import analyze_graph_stats
+    from fact_check_kg.core.config_loader import DatabaseConfig
 
     # Load retrieval configuration and initialize logger
     config = get_retrieval_config()
@@ -198,7 +198,7 @@ def visualize(mode, node, max_nodes, output, graph_id, use_postgres, graph_file)
             sys.exit(1)
 
     # For other modes, call the main() function with arguments
-    cmd = [sys.executable, "fact_check_kg/visualize_graph.py"]
+    cmd = [sys.executable, "fact_check_kg/analysis/visualize_graph.py"]
 
     if graph_file:
         cmd.extend(["--graph", graph_file])
@@ -282,16 +282,16 @@ def retrieve(claim, alpha, beta, gamma, delta, top_k, graph_id, use_postgres, to
     import pickle
     import spacy
     from sentence_transformers import SentenceTransformer
-    from fact_check_kg.retrieval import HybridRetriever
-    from fact_check_kg.retrieval_results import RetrievalResultsManager
-    from fact_check_kg.db_connector import GraphDatabaseConnector
+    from fact_check_kg.retrieval.retrieval import HybridRetriever
+    from fact_check_kg.retrieval.retrieval_results import RetrievalResultsManager
+    from fact_check_kg.core.db_connector import GraphDatabaseConnector
 
     # Load retrieval configuration
     retrieval_config = get_retrieval_config()
 
     # Load raw configs for saving to metadata
     from pathlib import Path
-    from fact_check_kg.config_loader import load_raw_config
+    from fact_check_kg.core.config_loader import load_raw_config
     base_config_path = Path(__file__).parent / "config" / "config.yaml"
     retrieval_config_path = Path(__file__).parent / "config" / "config_retrieval.yaml"
     raw_config = load_raw_config(base_config_path)
@@ -512,7 +512,7 @@ def retrieve(claim, alpha, beta, gamma, delta, top_k, graph_id, use_postgres, to
 @cli.command('list-graphs')
 def list_graphs():
     """List all available knowledge graphs in the system."""
-    from fact_check_kg.graph_manager import display_available_graphs
+    from fact_check_kg.analysis.graph_manager import display_available_graphs
 
     display_available_graphs()
 
@@ -530,9 +530,9 @@ def list_graphs():
               help='Show detailed statistics')
 def stats(graph_id, use_postgres, detailed):
     """Display statistics about the knowledge graph."""
-    from fact_check_kg.visualize_graph import analyze_graph_stats
-    from fact_check_kg.config_loader import DatabaseConfig
-    from fact_check_kg.graph_manager import get_latest_graph_id, load_graph_by_id
+    from fact_check_kg.analysis.visualize_graph import analyze_graph_stats
+    from fact_check_kg.core.config_loader import DatabaseConfig
+    from fact_check_kg.analysis.graph_manager import get_latest_graph_id, load_graph_by_id
     import pickle
 
     logger.info("=" * 60)
@@ -601,7 +601,7 @@ def stats(graph_id, use_postgres, detailed):
               help='LLM model to use (default: from config_build.yaml)')
 def relabel(use_postgres, llm_model):
     """Relabel topics using LLM."""
-    from fact_check_kg.relabel_topics import relabel_graph
+    from fact_check_kg.analysis.relabel_topics import relabel_graph
 
     logger.info("=" * 60)
     logger.info("RELABELING TOPICS WITH LLM")
@@ -687,7 +687,7 @@ def init(postgres, dirs):
             logger.info(f"[OK] Created directory: {directory}")
 
     if postgres:
-        from fact_check_kg.db_connector import GraphDatabaseConnector
+        from fact_check_kg.core.db_connector import GraphDatabaseConnector
         db = GraphDatabaseConnector(
             host=config.database.host,
             port=config.database.port,

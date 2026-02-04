@@ -16,11 +16,11 @@ from datetime import datetime
 from pathlib import Path
 
 # Add parent directory to path
-sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from fact_check_kg.config_loader import get_build_config, load_raw_config
-from fact_check_kg.data_loader import load_and_chunk_documents, load_claims
-from fact_check_kg.graph_builder import KnowledgeGraphBuilder
+from fact_check_kg.core.config_loader import get_build_config, load_raw_config
+from fact_check_kg.build.data_loader import load_and_chunk_documents, load_claims
+from fact_check_kg.build.graph_builder import KnowledgeGraphBuilder
 
 
 def setup_logging(log_level: str = "INFO") -> logging.Logger:
@@ -245,7 +245,7 @@ def main():
 
     # 3. Save chunk embeddings to FAISS index in outputs/embeddings
     logger.info("Computing and saving chunk embeddings to FAISS...")
-    from fact_check_kg.embedding_cache import EmbeddingCache
+    from fact_check_kg.core.embedding_cache import EmbeddingCache
 
     # Extract chunk IDs and texts
     chunk_nodes = [n for n, d in graph.nodes(data=True) if d.get('type') == 'chunk']
@@ -270,8 +270,8 @@ def main():
 
     # 4. Create metadata
     # Load raw configs separately
-    base_config_path = Path(__file__).parent.parent / "config" / "config.yaml"
-    build_config_path = Path(__file__).parent.parent / "config" / "config_build.yaml"
+    base_config_path = Path(__file__).parent.parent.parent / "config" / "config.yaml"
+    build_config_path = Path(__file__).parent.parent.parent / "config" / "config_build.yaml"
 
     metadata = {
         "timestamp": timestamp,

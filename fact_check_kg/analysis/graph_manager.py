@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import logging
 
-from fact_check_kg.config_loader import get_config
+from fact_check_kg.core.config_loader import get_config
 
 
 def list_available_graphs() -> List[Dict]:
@@ -91,7 +91,7 @@ def load_graph_by_id(graph_id: str) -> Tuple[object, object, Dict]:
         except Exception as e:
             logging.warning(f"Could not load from pickle, trying PostgreSQL: {e}")
             # Fallback to PostgreSQL
-            from fact_check_kg.db_connector import GraphDatabaseConnector
+            from fact_check_kg.core.db_connector import GraphDatabaseConnector
 
             db = GraphDatabaseConnector(
                 host=metadata["postgres_host"],
@@ -108,7 +108,7 @@ def load_graph_by_id(graph_id: str) -> Tuple[object, object, Dict]:
 
     elif storage_type == "postgresql":
         # Load from PostgreSQL only
-        from fact_check_kg.db_connector import GraphDatabaseConnector
+        from fact_check_kg.core.db_connector import GraphDatabaseConnector
 
         db = GraphDatabaseConnector(
             host=metadata.get("database_host", metadata.get("postgres_host")),

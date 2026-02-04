@@ -120,7 +120,7 @@ class HybridRetriever:
             cache_dir: Optional directory containing FAISS cache
         """
         from pathlib import Path
-        from fact_check_kg.embedding_cache import EmbeddingCache
+        from fact_check_kg.core.embedding_cache import EmbeddingCache
 
         self.chunk_nodes = [
             n for n, d in self.graph.nodes(data=True)
@@ -190,7 +190,7 @@ class HybridRetriever:
                             for idx, chunk_id in enumerate(self.chunk_nodes)
                         }
 
-                        self.logger.info(f"✓ Loaded topic distributions for {len(self.chunk_nodes)} chunks")
+                        self.logger.info(f"Loaded topic distributions for {len(self.chunk_nodes)} chunks")
                         self.logger.info(f"Number of topics: {cached_probs.shape[1]}")
                         return
                     else:
@@ -203,11 +203,11 @@ class HybridRetriever:
         # Fallback: compute topic distributions (slow!)
         self.logger.info(f"Computing topic distributions for {len(self.chunk_texts)} chunks...")
         self.logger.info("This may take 2-5 minutes depending on number of topics. Please wait...")
-        self.logger.warning("⚠️ Consider rebuilding graph to generate cached probabilities for faster loading")
+        self.logger.warning("Consider rebuilding graph to generate cached probabilities for faster loading")
 
         _, chunk_topic_probs = self.topic_model.transform(self.chunk_texts)
 
-        self.logger.info("✓ Topic distributions computed successfully")
+        self.logger.info("Topic distributions computed successfully")
 
         # Store as numpy array for efficient computation
         self.chunk_topic_distributions = chunk_topic_probs
