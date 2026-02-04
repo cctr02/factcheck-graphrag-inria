@@ -168,7 +168,7 @@ def main():
     logger.info("\n### STEP 3: Building knowledge graph ###")
     logger.info("Using LLM for topic labeling (requires Ollama running)...")
 
-    graph, topic_probabilities, chunk_ids = builder.build_graph(
+    graph, topic_probabilities, chunk_ids, claim_retrieval_results = builder.build_graph(
         chunks=chunks,
         min_topic_size=config.graph_construction.min_topic_size,
         nr_topics=config.graph_construction.nr_topics,
@@ -225,6 +225,14 @@ def main():
     )
     logger.info(f"Topic probabilities saved to: {topic_probs_path} (shape: {topic_probabilities.shape})")
 
+    # 2c. Save claim pre-retrieval results for Strategy 5
+    if claim_retrieval_results:
+        claim_retrieval_filename = f"claim_retrieval_{timestamp}.json"
+        claim_retrieval_path = models_dir / claim_retrieval_filename
+        with open(claim_retrieval_path, 'w', encoding='utf-8') as f:
+            json.dump(claim_retrieval_results, f, indent=2, ensure_ascii=False)
+        logger.info(f"Claim pre-retrieval results saved to: {claim_retrieval_path} ({len(claim_retrieval_results)} claims)")
+
     # 3. Save chunk embeddings to FAISS index in outputs/embeddings
     logger.info("Computing and saving chunk embeddings to FAISS...")
     from fact_check_kg.core.embedding_cache import EmbeddingCache
@@ -262,6 +270,7 @@ def main():
             "graph": str(pickle_path),
             "topic_model": str(topic_model_path),
             "topic_probs": str(topic_probs_path),
+            "claim_retrieval": str(models_dir / f"claim_retrieval_{timestamp}.json") if claim_retrieval_results else None,
             "embeddings_faiss": str(embeddings_dir / f"embeddings_{timestamp}.faiss"),
             "embeddings_meta": str(embeddings_dir / f"embeddings_{timestamp}.pkl"),
         },

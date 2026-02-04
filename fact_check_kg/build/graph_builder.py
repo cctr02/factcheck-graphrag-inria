@@ -130,6 +130,10 @@ class KnowledgeGraphBuilder:
         # Topic model (will be trained during build)
         self.topic_model = None
 
+        # Build timing statistics
+        self.build_timings = {}
+        self.build_start_time = None
+
     def _log_step_completion(self, step_name: str, start_time: float, count: int = None):
         """
         Log completion of a step with elapsed time.
@@ -512,6 +516,10 @@ Topic label:"""
         self.logger.info("BUILDING KNOWLEDGE GRAPH")
         self.logger.info("=" * 60)
 
+        # Initialize timing
+        self.build_start_time = time.time()
+        self.build_timings = {}
+
         # Extract data
         chunk_texts = [c['text'] for c in chunks]
         chunk_ids = [c['chunk_id'] for c in chunks]
@@ -519,58 +527,92 @@ Topic label:"""
 
         # Step 1: Add document and chunk nodes
         self.logger.info("\nStep 1: Adding documents and chunks...")
+        step_start = time.time()
         self._add_documents_and_chunks(chunks, doc_metadata)
+        self.build_timings["Step 1: Documents & Chunks"] = time.time() - step_start
 
         # Step 2: Topic modeling
         self.logger.info("\nStep 2: Running topic modeling...")
+        step_start = time.time()
         topic_model, topics, probabilities = self.build_topic_model(
             chunk_texts,
             min_topic_size=min_topic_size,
             nr_topics=nr_topics
         )
+        self.build_timings["Step 2: Topic Modeling"] = time.time() - step_start
 
         # Step 3: Add themes and HAS_TOPIC edges (requires LLM for labeling)
         self.logger.info("\nStep 3: Adding themes and HAS_TOPIC edges...")
+        step_start = time.time()
         self._add_themes_and_edges(topic_model, topics, probabilities, chunk_ids)
+        self.build_timings["Step 3: Themes & HAS_TOPIC"] = time.time() - step_start
 
         # Step 4: Extract entities and add MENTIONS edges
         self.logger.info("\nStep 4: Extracting entities and adding MENTIONS edges...")
+        step_start = time.time()
         chunk_to_entities = self._add_entities_and_mentions(chunks)
+        self.build_timings["Step 4: Entities & MENTIONS"] = time.time() - step_start
 
         # Step 5: Add CO_OCCURS edges (Entity ↔ Entity)
         self.logger.info("\nStep 5: Adding CO_OCCURS edges (Entity ↔ Entity)...")
+        step_start = time.time()
         self._add_entity_co_occurrences(chunk_to_entities)
+        self.build_timings["Step 5: CO_OCCURS"] = time.time() - step_start
 
         # Step 6: Add SEMANTIC_SIM edges (Entity ↔ Entity, excluding DATEs)
         self.logger.info("\nStep 6: Adding SEMANTIC_SIM edges (Entity ↔ Entity)...")
+        step_start = time.time()
         self._add_entity_semantic_similarity()
+        self.build_timings["Step 6: Entity SEMANTIC_SIM"] = time.time() - step_start
 
         # Step 6b: Add TEMPORAL_DIST edges (DATE ↔ DATE)
         self.logger.info("\nStep 6b: Adding TEMPORAL_DIST edges (DATE ↔ DATE)...")
+        step_start = time.time()
         self._add_date_temporal_similarity(
             max_year_gap=self.temporal_max_year_gap,
             decay_rate=self.temporal_decay_rate
         )
+        self.build_timings["Step 6b: TEMPORAL_DIST"] = time.time() - step_start
 
         # Step 7: Add SEMANTIC_SIM edges (Theme ↔ Theme)
         self.logger.info("\nStep 7: Adding SEMANTIC_SIM edges (Theme ↔ Theme)...")
+        step_start = time.time()
         self._add_theme_semantic_similarity(topic_model)
+        self.build_timings["Step 7: Theme SEMANTIC_SIM"] = time.time() - step_start
 
         # Step 8: Add CO_PRESENCE edges (Theme ↔ Theme)
         self.logger.info("\nStep 8: Adding CO_PRESENCE edges (Theme ↔ Theme)...")
+        step_start = time.time()
         self._add_theme_co_presence(chunk_ids)
+        self.build_timings["Step 8: CO_PRESENCE"] = time.time() - step_start
 
         # Step 9: Add claim nodes and REVIEWS edges (Claim → Document)
         if claims and claim_to_docs:
             self.logger.info("\nStep 9: Adding claims and REVIEWS edges (Claim → Document)...")
+            step_start = time.time()
             self._add_claims_and_edges(claims, claim_to_docs)
+            self.build_timings["Step 9: Claims & REVIEWS"] = time.time() - step_start
+
+            # Step 10: Pre-compute claim retrieval (run 4 strategies for each claim)
+            self.logger.info("\nStep 10: Pre-computing claim retrieval results...")
+            step_start = time.time()
+            claim_retrieval_results = self._precompute_claim_retrieval(
+                claims, topic_model, probabilities, chunk_ids
+            )
+            self.build_timings["Step 10: Claim Pre-Retrieval"] = time.time() - step_start
+        else:
+            claim_retrieval_results = {}
+
+        # Calculate total build time
+        total_build_time = time.time() - self.build_start_time
 
         # Log statistics and save detailed reports
         self._log_graph_statistics()
         self._save_statistics_reports(topic_model, topics, chunks)
+        self._save_timing_report(total_build_time)
 
-        # Return graph, probabilities, and chunk_ids for saving
-        return self.graph, probabilities, chunk_ids
+        # Return graph, probabilities, chunk_ids, and claim_retrieval_results
+        return self.graph, probabilities, chunk_ids, claim_retrieval_results
 
     def _add_documents_and_chunks(self, chunks: List[Dict], doc_metadata: Optional[Dict[str, Dict]] = None):
         """Add document and chunk nodes with CONTAINS edges.
@@ -1485,6 +1527,326 @@ Nodes by Type:
         with open(stats_dir / f"summary_{timestamp}.txt", 'w') as f:
             f.write(summary)
         self.logger.info(f"Summary report saved to: {stats_dir}/summary_{timestamp}.txt")
+
+    def _save_timing_report(self, total_build_time: float):
+        """
+        Save build timing report showing time and percentage for each step.
+
+        Args:
+            total_build_time: Total time for the build process in seconds
+        """
+        import json
+        from pathlib import Path
+        from datetime import datetime
+
+        stats_dir = Path("outputs/statistics")
+        stats_dir.mkdir(parents=True, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # Calculate percentages
+        timing_report = {
+            "timestamp": timestamp,
+            "total_build_time_seconds": round(total_build_time, 2),
+            "total_build_time_formatted": f"{int(total_build_time // 60)}m {int(total_build_time % 60)}s",
+            "steps": []
+        }
+
+        self.logger.info("\n" + "=" * 60)
+        self.logger.info("BUILD TIMING REPORT")
+        self.logger.info("=" * 60)
+
+        for step_name, step_time in self.build_timings.items():
+            percentage = (step_time / total_build_time * 100) if total_build_time > 0 else 0
+            timing_report["steps"].append({
+                "step": step_name,
+                "time_seconds": round(step_time, 2),
+                "time_formatted": f"{int(step_time // 60)}m {step_time % 60:.1f}s" if step_time >= 60 else f"{step_time:.2f}s",
+                "percentage": round(percentage, 1)
+            })
+            self.logger.info(f"  {step_name}: {step_time:.2f}s ({percentage:.1f}%)")
+
+        self.logger.info(f"\n  TOTAL: {total_build_time:.2f}s ({int(total_build_time // 60)}m {int(total_build_time % 60)}s)")
+        self.logger.info("=" * 60)
+
+        # Save timing report
+        with open(stats_dir / f"timing_report_{timestamp}.json", 'w') as f:
+            json.dump(timing_report, f, indent=2)
+        self.logger.info(f"Timing report saved to: {stats_dir}/timing_report_{timestamp}.json")
+
+    def _precompute_claim_retrieval(
+        self,
+        claims: List[Dict],
+        topic_model: BERTopic,
+        probabilities: np.ndarray,
+        chunk_ids: List[str]
+    ) -> Dict[str, Dict]:
+        """
+        Pre-compute retrieval results for each claim using 4 strategies.
+
+        For each claim, runs the 4 retrieval strategies (semantic, topic distribution,
+        thematic graph, entity graph) and stores the top chunks with scores.
+
+        Args:
+            claims: List of claim dictionaries
+            topic_model: Trained BERTopic model
+            probabilities: Topic probability matrix for chunks
+            chunk_ids: List of chunk IDs
+
+        Returns:
+            Dictionary mapping claim_id to retrieval results:
+            {
+                "claim::123": {
+                    "claim_text": "...",
+                    "retrieval_results": [
+                        {"chunk_id": "...", "score": 0.85, "strategies": {...}},
+                        ...
+                    ]
+                }
+            }
+        """
+        from scipy.spatial.distance import jensenshannon
+        from collections import defaultdict
+
+        self.logger.info(f"Pre-computing retrieval for {len(claims)} claims...")
+
+        # Pre-compute chunk embeddings
+        chunk_texts = [self.graph.nodes[cid].get('text', '') for cid in chunk_ids]
+        self.logger.info("Computing chunk embeddings...")
+        chunk_embeddings = self.embedding_model.encode(
+            chunk_texts,
+            show_progress_bar=True,
+            normalize_embeddings=True
+        )
+
+        # Create chunk_to_dist_idx mapping
+        chunk_to_dist_idx = {cid: idx for idx, cid in enumerate(chunk_ids)}
+
+        claim_retrieval_results = {}
+
+        for claim in tqdm(claims, desc="Pre-computing claim retrieval"):
+            claim_id = claim['claim_id']
+            claim_text = claim.get('text', '')
+            claim_node = f"claim::{claim_id}"
+
+            if not claim_text:
+                continue
+
+            # Strategy 1: Semantic Similarity
+            claim_embedding = self.embedding_model.encode(
+                [claim_text],
+                normalize_embeddings=True
+            )[0]
+            S1_scores = {}
+            similarities = np.matmul(chunk_embeddings, claim_embedding)
+            for cid, sim in zip(chunk_ids, similarities):
+                S1_scores[cid] = float(sim)
+
+            # Normalize S1
+            if S1_scores:
+                min_s, max_s = min(S1_scores.values()), max(S1_scores.values())
+                if max_s > min_s:
+                    S1_scores = {k: (v - min_s) / (max_s - min_s) for k, v in S1_scores.items()}
+
+            # Strategy 2: Topic Distribution Similarity
+            _, claim_topic_probs = topic_model.transform([claim_text])
+            claim_distribution = claim_topic_probs[0]
+            S2_scores = {}
+            for cid, dist_idx in chunk_to_dist_idx.items():
+                chunk_distribution = probabilities[dist_idx]
+                js_div = jensenshannon(claim_distribution, chunk_distribution)
+                S2_scores[cid] = 1.0 - float(js_div)
+
+            # Normalize S2
+            if S2_scores:
+                min_s, max_s = min(S2_scores.values()), max(S2_scores.values())
+                if max_s > min_s:
+                    S2_scores = {k: (v - min_s) / (max_s - min_s) for k, v in S2_scores.items()}
+
+            # Strategy 3: Thematic Graph Traversal
+            S3_scores = self._compute_thematic_scores_for_claim(claim_text, topic_model)
+
+            # Normalize S3
+            if S3_scores:
+                min_s, max_s = min(S3_scores.values()), max(S3_scores.values())
+                if max_s > min_s:
+                    S3_scores = {k: (v - min_s) / (max_s - min_s) for k, v in S3_scores.items()}
+
+            # Strategy 4: Entity Graph Traversal
+            S4_scores = self._compute_entity_scores_for_claim(claim_text)
+
+            # Normalize S4
+            if S4_scores:
+                min_s, max_s = min(S4_scores.values()), max(S4_scores.values())
+                if max_s > min_s:
+                    S4_scores = {k: (v - min_s) / (max_s - min_s) for k, v in S4_scores.items()}
+
+            # Combine scores (equal weights for simplicity: 0.25 each)
+            all_chunks = set(S1_scores.keys()) | set(S2_scores.keys()) | set(S3_scores.keys()) | set(S4_scores.keys())
+            combined_results = []
+
+            for cid in all_chunks:
+                s1 = S1_scores.get(cid, 0)
+                s2 = S2_scores.get(cid, 0)
+                s3 = S3_scores.get(cid, 0)
+                s4 = S4_scores.get(cid, 0)
+                total_score = 0.25 * s1 + 0.25 * s2 + 0.25 * s3 + 0.25 * s4
+
+                combined_results.append({
+                    "chunk_id": cid,
+                    "score_total": round(total_score, 4),
+                    "score_semantic": round(s1, 4),
+                    "score_topic_dist": round(s2, 4),
+                    "score_thematic": round(s3, 4),
+                    "score_entity": round(s4, 4)
+                })
+
+            # Sort by total score and keep top 20
+            combined_results.sort(key=lambda x: x['score_total'], reverse=True)
+            top_results = combined_results[:20]
+
+            claim_retrieval_results[claim_node] = {
+                "claim_id": claim_id,
+                "claim_text": claim_text,
+                "retrieval_results": top_results
+            }
+
+        self.logger.info(f"Pre-computed retrieval for {len(claim_retrieval_results)} claims")
+        return claim_retrieval_results
+
+    def _compute_thematic_scores_for_claim(self, claim_text: str, topic_model: BERTopic) -> Dict[str, float]:
+        """
+        Compute thematic scores for a claim using theme graph traversal.
+
+        Args:
+            claim_text: The claim text
+            topic_model: Trained BERTopic model
+
+        Returns:
+            Dictionary mapping chunk_id to thematic score
+        """
+        from collections import deque, defaultdict
+
+        # Get topic probabilities for claim
+        topic_probs = topic_model.transform([claim_text])[1][0]
+
+        # Detect themes above threshold (0.01)
+        seed_themes = []
+        for idx, prob in enumerate(topic_probs):
+            if prob > 0.01:
+                theme_node = f"theme::{idx}"
+                if self.graph.has_node(theme_node):
+                    seed_themes.append((theme_node, prob))
+
+        if not seed_themes:
+            return {}
+
+        # BFS propagation through theme graph
+        theme_relevance = {}
+        queue = deque()
+        visited = set()
+
+        for theme_node, prob in seed_themes:
+            theme_relevance[theme_node] = prob
+            queue.append((theme_node, prob))
+            visited.add(theme_node)
+
+        while queue:
+            current_theme, current_rel = queue.popleft()
+            for neighbor in self.graph.neighbors(current_theme):
+                if self.graph.nodes[neighbor].get('type') != 'theme':
+                    continue
+                edge_data = self.graph[current_theme][neighbor]
+                edge_type = edge_data.get('edge_type')
+                if edge_type not in ['CO_PRESENCE', 'SEMANTIC_SIM']:
+                    continue
+                edge_weight = edge_data.get('weight', 0)
+                propagated_rel = current_rel * edge_weight
+                if propagated_rel < 0.1:
+                    continue
+                if neighbor not in theme_relevance:
+                    theme_relevance[neighbor] = propagated_rel
+                else:
+                    theme_relevance[neighbor] = max(theme_relevance[neighbor], propagated_rel)
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append((neighbor, propagated_rel))
+
+        # Score chunks based on theme relevance
+        scores = defaultdict(float)
+        for theme_node, relevance in theme_relevance.items():
+            for neighbor in self.graph.neighbors(theme_node):
+                edge_data = self.graph[theme_node][neighbor]
+                if (edge_data.get('edge_type') == 'HAS_TOPIC' and
+                    self.graph.nodes[neighbor].get('type') == 'chunk'):
+                    prob_weight = edge_data.get('weight', 0.0)
+                    scores[neighbor] += relevance * prob_weight
+
+        return dict(scores)
+
+    def _compute_entity_scores_for_claim(self, claim_text: str) -> Dict[str, float]:
+        """
+        Compute entity scores for a claim using entity graph traversal.
+
+        Args:
+            claim_text: The claim text
+
+        Returns:
+            Dictionary mapping chunk_id to entity score
+        """
+        from collections import deque, defaultdict
+
+        # Extract entities from claim
+        doc = self.nlp(claim_text)
+        claim_entities = []
+        for ent in doc.ents:
+            if ent.label_ in self.entity_types:
+                entity_text = ent.text.strip().lower()
+                if len(entity_text) > 2:
+                    entity_node = f"entity::{ent.label_}::{entity_text}"
+                    if self.graph.has_node(entity_node):
+                        claim_entities.append(entity_node)
+
+        if not claim_entities:
+            return {}
+
+        # BFS propagation through entity graph
+        entity_relevance = {e: 1.0 for e in claim_entities}
+        queue = deque([(e, 1.0) for e in claim_entities])
+        visited = set(claim_entities)
+
+        while queue:
+            current_entity, current_rel = queue.popleft()
+            for neighbor in self.graph.neighbors(current_entity):
+                if self.graph.nodes[neighbor].get('type') != 'entity':
+                    continue
+                edge_data = self.graph[current_entity][neighbor]
+                edge_type = edge_data.get('edge_type')
+                if edge_type not in ['CO_OCCURS', 'SEMANTIC_SIM']:
+                    continue
+                edge_weight = edge_data.get('weight', 0)
+                propagated_rel = current_rel * edge_weight
+                if propagated_rel < 0.1:
+                    continue
+                if neighbor not in entity_relevance:
+                    entity_relevance[neighbor] = propagated_rel
+                else:
+                    entity_relevance[neighbor] = max(entity_relevance[neighbor], propagated_rel)
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append((neighbor, propagated_rel))
+
+        # Score chunks based on entity relevance
+        scores = defaultdict(float)
+        for entity_node, relevance in entity_relevance.items():
+            for neighbor in self.graph.neighbors(entity_node):
+                edge_data = self.graph[entity_node][neighbor]
+                if (edge_data.get('edge_type') == 'MENTIONS' and
+                    self.graph.nodes[neighbor].get('type') == 'chunk'):
+                    tfidf_weight = edge_data.get('weight', 1.0)
+                    scores[neighbor] += relevance * tfidf_weight
+
+        return dict(scores)
 
     def save_to_postgres(
         self,

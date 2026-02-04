@@ -116,6 +116,7 @@ class HybridRetriever:
         self._precompute_chunk_embeddings(graph_id, cache_dir)
         self._precompute_chunk_topic_distributions(graph_id, models_dir)
         self._precompute_claim_embeddings()
+        self._load_claim_retrieval_results(graph_id, models_dir)
 
     def _precompute_chunk_embeddings(self, graph_id: Optional[str] = None, cache_dir: Optional[str] = None):
         """
@@ -263,6 +264,39 @@ class HybridRetriever:
         )
 
         self.logger.info(f"Pre-computed embeddings for {len(self.claim_nodes)} claims")
+
+    def _load_claim_retrieval_results(self, graph_id: Optional[str] = None, models_dir: Optional[str] = None):
+        """
+        Load pre-computed claim retrieval results from build phase.
+
+        Args:
+            graph_id: Graph ID to load results for
+            models_dir: Directory containing claim retrieval results
+        """
+        import json
+        from pathlib import Path
+
+        self.claim_retrieval_results = {}
+
+        if not graph_id or not models_dir:
+            self.logger.warning("No graph_id or models_dir provided, claim pre-retrieval results not loaded")
+            return
+
+        try:
+            models_path = Path(models_dir)
+            claim_retrieval_file = models_path / f"claim_retrieval_{graph_id}.json"
+
+            if claim_retrieval_file.exists():
+                self.logger.info(f"Loading claim pre-retrieval results from: {claim_retrieval_file}")
+                with open(claim_retrieval_file, 'r', encoding='utf-8') as f:
+                    self.claim_retrieval_results = json.load(f)
+                self.logger.info(f"Loaded pre-retrieval results for {len(self.claim_retrieval_results)} claims")
+            else:
+                self.logger.warning(f"Claim retrieval file not found: {claim_retrieval_file}")
+                self.logger.warning("Strategy 5 will fall back to computing results at retrieval time")
+        except Exception as e:
+            self.logger.warning(f"Error loading claim retrieval results: {e}")
+            self.logger.warning("Strategy 5 will fall back to computing results at retrieval time")
 
     def extract_entities(self, text: str) -> List[Tuple[str, str]]:
         """
@@ -685,25 +719,30 @@ class HybridRetriever:
 
         return scores
 
-    def retrieve_claim_document(self, query: str) -> Dict[str, float]:
+    def retrieve_claim_document(self, query: str) -> Tuple[Dict[str, float], List[Dict]]:
         """
-        Strategy 5: Claim-Document Retrieval.
+        Strategy 5: Claim-Based Retrieval using pre-computed claim retrieval results.
 
-        Finds claims semantically similar to the query, then retrieves chunks
-        from documents linked to those claims via REVIEWS edges.
+        Finds claims semantically similar to the query, then returns:
+        1. Chunk scores from pre-computed retrieval results for those claims
+        2. Details about which claims were matched and their similarity to the query
 
         Args:
             query: Query text to match against claims
 
         Returns:
-            Dictionary mapping chunk_id to score based on claim similarity
+            Tuple of:
+            - Dictionary mapping chunk_id to score based on claim retrieval
+            - List of matched claim details with their retrieval results
         """
-        self.logger.info("\n--- Strategy 5: Claim-Document Retrieval ---")
+        self.logger.info("\n--- Strategy 5: Claim-Based Retrieval (Pre-computed) ---")
+
+        matched_claims_details = []
 
         # Check if claims exist
         if self.claim_embeddings is None or len(self.claim_nodes) == 0:
             self.logger.warning("No claims in graph, skipping Strategy 5")
-            return {}
+            return {}, matched_claims_details
 
         # Embed query
         query_embedding = self.embedding_model.encode(
@@ -717,43 +756,46 @@ class HybridRetriever:
         # Get top-k claims
         top_indices = np.argsort(similarities)[-self.claim_top_k:][::-1]
 
-        self.logger.info(f"Top {self.claim_top_k} claims by similarity:")
-        top_claims_with_scores = []
+        self.logger.info(f"Top {self.claim_top_k} claims by similarity to query:")
+        scores = {}
+
         for idx in top_indices:
             claim_node = self.claim_nodes[idx]
-            sim = similarities[idx]
-            claim_text = self.claim_texts[idx][:100] + "..." if len(self.claim_texts[idx]) > 100 else self.claim_texts[idx]
-            self.logger.info(f"  {claim_node}: {sim:.3f} - {claim_text}")
-            top_claims_with_scores.append((claim_node, float(sim)))
+            claim_similarity = float(similarities[idx])
+            claim_text = self.claim_texts[idx]
 
-        # Get documents linked to these claims via REVIEWS edges
-        doc_scores = {}  # doc_node -> max similarity score
-        for claim_node, sim in top_claims_with_scores:
-            for neighbor in self.graph.neighbors(claim_node):
-                edge_data = self.graph[claim_node][neighbor]
-                if edge_data.get('edge_type') == 'REVIEWS':
-                    # neighbor is a document node
-                    if self.graph.nodes[neighbor].get('type') == 'document':
-                        if neighbor not in doc_scores:
-                            doc_scores[neighbor] = sim
-                        else:
-                            doc_scores[neighbor] = max(doc_scores[neighbor], sim)
+            claim_text_preview = claim_text[:100] + "..." if len(claim_text) > 100 else claim_text
+            self.logger.info(f"  {claim_node}: similarity={claim_similarity:.3f}")
+            self.logger.info(f"    Claim: {claim_text_preview}")
 
-        self.logger.info(f"Found {len(doc_scores)} documents linked to top claims")
+            # Get pre-computed retrieval results for this claim
+            if claim_node in self.claim_retrieval_results:
+                claim_data = self.claim_retrieval_results[claim_node]
+                retrieval_results = claim_data.get('retrieval_results', [])
 
-        # Get chunks from these documents via CONTAINS edges
-        scores = {}
-        for doc_node, doc_sim in doc_scores.items():
-            for neighbor in self.graph.neighbors(doc_node):
-                edge_data = self.graph[doc_node][neighbor]
-                if (edge_data.get('edge_type') == 'CONTAINS' and
-                    self.graph.nodes[neighbor].get('type') == 'chunk'):
-                    # Score = semantic similarity between query and claim
-                    chunk_id = neighbor
+                self.logger.info(f"    Pre-computed results: {len(retrieval_results)} chunks")
+
+                # Store matched claim details
+                matched_claims_details.append({
+                    'claim_node': claim_node,
+                    'claim_text': claim_text,
+                    'query_similarity': claim_similarity,
+                    'retrieval_results': retrieval_results[:10]  # Top 10 chunks per claim
+                })
+
+                # Add chunk scores weighted by claim similarity
+                for result in retrieval_results:
+                    chunk_id = result['chunk_id']
+                    chunk_score = result['score_total']
+                    # Final score = claim similarity × chunk retrieval score
+                    combined_score = claim_similarity * chunk_score
+
                     if chunk_id not in scores:
-                        scores[chunk_id] = doc_sim
+                        scores[chunk_id] = combined_score
                     else:
-                        scores[chunk_id] = max(scores[chunk_id], doc_sim)
+                        scores[chunk_id] = max(scores[chunk_id], combined_score)
+            else:
+                self.logger.warning(f"    No pre-computed results for {claim_node}")
 
         # Normalize scores (min-max)
         if scores:
@@ -765,11 +807,11 @@ class HybridRetriever:
                     for k, v in scores.items()
                 }
 
-        self.logger.info(f"Found {len(scores)} chunks via claim-document retrieval")
+        self.logger.info(f"Found {len(scores)} chunks via claim-based retrieval")
         if scores:
             self.logger.info(f"Top score: {max(scores.values()):.3f}")
 
-        return scores
+        return scores, matched_claims_details
 
     def retrieve(self, claim: str) -> List[Dict]:
         """
@@ -812,8 +854,8 @@ class HybridRetriever:
         # Strategy 4: Entity Graph Traversal
         S4 = self.retrieve_entity(claim)
 
-        # Strategy 5: Claim-Document Retrieval
-        S5 = self.retrieve_claim_document(claim)
+        # Strategy 5: Claim-Based Retrieval (using pre-computed results)
+        S5, matched_claims = self.retrieve_claim_document(claim)
 
         # Fusion: combine scores
         all_chunks = set(S1.keys()) | set(S2.keys()) | set(S3.keys()) | set(S4.keys()) | set(S5.keys())
@@ -861,9 +903,20 @@ class HybridRetriever:
         # Return top-K
         top_results = results[:self.top_k]
 
-        # Add claim to all results
-        for result in top_results:
+        # Add claim and matched claims info to results
+        for i, result in enumerate(top_results):
             result['claim'] = claim
+            # Add matched claims details to first result only (to avoid duplication)
+            if i == 0 and matched_claims:
+                result['matched_claims'] = matched_claims
+
+        # Log matched claims summary
+        if matched_claims:
+            self.logger.info(f"\n--- Matched Claims for Strategy 5 ---")
+            for mc in matched_claims:
+                self.logger.info(f"  Claim: {mc['claim_node']} (similarity: {mc['query_similarity']:.3f})")
+                self.logger.info(f"    Text: {mc['claim_text'][:80]}...")
+                self.logger.info(f"    Pre-computed chunks: {len(mc['retrieval_results'])}")
 
         self.logger.info(f"\nTop {len(top_results)} results:")
         for i, result in enumerate(top_results[:5], 1):

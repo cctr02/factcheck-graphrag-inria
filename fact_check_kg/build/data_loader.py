@@ -131,12 +131,22 @@ def load_and_chunk_documents(
         logger.info(f"Loading documents from {csv_path}")
 
     # Load documents with metadata
+    # Try to detect the correct language column (fc_lang or language)
+    import pandas as pd
+    df_peek = pd.read_csv(csv_path, nrows=1)
+    if "fc_lang" in df_peek.columns:
+        lang_col = "fc_lang"
+    elif "language" in df_peek.columns:
+        lang_col = "language"
+    else:
+        lang_col = "fc_lang"  # Default, will raise error if missing
+
     texts, doc_names, metadata_list = load_corpus_from_csv(
         csv_path,
         lang_value=lang_value,
         logger=logger,
         return_metadata=True,
-        lang_col="fc_lang",  # Use fc_lang for filtering documents
+        lang_col=lang_col,
         review_date_col="review_date"
     )
 
