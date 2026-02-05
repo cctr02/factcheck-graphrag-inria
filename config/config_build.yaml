@@ -9,14 +9,14 @@
 # ============================================================================
 graph_construction:
   # Data loading
-  max_documents: 100  # Maximum number of documents to process (-1 for all)
+  max_documents: -1  # Maximum number of documents to process (-1 for all)
 
   # Text chunking
   chunk_size: 500  # Size of text chunks in characters
   chunk_overlap: 100  # Overlap between chunks in characters
 
   # Topic modeling (BERTopic)
-  min_topic_size: 25  # Minimum size for a topic (trade-off between granularity and number of topics)
+  min_topic_size: 10  # Minimum size for a topic (trade-off between granularity and number of topics)
   nr_topics: null  # Number of topics (null = auto-detect)
   topic_probability_threshold: 0.15  # Minimum probability to create HAS_TOPIC edge
 

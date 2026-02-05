@@ -486,7 +486,7 @@ Topic label:"""
         claims: Optional[List[Dict]] = None,
         claim_to_docs: Optional[Dict[str, List[str]]] = None,
         doc_metadata: Optional[Dict[str, Dict]] = None
-    ) -> Tuple[nx.Graph, np.ndarray, List[str]]:
+    ) -> Tuple[nx.Graph, np.ndarray, List[str], Dict[str, Dict]]:
         """
         Build the complete knowledge graph.
 
@@ -501,10 +501,11 @@ Topic label:"""
                 text (title\\nbody), review_date, language
 
         Returns:
-            Tuple of (graph, topic_probabilities, chunk_ids)
+            Tuple of (graph, topic_probabilities, chunk_ids, claim_retrieval_results)
             - graph: NetworkX graph with all nodes and edges
             - topic_probabilities: numpy array of shape (n_chunks, n_topics)
             - chunk_ids: list of chunk IDs matching probability rows
+            - claim_retrieval_results: dict mapping claim_id to pre-computed retrieval results
 
         Example:
             >>> chunks = [{"chunk_id": "chunk::0::0", "doc_id": "0", ...}]
@@ -1382,10 +1383,34 @@ Topic label:"""
             json.dump(general_stats, f, indent=2)
         self.logger.info(f"General statistics saved to: {stats_dir}/general_stats_{timestamp}.json")
 
-        # 2. Topic statistics with document counts
+        # 2. Topic statistics with document counts (based on actual HAS_TOPIC edges)
+        # Build mapping from themes to chunks using actual graph edges
+        theme_to_chunks = defaultdict(set)
+        chunks_with_topics = set()
+
+        for u, v, data in self.graph.edges(data=True):
+            if data.get('edge_type') == 'HAS_TOPIC':
+                # u is chunk, v is theme
+                if u.startswith('chunk::') and v.startswith('theme::'):
+                    theme_to_chunks[v].add(u)
+                    chunks_with_topics.add(u)
+                elif v.startswith('chunk::') and u.startswith('theme::'):
+                    theme_to_chunks[u].add(v)
+                    chunks_with_topics.add(v)
+
+        # Count outliers (chunks assigned to topic -1)
+        num_outliers = sum(1 for t in topics if t == -1)
+        # Count chunks without any topic (no HAS_TOPIC edges)
+        all_chunk_nodes = {n for n, d in self.graph.nodes(data=True) if d.get('type') == 'chunk'}
+        chunks_without_topics = all_chunk_nodes - chunks_with_topics
+
         topic_stats = {
             "timestamp": timestamp,
             "total_topics": len(set(topics)) - (1 if -1 in topics else 0),
+            "total_chunks": len(chunks),
+            "chunks_with_topics": len(chunks_with_topics),
+            "chunks_without_topics": len(chunks_without_topics),
+            "outlier_chunks": num_outliers,
             "topics": []
         }
 
@@ -1393,17 +1418,21 @@ Topic label:"""
         if -1 in unique_topics:
             unique_topics.remove(-1)
 
+        # Create chunk_id to doc_id mapping
+        chunk_id_to_doc_id = {c['chunk_id']: c['doc_id'] for c in chunks}
+
         for topic_id in sorted(unique_topics):
             topic_words = topic_model.get_topic(topic_id)
             if not topic_words:
                 continue
 
-            # Count documents for this topic
-            topic_chunks = [i for i, t in enumerate(topics) if t == topic_id]
-            topic_doc_ids = set(chunks[i]['doc_id'] for i in topic_chunks if i < len(chunks))
+            # Count chunks and documents based on actual HAS_TOPIC edges
+            theme_node = f"theme::{topic_id}"
+            topic_chunk_ids = theme_to_chunks.get(theme_node, set())
+            topic_doc_ids = set(chunk_id_to_doc_id.get(cid, '') for cid in topic_chunk_ids if cid in chunk_id_to_doc_id)
+            topic_doc_ids.discard('')  # Remove empty doc_ids
 
             # Get theme label and processed keywords from graph
-            theme_node = f"theme::{topic_id}"
             if self.graph.has_node(theme_node):
                 theme_label = self.graph.nodes[theme_node].get('label', '')
                 processed_keywords = self.graph.nodes[theme_node].get('keywords', [])
@@ -1414,7 +1443,7 @@ Topic label:"""
             topic_info = {
                 "topic_id": topic_id,
                 "label": theme_label,
-                "num_chunks": len(topic_chunks),
+                "num_chunks": len(topic_chunk_ids),
                 "num_documents": len(topic_doc_ids),
                 "top_words": [{"word": word, "score": float(score)} for word, score in topic_words[:10]],
                 "keywords": processed_keywords  # Use processed keywords from graph node
@@ -1425,6 +1454,9 @@ Topic label:"""
         with open(stats_dir / f"topic_stats_{timestamp}.json", 'w') as f:
             json.dump(topic_stats, f, indent=2)
         self.logger.info(f"Topic statistics saved to: {stats_dir}/topic_stats_{timestamp}.json")
+        self.logger.info(f"  - Chunks with topics: {topic_stats['chunks_with_topics']}/{topic_stats['total_chunks']}")
+        self.logger.info(f"  - Chunks without topics: {topic_stats['chunks_without_topics']}")
+        self.logger.info(f"  - Outlier chunks (topic -1): {topic_stats['outlier_chunks']}")
 
         # 3. Entity statistics
         entity_stats = {
@@ -1582,10 +1614,10 @@ Nodes by Type:
         chunk_ids: List[str]
     ) -> Dict[str, Dict]:
         """
-        Pre-compute retrieval results for each claim using 4 strategies.
+        Pre-compute retrieval results for each claim using 4 strategies (OPTIMIZED).
 
-        For each claim, runs the 4 retrieval strategies (semantic, topic distribution,
-        thematic graph, entity graph) and stores the top chunks with scores.
+        Uses batch processing for embeddings and topic transforms to significantly
+        reduce computation time.
 
         Args:
             claims: List of claim dictionaries
@@ -1594,78 +1626,86 @@ Nodes by Type:
             chunk_ids: List of chunk IDs
 
         Returns:
-            Dictionary mapping claim_id to retrieval results:
-            {
-                "claim::123": {
-                    "claim_text": "...",
-                    "retrieval_results": [
-                        {"chunk_id": "...", "score": 0.85, "strategies": {...}},
-                        ...
-                    ]
-                }
-            }
+            Dictionary mapping claim_id to retrieval results
         """
         from scipy.spatial.distance import jensenshannon
         from collections import defaultdict
 
-        self.logger.info(f"Pre-computing retrieval for {len(claims)} claims...")
+        self.logger.info(f"Pre-computing retrieval for {len(claims)} claims (optimized batch mode)...")
 
-        # Pre-compute chunk embeddings
+        # Filter valid claims
+        valid_claims = [(c['claim_id'], c.get('text', '')) for c in claims if c.get('text', '')]
+        if not valid_claims:
+            self.logger.warning("No valid claims to process")
+            return {}
+
+        claim_ids, claim_texts = zip(*valid_claims)
+        self.logger.info(f"Processing {len(claim_texts)} valid claims")
+
+        # BATCH 1: Pre-compute ALL chunk embeddings at once
         chunk_texts = [self.graph.nodes[cid].get('text', '') for cid in chunk_ids]
-        self.logger.info("Computing chunk embeddings...")
+        self.logger.info("Computing chunk embeddings (batch)...")
         chunk_embeddings = self.embedding_model.encode(
             chunk_texts,
             show_progress_bar=True,
-            normalize_embeddings=True
+            normalize_embeddings=True,
+            batch_size=64
         )
 
-        # Create chunk_to_dist_idx mapping
-        chunk_to_dist_idx = {cid: idx for idx, cid in enumerate(chunk_ids)}
+        # BATCH 2: Pre-compute ALL claim embeddings at once
+        self.logger.info("Computing claim embeddings (batch)...")
+        claim_embeddings = self.embedding_model.encode(
+            list(claim_texts),
+            show_progress_bar=True,
+            normalize_embeddings=True,
+            batch_size=64
+        )
 
+        # BATCH 3: Compute ALL semantic similarities at once (claims x chunks matrix)
+        self.logger.info("Computing semantic similarity matrix...")
+        # Shape: (num_claims, num_chunks)
+        all_S1_scores = np.matmul(claim_embeddings, chunk_embeddings.T)
+        # Min-max normalize per claim (row-wise)
+        S1_min = all_S1_scores.min(axis=1, keepdims=True)
+        S1_max = all_S1_scores.max(axis=1, keepdims=True)
+        S1_range = S1_max - S1_min
+        S1_range[S1_range == 0] = 1  # Avoid division by zero
+        all_S1_normalized = (all_S1_scores - S1_min) / S1_range
+
+        # BATCH 4: Pre-compute ALL claim topic distributions at once
+        self.logger.info("Computing claim topic distributions (batch)...")
+        _, all_claim_topic_probs = topic_model.transform(list(claim_texts))
+
+        # BATCH 5: Compute ALL JS divergence scores (vectorized)
+        self.logger.info("Computing topic distribution similarities...")
+        all_S2_scores = np.zeros((len(claim_texts), len(chunk_ids)))
+        for claim_idx, claim_dist in enumerate(all_claim_topic_probs):
+            for chunk_idx in range(len(chunk_ids)):
+                chunk_dist = probabilities[chunk_idx]
+                js_div = jensenshannon(claim_dist, chunk_dist)
+                all_S2_scores[claim_idx, chunk_idx] = 1.0 - js_div
+        # Min-max normalize per claim
+        S2_min = all_S2_scores.min(axis=1, keepdims=True)
+        S2_max = all_S2_scores.max(axis=1, keepdims=True)
+        S2_range = S2_max - S2_min
+        S2_range[S2_range == 0] = 1
+        all_S2_normalized = (all_S2_scores - S2_min) / S2_range
+
+        # Process S3 and S4 per claim (these depend on graph structure, harder to batch)
+        self.logger.info("Computing thematic and entity scores per claim...")
         claim_retrieval_results = {}
 
-        for claim in tqdm(claims, desc="Pre-computing claim retrieval"):
-            claim_id = claim['claim_id']
-            claim_text = claim.get('text', '')
+        for idx, (claim_id, claim_text) in enumerate(tqdm(valid_claims, desc="Finalizing claim retrieval")):
             claim_node = f"claim::{claim_id}"
 
-            if not claim_text:
-                continue
+            # Get pre-computed S1 and S2 scores
+            S1_scores = {cid: all_S1_normalized[idx, i] for i, cid in enumerate(chunk_ids)}
+            S2_scores = {cid: all_S2_normalized[idx, i] for i, cid in enumerate(chunk_ids)}
 
-            # Strategy 1: Semantic Similarity
-            claim_embedding = self.embedding_model.encode(
-                [claim_text],
-                normalize_embeddings=True
-            )[0]
-            S1_scores = {}
-            similarities = np.matmul(chunk_embeddings, claim_embedding)
-            for cid, sim in zip(chunk_ids, similarities):
-                S1_scores[cid] = float(sim)
-
-            # Normalize S1
-            if S1_scores:
-                min_s, max_s = min(S1_scores.values()), max(S1_scores.values())
-                if max_s > min_s:
-                    S1_scores = {k: (v - min_s) / (max_s - min_s) for k, v in S1_scores.items()}
-
-            # Strategy 2: Topic Distribution Similarity
-            _, claim_topic_probs = topic_model.transform([claim_text])
-            claim_distribution = claim_topic_probs[0]
-            S2_scores = {}
-            for cid, dist_idx in chunk_to_dist_idx.items():
-                chunk_distribution = probabilities[dist_idx]
-                js_div = jensenshannon(claim_distribution, chunk_distribution)
-                S2_scores[cid] = 1.0 - float(js_div)
-
-            # Normalize S2
-            if S2_scores:
-                min_s, max_s = min(S2_scores.values()), max(S2_scores.values())
-                if max_s > min_s:
-                    S2_scores = {k: (v - min_s) / (max_s - min_s) for k, v in S2_scores.items()}
-
-            # Strategy 3: Thematic Graph Traversal
-            S3_scores = self._compute_thematic_scores_for_claim(claim_text, topic_model)
-
+            # Strategy 3: Thematic Graph Traversal (uses pre-computed topic probs)
+            S3_scores = self._compute_thematic_scores_for_claim_with_probs(
+                all_claim_topic_probs[idx]
+            )
             # Normalize S3
             if S3_scores:
                 min_s, max_s = min(S3_scores.values()), max(S3_scores.values())
@@ -1674,14 +1714,13 @@ Nodes by Type:
 
             # Strategy 4: Entity Graph Traversal
             S4_scores = self._compute_entity_scores_for_claim(claim_text)
-
             # Normalize S4
             if S4_scores:
                 min_s, max_s = min(S4_scores.values()), max(S4_scores.values())
                 if max_s > min_s:
                     S4_scores = {k: (v - min_s) / (max_s - min_s) for k, v in S4_scores.items()}
 
-            # Combine scores (equal weights for simplicity: 0.25 each)
+            # Combine scores (equal weights: 0.25 each)
             all_chunks = set(S1_scores.keys()) | set(S2_scores.keys()) | set(S3_scores.keys()) | set(S4_scores.keys())
             combined_results = []
 
@@ -1694,11 +1733,11 @@ Nodes by Type:
 
                 combined_results.append({
                     "chunk_id": cid,
-                    "score_total": round(total_score, 4),
-                    "score_semantic": round(s1, 4),
-                    "score_topic_dist": round(s2, 4),
-                    "score_thematic": round(s3, 4),
-                    "score_entity": round(s4, 4)
+                    "score_total": round(float(total_score), 4),
+                    "score_semantic": round(float(s1), 4),
+                    "score_topic_dist": round(float(s2), 4),
+                    "score_thematic": round(float(s3), 4),
+                    "score_entity": round(float(s4), 4)
                 })
 
             # Sort by total score and keep top 20
@@ -1713,6 +1752,68 @@ Nodes by Type:
 
         self.logger.info(f"Pre-computed retrieval for {len(claim_retrieval_results)} claims")
         return claim_retrieval_results
+
+    def _compute_thematic_scores_for_claim_with_probs(self, claim_topic_probs: np.ndarray) -> Dict[str, float]:
+        """
+        Compute thematic scores using pre-computed topic probabilities.
+
+        Optimized version that takes pre-computed probs instead of recomputing.
+        """
+        from collections import deque, defaultdict
+
+        # Detect themes above threshold (0.01)
+        seed_themes = []
+        for idx, prob in enumerate(claim_topic_probs):
+            if prob > 0.01:
+                theme_node = f"theme::{idx}"
+                if self.graph.has_node(theme_node):
+                    seed_themes.append((theme_node, prob))
+
+        if not seed_themes:
+            return {}
+
+        # BFS propagation through theme graph
+        theme_relevance = {}
+        queue = deque()
+        visited = set()
+
+        for theme_node, prob in seed_themes:
+            theme_relevance[theme_node] = prob
+            queue.append((theme_node, prob))
+            visited.add(theme_node)
+
+        while queue:
+            current_theme, current_rel = queue.popleft()
+            for neighbor in self.graph.neighbors(current_theme):
+                if self.graph.nodes[neighbor].get('type') != 'theme':
+                    continue
+                edge_data = self.graph[current_theme][neighbor]
+                edge_type = edge_data.get('edge_type')
+                if edge_type not in ['CO_PRESENCE', 'SEMANTIC_SIM']:
+                    continue
+                edge_weight = edge_data.get('weight', 0)
+                propagated_rel = current_rel * edge_weight
+                if propagated_rel < 0.1:
+                    continue
+                if neighbor not in theme_relevance:
+                    theme_relevance[neighbor] = propagated_rel
+                else:
+                    theme_relevance[neighbor] = max(theme_relevance[neighbor], propagated_rel)
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append((neighbor, propagated_rel))
+
+        # Score chunks based on theme relevance
+        scores = defaultdict(float)
+        for theme_node, relevance in theme_relevance.items():
+            for neighbor in self.graph.neighbors(theme_node):
+                if self.graph.nodes[neighbor].get('type') == 'chunk':
+                    edge_data = self.graph[theme_node][neighbor]
+                    if edge_data.get('edge_type') == 'HAS_TOPIC':
+                        weight = edge_data.get('weight', 1.0)
+                        scores[neighbor] = max(scores[neighbor], relevance * weight)
+
+        return dict(scores)
 
     def _compute_thematic_scores_for_claim(self, claim_text: str, topic_model: BERTopic) -> Dict[str, float]:
         """
