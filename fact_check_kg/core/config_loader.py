@@ -21,6 +21,7 @@ class PathsConfig:
     """Paths configuration."""
     data_dir: str
     csv_file: str
+    claims_csv_file: str
     outputs_dir: str
     graphs_dir: str
     visualizations_dir: str
@@ -45,6 +46,9 @@ class GraphConstructionConfig:
     temporal_decay_rate: float
     topic_keywords_initial: int
     topic_keywords_final: int
+    keyphrase_top_n: int
+    keyphrase_ngram_min: int
+    keyphrase_ngram_max: int
     entity_types: List[str]
 
 
@@ -57,11 +61,52 @@ class ModelsConfig:
     # LLM fields are optional (only used during build)
     llm_model: Optional[str] = None
     llm_endpoint: Optional[str] = None
-    llm_temperature: Optional[float] = None
-    llm_max_tokens: Optional[int] = None
-    llm_timeout: Optional[int] = None
-    llm_label_max_length: Optional[int] = None
-    llm_label_max_words: Optional[int] = None
+
+
+@dataclass
+class LLMBatchLabelingConfig:
+    """LLM batch labeling configuration for topic labeling."""
+    # Prompt template
+    prompt_template: str
+
+    # Batch size settings
+    batch_size_default: int
+    batch_size_min: int
+    batch_size_max: int
+    batch_size_step: int
+
+    # Label constraints
+    label_min_words: int
+    label_max_words: int
+    label_max_length: int
+
+    # Keywords per topic
+    max_keywords_per_topic: int
+
+    # Retry settings
+    retry_count: int
+    retry_temperature: float
+
+    # Timeout settings
+    batch_timeout: int
+
+    # Auto-tuning settings
+    success_streak_threshold: int
+    hysteresis_decrease_factor: float
+
+    # Failure strategy
+    failure_strategy: str
+
+    def __post_init__(self):
+        """Validate configuration."""
+        if self.batch_size_min < 1:
+            raise ConfigError("batch_size_min must be >= 1")
+        if self.batch_size_max < self.batch_size_min:
+            raise ConfigError("batch_size_max must be >= batch_size_min")
+        if self.batch_size_default < self.batch_size_min or self.batch_size_default > self.batch_size_max:
+            raise ConfigError("batch_size_default must be between batch_size_min and batch_size_max")
+        if self.failure_strategy not in ("binary_split", "single_fallback"):
+            raise ConfigError(f"Invalid failure_strategy: {self.failure_strategy}")
 
 
 @dataclass
@@ -86,6 +131,7 @@ class RetrievalConfig:
     gamma: float
     delta: float
     epsilon: float
+    entity_types: List[str]
     top_k: int
     theme_threshold: float
     entity_relevance_threshold: float
@@ -93,7 +139,7 @@ class RetrievalConfig:
     direct_path_weight: float
     co_occurrence_path_weight: float
     theme_path_weight: float
-    claim_top_k: int = 5
+    claim_top_k: int
 
     def __post_init__(self):
         """Validate that weights sum to 1.0."""
@@ -246,6 +292,11 @@ class Config:
                 self.graph_construction = GraphConstructionConfig(**self._raw_config['graph_construction'])
             else:
                 self.graph_construction = None
+
+            if 'llm_batch_labeling' in self._raw_config:
+                self.llm_batch_labeling = LLMBatchLabelingConfig(**self._raw_config['llm_batch_labeling'])
+            else:
+                self.llm_batch_labeling = None
 
             if 'retrieval' in self._raw_config:
                 self.retrieval = RetrievalConfig(**self._raw_config['retrieval'])

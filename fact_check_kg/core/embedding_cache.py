@@ -24,14 +24,14 @@ class EmbeddingCache:
 
     def __init__(
         self,
-        dimension: int = 384,  # all-MiniLM-L6-v2 dimension
+        dimension: int,
         logger: Optional[logging.Logger] = None
     ):
         """
         Initialize the embedding cache.
 
         Args:
-            dimension: Dimension of embeddings (default: 384 for all-MiniLM-L6-v2)
+            dimension: Dimension of embeddings (from config.models.embedding_dimension)
             logger: Optional logger instance
         """
         self.dimension = dimension

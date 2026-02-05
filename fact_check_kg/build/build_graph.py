@@ -27,34 +27,10 @@ def main():
     """Main function to build and save the knowledge graph."""
     parser = argparse.ArgumentParser(description="Build Knowledge Graph for Fact-Checking")
     parser.add_argument(
-        "--csv",
-        type=str,
-        default="../data/english_fact_checks.csv",
-        help="Path to CSV file"
-    )
-    parser.add_argument(
-        "--output",
-        type=str,
-        default="knowledge_graph.gpickle",
-        help="Output path for graph file"
-    )
-    parser.add_argument(
         "--max-docs",
         type=int,
-        default=100,
-        help="Maximum number of documents to process (for testing)"
-    )
-    parser.add_argument(
-        "--chunk-size",
-        type=int,
-        default=500,
-        help="Size of text chunks in characters"
-    )
-    parser.add_argument(
-        "--chunk-overlap",
-        type=int,
-        default=100,
-        help="Overlap between chunks in characters"
+        default=None,
+        help="Maximum number of documents to process (default: from config)"
     )
     parser.add_argument(
         "--log-level",
@@ -63,111 +39,84 @@ def main():
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Logging level"
     )
-    parser.add_argument(
-        "--db-host",
-        type=str,
-        default="localhost",
-        help="PostgreSQL host"
-    )
-    parser.add_argument(
-        "--db-port",
-        type=int,
-        default=5432,
-        help="PostgreSQL port"
-    )
-    parser.add_argument(
-        "--db-name",
-        type=str,
-        default="knowledge_graph",
-        help="PostgreSQL database name"
-    )
-    parser.add_argument(
-        "--db-user",
-        type=str,
-        default="postgres",
-        help="PostgreSQL username"
-    )
-    parser.add_argument(
-        "--db-password",
-        type=str,
-        default="postgres",
-        help="PostgreSQL password"
-    )
-    parser.add_argument(
-        "--claims-csv",
-        type=str,
-        default="../data/claim_reviews.csv",
-        help="Path to claims CSV file (separate from documents)"
-    )
-    parser.add_argument(
-        "--no-claims",
-        action="store_true",
-        help="Skip claim loading and pre-retrieval (Steps 9-10)"
-    )
     args = parser.parse_args()
 
-    # Load build configuration
+    # Load build configuration - ALL parameters come from config
     config = get_build_config()
 
-    # Setup logging using centralized logger
+    # Setup logging first
     logger = get_logger("build_graph", args.log_level)
+
+    # Check for CLI overrides and log them
+    max_docs = config.graph_construction.max_documents
+    if args.max_docs is not None:
+        logger.info(f"[CLI OVERRIDE] max_docs: {config.graph_construction.max_documents} -> {args.max_docs}")
+        max_docs = args.max_docs
+
+    # All parameters from config
+    csv_path = config.paths.csv_file
+    claims_csv_path = config.paths.claims_csv_file
+    chunk_size = config.graph_construction.chunk_size
+    chunk_overlap = config.graph_construction.chunk_overlap
+    db_host = config.database.host
+    db_port = config.database.port
+    db_name = config.database.database
+    db_user = config.database.user
+    db_password = config.database.password
 
     logger.info("=" * 60)
     logger.info("KNOWLEDGE GRAPH BUILDER")
     logger.info("=" * 60)
-    logger.info(f"CSV file: {args.csv}")
-    logger.info(f"Output: {args.output}")
-    logger.info(f"Max documents: {args.max_docs}")
-    logger.info(f"Chunk size: {args.chunk_size}")
-    logger.info(f"Chunk overlap: {args.chunk_overlap}")
+    logger.info(f"CSV file: {csv_path}")
+    logger.info(f"Claims CSV: {claims_csv_path}")
+    logger.info(f"Max documents: {max_docs}")
+    logger.info(f"Chunk size: {chunk_size}")
+    logger.info(f"Chunk overlap: {chunk_overlap}")
     logger.info("=" * 60)
 
     # Step 1: Load and chunk documents
     logger.info("\n### STEP 1: Loading and chunking documents ###")
 
-    # Handle both absolute and relative paths
-    if os.path.isabs(args.csv):
-        csv_path = args.csv
-    else:
-        # If relative path starts with "..", resolve from script directory
-        # Otherwise, resolve from current working directory (for CLI usage)
-        if args.csv.startswith(".."):
-            csv_path = os.path.join(os.path.dirname(__file__), args.csv)
-        else:
-            csv_path = args.csv
-
     chunks, n_docs, doc_metadata = load_and_chunk_documents(
         csv_path=csv_path,
-        chunk_size=args.chunk_size,
-        chunk_overlap=args.chunk_overlap,
-        max_docs=args.max_docs,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        max_docs=max_docs,
         logger=logger
     )
 
-    # Step 1b: Load claims from separate CSV (optional)
+    # Step 1b: Load claims from separate CSV
     claims = None
     claim_to_docs = None
-    if not args.no_claims:
-        logger.info("\n### STEP 1b: Loading claims ###")
-        # Handle claims CSV path
-        if os.path.isabs(args.claims_csv):
-            claims_csv_path = args.claims_csv
-        elif args.claims_csv.startswith(".."):
-            claims_csv_path = os.path.join(os.path.dirname(__file__), args.claims_csv)
-        else:
-            claims_csv_path = args.claims_csv
+    logger.info("\n### STEP 1b: Loading claims ###")
 
-        if os.path.exists(claims_csv_path):
-            claims, claim_to_docs = load_claims(
-                csv_path=claims_csv_path,
-                max_claims=args.max_docs,  # Use same limit as documents
-                logger=logger
-            )
-        else:
-            logger.warning(f"Claims CSV not found: {claims_csv_path}")
-            logger.warning("Skipping claim loading (Steps 9-10 will be skipped)")
+    if os.path.exists(claims_csv_path):
+        claims, claim_to_docs = load_claims(
+            csv_path=claims_csv_path,
+            max_claims=None,  # Load all claims first, then filter
+            logger=logger
+        )
+
+        # Filter claims to only those that link to loaded documents
+        loaded_doc_ids = set(c['doc_id'] for c in chunks)
+        logger.info(f"Loaded {len(loaded_doc_ids)} documents, filtering claims...")
+
+        # Filter claim_to_docs to only include loaded documents
+        filtered_claim_to_docs = {}
+        for claim_id, doc_ids in claim_to_docs.items():
+            matching_docs = [d for d in doc_ids if d in loaded_doc_ids]
+            if matching_docs:
+                filtered_claim_to_docs[claim_id] = matching_docs
+
+        # Filter claims to only those with at least one matching document
+        matching_claim_ids = set(filtered_claim_to_docs.keys())
+        claims = [c for c in claims if c['claim_id'] in matching_claim_ids]
+        claim_to_docs = filtered_claim_to_docs
+
+        logger.info(f"After filtering: {len(claims)} claims linked to loaded documents")
     else:
-        logger.info("\n### STEP 1b: Skipping claim loading (--no-claims flag) ###")
+        logger.warning(f"Claims CSV not found: {claims_csv_path}")
+        logger.warning("Skipping claim loading (Steps 9-10 will be skipped)")
 
     # Step 2: Initialize graph builder
     logger.info("\n### STEP 2: Initializing graph builder ###")
@@ -182,13 +131,31 @@ def main():
         temporal_decay_rate=config.graph_construction.temporal_decay_rate,
         topic_keywords_initial=config.graph_construction.topic_keywords_initial,
         topic_keywords_final=config.graph_construction.topic_keywords_final,
+        # LLM configuration
         llm_endpoint=config.models.llm_endpoint,
         llm_model=config.models.llm_model,
-        llm_temperature=config.models.llm_temperature,
-        llm_max_tokens=config.models.llm_max_tokens,
-        llm_timeout=config.models.llm_timeout,
-        llm_label_max_length=config.models.llm_label_max_length,
-        llm_label_max_words=config.models.llm_label_max_words,
+        # LLM batch labeling configuration
+        llm_batch_prompt_template=config.llm_batch_labeling.prompt_template,
+        llm_batch_size_default=config.llm_batch_labeling.batch_size_default,
+        llm_batch_size_min=config.llm_batch_labeling.batch_size_min,
+        llm_batch_size_max=config.llm_batch_labeling.batch_size_max,
+        llm_batch_size_step=config.llm_batch_labeling.batch_size_step,
+        llm_label_min_words=config.llm_batch_labeling.label_min_words,
+        llm_label_max_words=config.llm_batch_labeling.label_max_words,
+        llm_label_max_length=config.llm_batch_labeling.label_max_length,
+        llm_max_keywords_per_topic=config.llm_batch_labeling.max_keywords_per_topic,
+        llm_retry_count=config.llm_batch_labeling.retry_count,
+        llm_retry_temperature=config.llm_batch_labeling.retry_temperature,
+        llm_batch_timeout=config.llm_batch_labeling.batch_timeout,
+        llm_success_streak_threshold=config.llm_batch_labeling.success_streak_threshold,
+        llm_hysteresis_decrease_factor=config.llm_batch_labeling.hysteresis_decrease_factor,
+        llm_failure_strategy=config.llm_batch_labeling.failure_strategy,
+        # Keyphrase configuration
+        keyphrase_top_n=config.graph_construction.keyphrase_top_n,
+        keyphrase_ngram_range=(
+            config.graph_construction.keyphrase_ngram_min,
+            config.graph_construction.keyphrase_ngram_max
+        ),
         logger=logger
     )
 
@@ -224,9 +191,6 @@ def main():
     for _, _, data in graph.edges(data=True):
         edge_type = data.get('type', 'unknown')
         edge_type_counts[edge_type] = edge_type_counts.get(edge_type, 0) + 1
-
-    # DUAL STORAGE: Save to BOTH pickle and PostgreSQL
-    logger.info("Saving graph to BOTH pickle and PostgreSQL...")
 
     # 1. Save graph as pickle in outputs/graphs
     graph_filename = f"graph_{timestamp}.gpickle"
@@ -302,9 +266,9 @@ def main():
             "embeddings_faiss": str(embeddings_dir / f"embeddings_{timestamp}.faiss"),
             "embeddings_meta": str(embeddings_dir / f"embeddings_{timestamp}.pkl"),
         },
-        "max_documents": args.max_docs,
-        "chunk_size": args.chunk_size,
-        "chunk_overlap": args.chunk_overlap,
+        "max_documents": max_docs,
+        "chunk_size": chunk_size,
+        "chunk_overlap": chunk_overlap,
         "num_nodes": graph.number_of_nodes(),
         "num_edges": graph.number_of_edges(),
         "num_documents": n_docs,
@@ -320,18 +284,18 @@ def main():
         logger.info(f"Saving to PostgreSQL with graph_id: {timestamp}")
         builder.save_to_postgres(
             graph_id=timestamp,
-            host=args.db_host,
-            port=args.db_port,
-            database=args.db_name,
-            user=args.db_user,
-            password=args.db_password,
+            host=db_host,
+            port=db_port,
+            database=db_name,
+            user=db_user,
+            password=db_password,
             metadata=metadata,
             graph=graph  # Explicitly pass the same graph saved in pickle
         )
         logger.info(f"Graph (PostgreSQL) saved successfully with graph_id: {timestamp}")
         metadata["storage_type"] = "dual"
-        metadata["postgres_database"] = args.db_name
-        metadata["postgres_host"] = args.db_host
+        metadata["postgres_database"] = db_name
+        metadata["postgres_host"] = db_host
         metadata["postgres_graph_id"] = timestamp
     except Exception as e:
         logger.warning(f"Failed to save to PostgreSQL: {e}")

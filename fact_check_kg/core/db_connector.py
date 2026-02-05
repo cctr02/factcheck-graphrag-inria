@@ -41,11 +41,11 @@ class GraphDatabaseConnector:
 
     def __init__(
         self,
-        host: str = "localhost",
-        port: int = 5432,
-        database: str = "knowledge_graph",
-        user: str = "postgres",
-        password: str = "postgres",
+        host: str,
+        port: int,
+        database: str,
+        user: str,
+        password: str,
         graph_id: Optional[str] = None,
         logger: Optional[logging.Logger] = None
     ):

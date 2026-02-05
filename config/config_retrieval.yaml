@@ -24,6 +24,16 @@ retrieval:
   delta: 0.15  # Weight for entity graph traversal (S4: BFS over entity graph)
   epsilon: 0.15  # Weight for claim-document retrieval (S5: chunks from docs linked to similar claims)
 
+  # Entity types for NER during query processing (must match build config)
+  entity_types:
+    - "PERSON"
+    - "ORG"
+    - "GPE"
+    - "LOC"
+    - "DATE"
+    - "EVENT"
+    - "NORP"
+
   # Retrieval parameters
   top_k: 10  # Number of results to return
   theme_threshold: 0.01  # Minimum confidence for theme detection (lowered for graphs with fewer topics)

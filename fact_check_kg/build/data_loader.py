@@ -14,14 +14,14 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
 from utils.io_utils import load_corpus_from_csv, load_claims_from_csv
 
 
-def chunk_text(text: str, chunk_size: int = 500, overlap: int = 100) -> List[str]:
+def chunk_text(text: str, chunk_size: int, overlap: int) -> List[str]:
     """
     Split text into overlapping chunks respecting sentence boundaries.
 
     Args:
         text: Input text to chunk
-        chunk_size: Maximum size of each chunk in characters (soft limit)
-        overlap: Approximate number of overlapping characters between chunks
+        chunk_size: Maximum size of each chunk in characters (soft limit, from config)
+        overlap: Approximate number of overlapping characters between chunks (from config)
 
     Returns:
         List of text chunks (each chunk ends at a sentence boundary)
@@ -92,10 +92,10 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 100) -> List[str
 
 def load_and_chunk_documents(
     csv_path: str,
-    chunk_size: int = 500,
-    chunk_overlap: int = 100,
-    lang_value: str = "english",
+    chunk_size: int,
+    chunk_overlap: int,
     max_docs: Optional[int] = None,
+    lang_value: str = "english",
     logger: Optional[logging.Logger] = None
 ) -> Tuple[List[dict], int, Dict[str, Dict[str, Any]]]:
     """
@@ -103,10 +103,10 @@ def load_and_chunk_documents(
 
     Args:
         csv_path: Path to CSV file
-        chunk_size: Size of each chunk in characters
-        chunk_overlap: Overlap between chunks
-        lang_value: Language filter
+        chunk_size: Size of each chunk in characters (from config)
+        chunk_overlap: Overlap between chunks (from config)
         max_docs: Maximum number of documents to load (None = all)
+        lang_value: Language filter (default: english)
         logger: Optional logger instance
 
     Returns:
@@ -235,8 +235,11 @@ def load_claims(
     if logger:
         logger.info(f"Loading claims from {csv_path}")
 
+    # Use fact_check_id column to link claims to documents
+    # (fact_check_id in claim_reviews.csv matches id in english_fact_checks.csv)
     claims_list, claim_to_docs = load_claims_from_csv(
         csv_path,
+        doc_id_col="fact_check_id",  # Links to document 'id' column
         lang_value=lang_value,
         logger=logger
     )

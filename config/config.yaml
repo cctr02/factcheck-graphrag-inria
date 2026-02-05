@@ -8,6 +8,7 @@ paths:
   # Data directories
   data_dir: "data"
   csv_file: "data/english_fact_checks.csv"
+  claims_csv_file: "data/claim_reviews.csv"
 
   # Output directories
   outputs_dir: "outputs"

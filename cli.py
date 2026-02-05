@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Knowledge Graph Fact-Checking CLI
 
@@ -26,10 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from fact_check_kg.core.config_loader import get_build_config, get_retrieval_config
 from fact_check_kg.core.logger import get_logger
 
-
-# Initialize logger (will be reconfigured by each command as needed)
 logger = None
-
 
 @click.group()
 @click.version_option(version="1.0.0", prog_name="Knowledge Graph Fact-Checking CLI")
@@ -50,59 +46,39 @@ def cli():
 @cli.command()
 @click.option('--max-docs', type=int, default=None,
               help='Maximum number of documents to process (default: from config_build.yaml)')
-@click.option('--chunk-size', type=int, default=None,
-              help='Size of text chunks (default: from config_build.yaml)')
-@click.option('--chunk-overlap', type=int, default=None,
-              help='Overlap between chunks (default: from config_build.yaml)')
-@click.option('--use-postgres', is_flag=True,
-              help='Save graph to PostgreSQL instead of pickle')
 @click.option('--log-level', type=click.Choice(['DEBUG', 'INFO', 'WARNING', 'ERROR']),
               default='INFO', help='Logging level')
-def build(max_docs, chunk_size, chunk_overlap, use_postgres, log_level):
+def build(max_docs, log_level):
     """
     Build the knowledge graph from CSV data.
 
     Requires Ollama running for LLM-based topic labeling.
 
-    Graph files are saved with a timestamp ID (e.g., graph_20251118_155115.gpickle).
+    Graph is saved to BOTH:
+    - Pickle file: outputs/graphs/graph_{timestamp}.gpickle
+    - PostgreSQL: tables graph_{timestamp}, nodes_{timestamp}
+
+    All other parameters (chunk_size, chunk_overlap, etc.) are read from config_build.yaml.
     """
     import subprocess
 
-    # Load build configuration
     build_config = get_build_config()
-
-    # Initialize logger
     logger = get_logger("cli", build_config.logging.level)
 
     logger.info("=" * 60)
     logger.info("BUILDING KNOWLEDGE GRAPH")
     logger.info("=" * 60)
 
-    # Use config defaults if not specified
-    max_docs = max_docs or build_config.graph_construction.max_documents
-    chunk_size = chunk_size or build_config.graph_construction.chunk_size
-    chunk_overlap = chunk_overlap or build_config.graph_construction.chunk_overlap
-
-    # Build command
+    # Build command - only pass CLI overrides if explicitly provided
     cmd = [
         sys.executable,
         "fact_check_kg/build/build_graph.py",
-        "--csv", build_config.paths.csv_file,
-        "--max-docs", str(max_docs),
-        "--chunk-size", str(chunk_size),
-        "--chunk-overlap", str(chunk_overlap),
-        "--log-level", log_level
+        "--log-level", log_level,
     ]
 
-    if use_postgres:
-        cmd.extend([
-            "--use-postgres",
-            "--db-host", build_config.database.host,
-            "--db-port", str(build_config.database.port),
-            "--db-name", build_config.database.database,
-            "--db-user", build_config.database.user,
-            "--db-password", build_config.database.password
-        ])
+    # Only pass --max-docs if explicitly provided via CLI (override)
+    if max_docs is not None:
+        cmd.extend(["--max-docs", str(max_docs)])
 
     try:
         result = subprocess.run(cmd, check=True, capture_output=False)
@@ -417,14 +393,13 @@ def retrieve(claim, alpha, beta, gamma, delta, epsilon, top_k, graph_id, use_pos
 
         # Initialize retriever
         logger.info("Initializing retriever...")
-        # Note: entity_types comes from build config, but we need it for entity extraction from queries
-        # For now, we'll define it in retrieval config too, or read from graph metadata
+        # Initialize retriever with entity_types from retrieval config
         retriever = HybridRetriever(
             graph=graph,
             topic_model=topic_model,
             embedding_model=embedding_model,
             nlp=nlp,
-            entity_types=["PERSON", "ORG", "GPE", "LOC", "DATE", "EVENT", "NORP"],  # Use default entity types
+            entity_types=retrieval_config.retrieval.entity_types,
             alpha=alpha,
             beta=beta,
             gamma=gamma,
@@ -438,7 +413,6 @@ def retrieve(claim, alpha, beta, gamma, delta, epsilon, top_k, graph_id, use_pos
             graph_id=graph_id,
             cache_dir=retrieval_config.paths.embeddings_dir,
             models_dir=retrieval_config.paths.models_dir,
-            config=retrieval_config.to_dict(),  # Pass complete configuration
             logger=logger
         )
 

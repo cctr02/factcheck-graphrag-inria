@@ -33,6 +33,11 @@ graph_construction:
   topic_keywords_initial: 15  # Number of keywords to retrieve from BERTopic initially
   topic_keywords_final: 10  # Number of keywords after stemming and deduplication
 
+  # Keyphrase extraction (KeyBERT)
+  keyphrase_top_n: 5  # Number of keyphrases to extract per chunk
+  keyphrase_ngram_min: 1  # Minimum n-gram size for keyphrases
+  keyphrase_ngram_max: 2  # Maximum n-gram size for keyphrases
+
   # Entity types to extract (spaCy)
   entity_types:
     - "PERSON"  # People, including fictional
@@ -50,11 +55,51 @@ models:
   # LLM for topic labeling (Ollama) - only used during build
   llm_model: "llama3.1:latest"  # Ollama model for topic labeling
   llm_endpoint: "http://localhost:11434/api/generate"
-  llm_temperature: 0.3
-  llm_max_tokens: 20
-  llm_timeout: 300  # Request timeout in seconds
-  llm_label_max_length: 50  # Maximum length for topic labels
-  llm_label_max_words: 4  # Maximum words for truncated labels
+
+# ============================================================================
+# LLM BATCH LABELING CONFIGURATION
+# ============================================================================
+llm_batch_labeling:
+  # Prompt template for batched topic labeling
+  # Placeholders: {{topics_json}} - JSON array of topics with id and keywords
+  prompt_template: |
+    You are a topic labeling assistant. For each topic below, generate a short, clear label (2-4 words).
+
+    Topics to label:
+    {{topics_json}}
+
+    Return ONLY a JSON object in this exact format, no extra text:
+    {"labels":[{"id":<topic_id>,"label":"<2-4 word label>"},...]}"
+
+  # Batch size settings
+  batch_size_default: 10  # Starting batch size
+  batch_size_min: 1  # Minimum batch size (floor)
+  batch_size_max: 25  # Maximum batch size (cap)
+  batch_size_step: 5  # Step for increasing batch size
+
+  # Label constraints
+  label_min_words: 1  # Minimum words in label
+  label_max_words: 4  # Maximum words in label
+  label_max_length: 50  # Maximum character length for labels
+
+  # Keywords per topic
+  max_keywords_per_topic: 8  # Number of keywords to send per topic
+
+  # Retry settings
+  retry_count: 2  # Number of retries on failure
+  retry_temperature: 0.0  # Temperature for retry attempts (stricter)
+
+  # Timeout settings
+  batch_timeout: 60  # Timeout for batch requests in seconds
+
+  # Auto-tuning settings
+  success_streak_threshold: 3  # Consecutive successes before increasing batch size
+  hysteresis_decrease_factor: 0.5  # Factor to decrease batch size on failure (e.g., 0.5 = halve)
+
+  # Failure strategy: "binary_split" or "single_fallback"
+  # binary_split: Split failed batch in half and retry each half
+  # single_fallback: Fall back to single-topic requests for remaining items
+  failure_strategy: "binary_split"
 
 # ============================================================================
 # EXPORT CONFIGURATION

@@ -42,20 +42,19 @@ class HybridRetriever:
         embedding_model: SentenceTransformer,
         nlp: spacy.Language,
         entity_types: List[str],
-        alpha: float = 0.25,
-        beta: float = 0.2,
-        gamma: float = 0.25,
-        delta: float = 0.15,
-        epsilon: float = 0.15,
-        top_k: int = 10,
-        theme_threshold: float = 0.01,
-        entity_relevance_threshold: float = 0.1,
-        theme_relevance_threshold: float = 0.1,
-        claim_top_k: int = 5,
+        alpha: float,
+        beta: float,
+        gamma: float,
+        delta: float,
+        epsilon: float,
+        top_k: int,
+        theme_threshold: float,
+        entity_relevance_threshold: float,
+        theme_relevance_threshold: float,
+        claim_top_k: int,
         graph_id: Optional[str] = None,
         cache_dir: Optional[str] = None,
         models_dir: Optional[str] = None,
-        config: Optional[Dict] = None,
         logger: Optional[logging.Logger] = None
     ):
         """
@@ -67,11 +66,11 @@ class HybridRetriever:
             embedding_model: SentenceTransformer model
             nlp: spaCy model for entity extraction
             entity_types: List of entity types to extract
-            alpha: Weight for semantic score (S1, default: 0.25)
-            beta: Weight for topic distribution score (S2, default: 0.2)
-            gamma: Weight for thematic score (S3, default: 0.25)
-            delta: Weight for entity score (S4, default: 0.15)
-            epsilon: Weight for claim-document score (S5, default: 0.15)
+            alpha: Weight for semantic score (S1)
+            beta: Weight for topic distribution score (S2)
+            gamma: Weight for thematic score (S3)
+            delta: Weight for entity score (S4)
+            epsilon: Weight for claim-document score (S5)
             top_k: Number of chunks to return
             theme_threshold: Minimum confidence for theme detection
             entity_relevance_threshold: Minimum relevance to continue entity traversal
@@ -80,7 +79,6 @@ class HybridRetriever:
             graph_id: Optional graph ID for loading cached data
             cache_dir: Optional directory containing FAISS embeddings cache
             models_dir: Optional directory containing topic models and probabilities
-            config: Optional complete configuration dictionary
             logger: Optional logger instance
         """
         self.graph = graph
@@ -88,7 +86,6 @@ class HybridRetriever:
         self.embedding_model = embedding_model
         self.nlp = nlp
         self.entity_types = entity_types
-        self.config = config
 
         # Weights (should sum to 1.0)
         self.alpha = alpha
@@ -837,25 +834,36 @@ class HybridRetriever:
         """
         # Start timing the retrieval process
         start_time = time.time()
+        strategy_timings = {}
 
         self.logger.info("\n" + "=" * 60)
         self.logger.info(f"RETRIEVAL FOR CLAIM: {claim}")
         self.logger.info("=" * 60)
 
         # Strategy 1: Semantic Similarity
+        t0 = time.time()
         S1 = self.retrieve_semantic(claim)
+        strategy_timings['S1_semantic'] = time.time() - t0
 
         # Strategy 2: Topic Distribution Similarity
+        t0 = time.time()
         S2 = self.retrieve_topic_distribution(claim)
+        strategy_timings['S2_topic_dist'] = time.time() - t0
 
         # Strategy 3: Thematic Graph Traversal
+        t0 = time.time()
         S3 = self.retrieve_thematic(claim)
+        strategy_timings['S3_thematic'] = time.time() - t0
 
         # Strategy 4: Entity Graph Traversal
+        t0 = time.time()
         S4 = self.retrieve_entity(claim)
+        strategy_timings['S4_entity'] = time.time() - t0
 
         # Strategy 5: Claim-Based Retrieval (using pre-computed results)
+        t0 = time.time()
         S5, matched_claims = self.retrieve_claim_document(claim)
+        strategy_timings['S5_claim_doc'] = time.time() - t0
 
         # Fusion: combine scores
         all_chunks = set(S1.keys()) | set(S2.keys()) | set(S3.keys()) | set(S4.keys()) | set(S5.keys())
@@ -940,7 +948,19 @@ class HybridRetriever:
 
         # Calculate and display retrieval time
         retrieval_time = time.time() - start_time
-        self.logger.info(f"\nRetrieval time: {retrieval_time:.3f} seconds")
+        strategy_timings['total'] = retrieval_time
+
+        self.logger.info(f"\n--- Strategy Timings ---")
+        self.logger.info(f"  S1 (Semantic):      {strategy_timings['S1_semantic']:.4f}s")
+        self.logger.info(f"  S2 (Topic Dist):    {strategy_timings['S2_topic_dist']:.4f}s")
+        self.logger.info(f"  S3 (Thematic):      {strategy_timings['S3_thematic']:.4f}s")
+        self.logger.info(f"  S4 (Entity):        {strategy_timings['S4_entity']:.4f}s")
+        self.logger.info(f"  S5 (Claim-Doc):     {strategy_timings['S5_claim_doc']:.4f}s")
+        self.logger.info(f"  Total:              {retrieval_time:.4f}s")
+
+        # Add timing info to first result
+        if top_results:
+            top_results[0]['strategy_timings'] = strategy_timings
 
         self.logger.info("=" * 60)
 

@@ -2,10 +2,16 @@
 Graph construction module for Knowledge Graph.
 
 This module handles the construction of the multi-level knowledge graph:
-- Level 1: Documents → Chunks
-- Level 2: Chunks → Themes (BERTopic)
-- Level 3: Chunks → Entities (spaCy NER)
-- Relations: Entity ↔ Entity (CO_OCCURS, SEMANTIC_SIM)
+- Level 1: Documents → Chunks (CONTAINS edges)
+- Level 2: Chunks → Themes (HAS_TOPIC edges, BERTopic with LLM labeling)
+- Level 3: Chunks → Entities (MENTIONS edges, spaCy NER with TF-IDF weights)
+- Level 4: Chunks → Keyphrases (HAS_KEYPHRASE edges, KeyBERT with MMR diversity)
+- Level 5: Claims → Documents (REVIEWS edges, fact-checking claims)
+
+Inter-node relations:
+- Entity ↔ Entity: CO_OCCURS (PMI-weighted), SEMANTIC_SIM (embedding similarity)
+- DATE ↔ DATE: TEMPORAL_DIST (exponential decay by year difference)
+- Theme ↔ Theme: CO_PRESENCE (co-occurrence in chunks), SEMANTIC_SIM (keyword similarity)
 """
 
 import networkx as nx
@@ -19,6 +25,7 @@ import logging
 from tqdm import tqdm
 import time as time
 from nltk.stem.snowball import SnowballStemmer
+from keybert import KeyBERT
 import threading
 import sys
 import types
@@ -29,41 +36,60 @@ from fact_check_kg.core.db_connector import GraphDatabaseConnector
 
 class KnowledgeGraphBuilder:
     """
-    Builder class for constructing a multi-level knowledge graph.
+    Builder class for constructing a multi-level knowledge graph for fact-checking.
 
-    The graph contains:
-    - Document nodes
-    - Chunk nodes (with text)
-    - Theme nodes (from BERTopic)
-    - Entity nodes (from spaCy NER)
+    Node types:
+    - document: Source documents with metadata (text, review_date, language)
+    - chunk: Text chunks from documents with positional info
+    - theme: Topics from BERTopic with LLM-generated labels and keywords
+    - entity: Named entities from spaCy NER (PERSON, ORG, GPE, LOC, DATE, EVENT, NORP)
+    - keyphrase: Key phrases extracted via KeyBERT with MMR diversity
+    - claim: Fact-checking claims linked to documents via REVIEWS edges
 
     Edge types:
-    - CONTAINS: Document → Chunk
-    - HAS_TOPIC: Chunk → Theme (weighted by probability)
-    - MENTIONS: Chunk → Entity
-    - CO_OCCURS: Entity ↔ Entity (weighted by co-occurrence count)
-    - SEMANTIC_SIM: Entity ↔ Entity (weighted by cosine similarity)
+    - CONTAINS: Document → Chunk (hierarchical structure)
+    - HAS_TOPIC: Chunk → Theme (weighted by topic probability, top-3 per chunk)
+    - HAS_KEYPHRASE: Chunk → Keyphrase (weighted by KeyBERT relevance score)
+    - MENTIONS: Chunk → Entity (weighted by TF-IDF with sigmoid normalization)
+    - CO_OCCURS: Entity ↔ Entity (weighted by PMI - Pointwise Mutual Information)
+    - SEMANTIC_SIM: Entity ↔ Entity and Theme ↔ Theme (weighted by embedding cosine similarity)
+    - TEMPORAL_DIST: DATE ↔ DATE (weighted by exponential decay based on year difference)
+    - CO_PRESENCE: Theme ↔ Theme (weighted by inverse frequency of co-occurrence in chunks)
+    - REVIEWS: Claim → Document (links claims to their reviewed documents)
     """
 
     def __init__(
         self,
-        embedding_model: str = "all-MiniLM-L6-v2",
-        ner_model: str = "en_core_web_sm",
-        entity_types: List[str] = None,
-        co_occur_threshold: int = 2,
-        semantic_sim_threshold: float = 0.6,
-        topic_prob_threshold: float = 0.15,
-        temporal_max_year_gap: int = 10,
-        temporal_decay_rate: float = 0.3,
-        topic_keywords_initial: int = 15,
-        topic_keywords_final: int = 10,
-        llm_endpoint: str = "http://localhost:11434/api/generate",
-        llm_model: str = "llama3.1:latest",
-        llm_temperature: float = 0.3,
-        llm_max_tokens: int = 20,
-        llm_timeout: int = 300,
-        llm_label_max_length: int = 50,
-        llm_label_max_words: int = 4,
+        embedding_model: str,
+        ner_model: str,
+        entity_types: List[str],
+        co_occur_threshold: int,
+        semantic_sim_threshold: float,
+        topic_prob_threshold: float,
+        temporal_max_year_gap: int,
+        temporal_decay_rate: float,
+        topic_keywords_initial: int,
+        topic_keywords_final: int,
+        llm_endpoint: str,
+        llm_model: str,
+        # LLM batch labeling configuration
+        llm_batch_prompt_template: str,
+        llm_batch_size_default: int,
+        llm_batch_size_min: int,
+        llm_batch_size_max: int,
+        llm_batch_size_step: int,
+        llm_label_min_words: int,
+        llm_label_max_words: int,
+        llm_label_max_length: int,
+        llm_max_keywords_per_topic: int,
+        llm_retry_count: int,
+        llm_retry_temperature: float,
+        llm_batch_timeout: int,
+        llm_success_streak_threshold: int,
+        llm_hysteresis_decrease_factor: float,
+        llm_failure_strategy: str,
+        keyphrase_top_n: int,
+        keyphrase_ngram_range: Tuple[int, int],
         logger: Optional[logging.Logger] = None
     ):
         """
@@ -82,11 +108,23 @@ class KnowledgeGraphBuilder:
             topic_keywords_final: Number of keywords after deduplication
             llm_endpoint: LLM API endpoint for topic labeling
             llm_model: LLM model name
-            llm_temperature: LLM temperature parameter
-            llm_max_tokens: Maximum tokens for LLM response
-            llm_timeout: LLM request timeout in seconds
-            llm_label_max_length: Maximum length for topic labels
-            llm_label_max_words: Maximum words for truncated labels
+            llm_batch_prompt_template: Prompt template with {{topics_json}} placeholder
+            llm_batch_size_default: Starting batch size for topic labeling
+            llm_batch_size_min: Minimum batch size (floor)
+            llm_batch_size_max: Maximum batch size (cap)
+            llm_batch_size_step: Step for increasing batch size
+            llm_label_min_words: Minimum words in label
+            llm_label_max_words: Maximum words in label
+            llm_label_max_length: Maximum character length for labels
+            llm_max_keywords_per_topic: Number of keywords to send per topic
+            llm_retry_count: Number of retries on failure
+            llm_retry_temperature: Temperature for retry attempts
+            llm_batch_timeout: Timeout for batch requests in seconds
+            llm_success_streak_threshold: Consecutive successes before increasing batch size
+            llm_hysteresis_decrease_factor: Factor to decrease batch size on failure
+            llm_failure_strategy: "binary_split" or "single_fallback"
+            keyphrase_top_n: Number of keyphrases to extract per chunk
+            keyphrase_ngram_range: N-gram range for keyphrase extraction (min, max)
             logger: Optional logger instance
         """
         self.logger = logger or logging.getLogger(__name__)
@@ -99,7 +137,7 @@ class KnowledgeGraphBuilder:
         self.nlp = spacy.load(ner_model)
 
         # Configuration
-        self.entity_types = entity_types or ['PERSON', 'ORG', 'GPE', 'LOC', 'DATE', 'EVENT', 'NORP']
+        self.entity_types = entity_types
         self.co_occur_threshold = co_occur_threshold
         self.semantic_sim_threshold = semantic_sim_threshold
         self.topic_prob_threshold = topic_prob_threshold
@@ -118,17 +156,39 @@ class KnowledgeGraphBuilder:
         # LLM configuration
         self.llm_endpoint = llm_endpoint
         self.llm_model = llm_model
-        self.llm_temperature = llm_temperature
-        self.llm_max_tokens = llm_max_tokens
-        self.llm_timeout = llm_timeout
-        self.llm_label_max_length = llm_label_max_length
+
+        # LLM batch labeling configuration
+        self.llm_batch_prompt_template = llm_batch_prompt_template
+        self.llm_batch_size_default = llm_batch_size_default
+        self.llm_batch_size_min = llm_batch_size_min
+        self.llm_batch_size_max = llm_batch_size_max
+        self.llm_batch_size_step = llm_batch_size_step
+        self.llm_label_min_words = llm_label_min_words
         self.llm_label_max_words = llm_label_max_words
+        self.llm_label_max_length = llm_label_max_length
+        self.llm_max_keywords_per_topic = llm_max_keywords_per_topic
+        self.llm_retry_count = llm_retry_count
+        self.llm_retry_temperature = llm_retry_temperature
+        self.llm_batch_timeout = llm_batch_timeout
+        self.llm_success_streak_threshold = llm_success_streak_threshold
+        self.llm_hysteresis_decrease_factor = llm_hysteresis_decrease_factor
+        self.llm_failure_strategy = llm_failure_strategy
+
+        # Auto-tuning state for batch labeling
+        self._batch_size_current = llm_batch_size_default
+        self._success_streak = 0
 
         # Graph
         self.graph = nx.Graph()
 
         # Topic model (will be trained during build)
         self.topic_model = None
+
+        # KeyBERT for keyphrase extraction (reuses the same embedding model)
+        self.logger.info("Initializing KeyBERT for keyphrase extraction...")
+        self.keybert_model = KeyBERT(model=self.embedding_model)
+        self.keyphrase_top_n = keyphrase_top_n
+        self.keyphrase_ngram_range = keyphrase_ngram_range
 
         # Build timing statistics
         self.build_timings = {}
@@ -196,26 +256,25 @@ class KnowledgeGraphBuilder:
 
     def _show_clustering_progress(self, stop_event, n_samples):
         """
-        Affiche une barre de progression simulée pendant le clustering HDBSCAN.
+        Display a simulated progress bar during HDBSCAN clustering.
 
         Args:
-            stop_event: Threading event pour arrêter la barre
-            n_samples: Nombre d'échantillons à clustériser
+            stop_event: Threading event to stop the progress bar
+            n_samples: Number of samples to cluster
         """
-        # Estimation du temps basée sur la taille des données
-        # ~0.5-2 secondes pour 1000 samples
-        estimated_time = max(30, int(n_samples * 0.001 * 60))  # en secondes
+        # Estimate time based on data size (~0.5-2 seconds per 1000 samples)
+        estimated_time = max(30, int(n_samples * 0.001 * 60))  # in seconds
 
         with tqdm(total=100, desc="HDBSCAN Clustering", bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}]') as pbar:
             start = time.time()
             while not stop_event.is_set():
                 elapsed = time.time() - start
-                # Progress simulé basé sur le temps estimé
+                # Simulated progress based on estimated time
                 progress = min(95, int((elapsed / estimated_time) * 100))
                 pbar.n = progress
                 pbar.refresh()
                 time.sleep(0.5)
-            # Compléter à 100% quand fini
+            # Complete to 100% when done
             pbar.n = 100
             pbar.refresh()
 
@@ -268,26 +327,26 @@ class KnowledgeGraphBuilder:
             verbose=True  # Show UMAP progress
         )
 
-        # Créer le modèle HDBSCAN standard
-        # Note: prediction_data=True requis pour calculate_probabilities (multi-topic assignment)
-        # Optimisé pour grands datasets avec core_dist_n_jobs=1
+        # Create HDBSCAN model
+        # prediction_data=True required for calculate_probabilities (multi-topic assignment)
+        # core_dist_n_jobs=1 reduces memory spikes (sequential instead of parallel)
         hdbscan_model = HDBSCAN(
             min_cluster_size=min_topic_size,
             metric='euclidean',
             cluster_selection_method='eom',
-            prediction_data=True,  # Nécessaire pour probabilités multi-topics
-            core_dist_n_jobs=1  # Réduit pics mémoire (séquentiel au lieu de parallèle)
+            prediction_data=True,  # Required for multi-topic probabilities
+            core_dist_n_jobs=1  # Reduces memory spikes
         )
 
         # Initialize BERTopic with custom components
-        # Note: calculate_probabilities=True pour permettre l'assignation multi-topics
+        # calculate_probabilities=True enables multi-topic assignment
         topic_model = BERTopic(
             embedding_model=self.embedding_model,
             umap_model=umap_model,
             hdbscan_model=hdbscan_model,
             vectorizer_model=vectorizer_model,
             nr_topics=nr_topics,
-            calculate_probabilities=True,  # Active les probabilités pour chaque chunk-topic
+            calculate_probabilities=True,  # Enable probabilities for each chunk-topic
             verbose=True  # Enable verbose mode for progress
         )
 
@@ -297,7 +356,7 @@ class KnowledgeGraphBuilder:
         self.logger.info("  → Stage 2/4: UMAP dimensionality reduction (kNN-based)...")
         self.logger.info("  → Stage 3/4: HDBSCAN clustering (CPU, typically 30s-2min)...")
 
-        # Wrapper pour afficher un message après HDBSCAN
+        # Wrapper to show message after HDBSCAN
         original_extract_topics = topic_model._extract_topics
 
         def extract_topics_with_logging(*args, **kwargs):
@@ -309,7 +368,7 @@ class KnowledgeGraphBuilder:
 
         topics, probabilities = topic_model.fit_transform(chunk_texts)
 
-        # Restaurer la méthode originale pour permettre le pickle
+        # Restore original method to allow pickling
         topic_model._extract_topics = original_extract_topics
 
         self.logger.info("  → Stage 5/5: Topic probabilities computed!")
@@ -409,34 +468,139 @@ class KnowledgeGraphBuilder:
 
         return result
 
-    def label_topic_with_llm(
-        self,
-        topic_words: List[Tuple[str, float]]
-    ) -> str:
+    def _normalize_label(self, label: str) -> str:
         """
-        Label a topic using LLM.
+        Normalize a topic label.
 
         Args:
-            topic_words: List of (word, score) tuples from BERTopic
+            label: Raw label string
 
         Returns:
-            Topic label string
+            Normalized label string
+        """
+        # Clean up the response
+        label = label.replace('\n', ' ').strip()
+        # Remove quotes if present
+        label = label.strip('"\'')
+        # Lowercase
+        label = label.lower()
+        # Limit length
+        if len(label) > self.llm_label_max_length:
+            label = ' '.join(label.split()[:self.llm_label_max_words])
+        return label
+
+    def _validate_label(self, label: str) -> bool:
+        """
+        Validate a label against constraints.
+
+        Args:
+            label: Label to validate
+
+        Returns:
+            True if valid, False otherwise
+        """
+        if not label:
+            return False
+        word_count = len(label.split())
+        if word_count < self.llm_label_min_words:
+            return False
+        if word_count > self.llm_label_max_words:
+            return False
+        if len(label) > self.llm_label_max_length:
+            return False
+        return True
+
+    def _parse_batch_response(
+        self,
+        response_text: str,
+        expected_ids: Set[int]
+    ) -> Tuple[Dict[int, str], Set[int]]:
+        """
+        Parse and validate batch LLM response.
+
+        Args:
+            response_text: Raw response text from LLM
+            expected_ids: Set of topic IDs that should be in response
+
+        Returns:
+            Tuple of (labels_dict, missing_ids) where:
+            - labels_dict: Dict mapping topic_id -> normalized label
+            - missing_ids: Set of topic IDs not found or with invalid labels
+        """
+        import json
+        import re
+
+        labels = {}
+        missing_ids = set(expected_ids)
+
+        # Try to extract JSON from response (may have extra text)
+        # Look for {"labels": ...} pattern
+        json_match = re.search(r'\{[^{}]*"labels"\s*:\s*\[[^\]]*\][^{}]*\}', response_text, re.DOTALL)
+        if not json_match:
+            # Try to find any JSON object
+            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+
+        if not json_match:
+            self.logger.debug(f"No JSON found in response: {response_text[:200]}")
+            return labels, missing_ids
+
+        try:
+            data = json.loads(json_match.group())
+        except json.JSONDecodeError as e:
+            self.logger.debug(f"JSON parse error: {e}, response: {response_text[:200]}")
+            return labels, missing_ids
+
+        # Extract labels array
+        labels_array = data.get('labels', [])
+        if not isinstance(labels_array, list):
+            self.logger.debug(f"'labels' is not an array: {type(labels_array)}")
+            return labels, missing_ids
+
+        for item in labels_array:
+            if not isinstance(item, dict):
+                continue
+
+            topic_id = item.get('id')
+            label = item.get('label', '')
+
+            if topic_id is None:
+                continue
+
+            # Normalize and validate
+            normalized_label = self._normalize_label(str(label))
+
+            if topic_id in expected_ids and self._validate_label(normalized_label):
+                labels[topic_id] = normalized_label
+                missing_ids.discard(topic_id)
+            else:
+                self.logger.debug(f"Invalid label for topic {topic_id}: '{label}'")
+
+        return labels, missing_ids
+
+    def _call_llm_batch(
+        self,
+        topics_data: List[Dict],
+        temperature: float
+    ) -> str:
+        """
+        Call LLM with a batch of topics.
+
+        Args:
+            topics_data: List of {"id": topic_id, "keywords": [...]} dicts
+            temperature: LLM temperature parameter
+
+        Returns:
+            Raw response text from LLM
 
         Raises:
-            RuntimeError: If LLM labeling fails (no fallback)
+            RuntimeError: If LLM call fails
         """
         import requests
+        import json
 
-        # Process keywords: lemmatize and remove redundant n-grams
-        processed_keywords = self._process_topic_keywords(topic_words)
-
-        # Extract top words from processed keywords
-        top_words = [word for word, score in processed_keywords]
-
-        prompt = f"""Based on these keywords, provide a short, clear topic label (2-4 words maximum):
-Keywords: {', '.join(top_words)}
-
-Topic label:"""
+        # Build prompt from template
+        topics_json = json.dumps(topics_data, ensure_ascii=False)
+        prompt = self.llm_batch_prompt_template.replace('{{topics_json}}', topics_json)
 
         try:
             response = requests.post(
@@ -446,11 +610,11 @@ Topic label:"""
                     'prompt': prompt,
                     'stream': False,
                     'options': {
-                        'temperature': self.llm_temperature,
-                        'num_predict': self.llm_max_tokens
+                        'temperature': temperature,
+                        'num_predict': 50 * len(topics_data)  # ~50 tokens per topic
                     }
                 },
-                timeout=self.llm_timeout
+                timeout=self.llm_batch_timeout
             )
 
             if response.status_code != 200:
@@ -458,25 +622,189 @@ Topic label:"""
                     f"LLM request failed with status {response.status_code}: {response.text}"
                 )
 
-            label = response.json()['response'].strip()
-            # Clean up the response
-            label = label.replace('\n', ' ').strip()
-            # Remove quotes if present
-            label = label.strip('"\'')
-            # Limit length
-            if len(label) > self.llm_label_max_length:
-                label = ' '.join(label.split()[:self.llm_label_max_words])
+            return response.json()['response']
 
-            self.logger.debug(f"LLM labeled topic: {top_words[:3]} -> '{label}'")
-            return label.lower()
-
+        except requests.exceptions.Timeout:
+            raise RuntimeError(f"LLM batch request timed out after {self.llm_batch_timeout}s")
         except requests.exceptions.RequestException as e:
             raise RuntimeError(
-                f"LLM labeling failed (connection error): {e}. "
+                f"LLM batch labeling failed (connection error): {e}. "
                 f"Ensure Ollama is running at {self.llm_endpoint}"
             ) from e
-        except Exception as e:
-            raise RuntimeError(f"LLM labeling failed: {e}") from e
+
+    def _adjust_batch_size(self, success: bool):
+        """
+        Adjust batch size based on success/failure (auto-tuning).
+
+        Args:
+            success: Whether the last batch succeeded
+        """
+        old_size = self._batch_size_current
+
+        if success:
+            self._success_streak += 1
+            if self._success_streak >= self.llm_success_streak_threshold:
+                # Increase batch size
+                new_size = min(
+                    self._batch_size_current + self.llm_batch_size_step,
+                    self.llm_batch_size_max
+                )
+                if new_size != self._batch_size_current:
+                    self._batch_size_current = new_size
+                    self.logger.info(f"[BATCH AUTO-TUNE] Increased batch size: {old_size} -> {new_size}")
+                self._success_streak = 0  # Reset streak after increase
+        else:
+            self._success_streak = 0
+            # Decrease batch size using hysteresis factor
+            new_size = max(
+                int(self._batch_size_current * self.llm_hysteresis_decrease_factor),
+                self.llm_batch_size_min
+            )
+            if new_size != self._batch_size_current:
+                self._batch_size_current = new_size
+                self.logger.info(f"[BATCH AUTO-TUNE] Decreased batch size: {old_size} -> {new_size}")
+
+    def _label_single_topic(
+        self,
+        topic_id: int,
+        keywords: List[str]
+    ) -> str:
+        """
+        Label a single topic (fallback for failed batches).
+
+        Args:
+            topic_id: Topic ID
+            keywords: List of keywords for the topic
+
+        Returns:
+            Topic label string
+
+        Raises:
+            RuntimeError: If labeling fails after retries
+        """
+        topics_data = [{"id": topic_id, "keywords": keywords}]
+
+        for attempt in range(self.llm_retry_count + 1):
+            temperature = self.llm_retry_temperature if attempt > 0 else 0.3
+            try:
+                response_text = self._call_llm_batch(topics_data, temperature)
+                labels, _ = self._parse_batch_response(response_text, {topic_id})
+
+                if topic_id in labels:
+                    return labels[topic_id]
+
+            except RuntimeError as e:
+                self.logger.debug(f"Single topic {topic_id} attempt {attempt + 1} failed: {e}")
+
+        raise RuntimeError(f"Failed to label topic {topic_id} after {self.llm_retry_count + 1} attempts")
+
+    def label_topics_batch(
+        self,
+        topics_to_label: List[Tuple[int, List[Tuple[str, float]]]]
+    ) -> Dict[int, str]:
+        """
+        Label multiple topics in batches with auto-tuning.
+
+        This method implements:
+        - Batched LLM requests for efficiency
+        - Auto-tuning of batch size based on success/failure
+        - Retry logic with stricter settings
+        - Binary split or single-fallback on persistent failures
+
+        Args:
+            topics_to_label: List of (topic_id, topic_words) tuples where
+                           topic_words is List[(word, score)]
+
+        Returns:
+            Dictionary mapping topic_id -> label string
+
+        Raises:
+            RuntimeError: If labeling fails completely
+        """
+        if not topics_to_label:
+            return {}
+
+        # Prepare all topics data
+        all_topics_data = []
+        for topic_id, topic_words in topics_to_label:
+            # Process and limit keywords
+            processed = self._process_topic_keywords(topic_words)
+            keywords = [w for w, s in processed[:self.llm_max_keywords_per_topic]]
+            all_topics_data.append({
+                "id": topic_id,
+                "keywords": keywords
+            })
+
+        labels = {}
+        pending = list(all_topics_data)
+
+        self.logger.info(f"Labeling {len(pending)} topics in batches (starting batch size: {self._batch_size_current})")
+
+        while pending:
+            # Take a batch
+            batch_size = min(self._batch_size_current, len(pending))
+            batch = pending[:batch_size]
+            pending = pending[batch_size:]
+
+            expected_ids = {t["id"] for t in batch}
+            batch_labels = {}
+            batch_missing = set(expected_ids)
+            success = False
+
+            # Try the batch with retries
+            for attempt in range(self.llm_retry_count + 1):
+                temperature = self.llm_retry_temperature if attempt > 0 else 0.3
+
+                try:
+                    self.logger.debug(f"Batch attempt {attempt + 1}: {len(batch)} topics, temp={temperature}")
+                    response_text = self._call_llm_batch(batch, temperature)
+                    batch_labels, batch_missing = self._parse_batch_response(response_text, expected_ids)
+
+                    if not batch_missing:
+                        # Complete success
+                        success = True
+                        break
+                    else:
+                        self.logger.debug(f"Batch partial: got {len(batch_labels)}/{len(batch)}, missing: {batch_missing}")
+
+                except RuntimeError as e:
+                    self.logger.debug(f"Batch attempt {attempt + 1} failed: {e}")
+                    continue
+
+            # Update labels with what we got
+            labels.update(batch_labels)
+
+            # Handle missing topics
+            if batch_missing:
+                self.logger.debug(f"Handling {len(batch_missing)} missing topics with strategy: {self.llm_failure_strategy}")
+
+                if self.llm_failure_strategy == "binary_split" and len(batch_missing) > 1:
+                    # Re-add missing topics to pending for retry with smaller batch
+                    missing_data = [t for t in batch if t["id"] in batch_missing]
+                    pending = missing_data + pending
+                    success = False
+                else:
+                    # Single fallback: label each missing topic individually
+                    for topic_data in batch:
+                        if topic_data["id"] in batch_missing:
+                            try:
+                                label = self._label_single_topic(
+                                    topic_data["id"],
+                                    topic_data["keywords"]
+                                )
+                                labels[topic_data["id"]] = label
+                            except RuntimeError as e:
+                                raise RuntimeError(
+                                    f"Failed to label topic {topic_data['id']} even with single fallback: {e}"
+                                ) from e
+
+            # Adjust batch size based on outcome
+            self._adjust_batch_size(success)
+
+            self.logger.debug(f"Progress: {len(labels)}/{len(all_topics_data)} topics labeled")
+
+        self.logger.info(f"Batch labeling complete: {len(labels)} topics labeled")
+        return labels
 
     def build_graph(
         self,
@@ -488,30 +816,39 @@ Topic label:"""
         doc_metadata: Optional[Dict[str, Dict]] = None
     ) -> Tuple[nx.Graph, np.ndarray, List[str], Dict[str, Dict]]:
         """
-        Build the complete knowledge graph.
+        Build the complete knowledge graph through a 10-step pipeline.
+
+        Pipeline steps:
+        1. Add document and chunk nodes (CONTAINS edges)
+        2. Train BERTopic model for topic modeling
+        3. Add theme nodes with LLM labels and HAS_TOPIC edges (top-3 per chunk)
+        4. Extract entities and add MENTIONS edges (TF-IDF weighted)
+        4b. Extract keyphrases and add HAS_KEYPHRASE edges (KeyBERT)
+        5. Add CO_OCCURS edges between entities (PMI-weighted)
+        6. Add SEMANTIC_SIM edges between entities (embedding similarity)
+        6b. Add TEMPORAL_DIST edges between DATE entities (exponential decay)
+        7. Add SEMANTIC_SIM edges between themes (keyword embedding similarity)
+        8. Add CO_PRESENCE edges between themes (co-occurrence in chunks)
+        9. Add claim nodes and REVIEWS edges (if claims provided)
+        10. Pre-compute claim retrieval results for Strategy 5 (if claims provided)
 
         Args:
-            chunks: List of chunk dictionaries from data_loader
-            min_topic_size: Minimum topic size for BERTopic
-            nr_topics: Number of topics (None = auto)
+            chunks: List of chunk dictionaries with keys:
+                chunk_id, doc_id, text, chunk_idx, review_date, language
+            min_topic_size: Minimum topic size for BERTopic clustering
+            nr_topics: Number of topics (None = auto-detect)
             claims: Optional list of claim dictionaries with keys:
                 claim_id, text, rating, claimant, claimant_norm, review_date, language
             claim_to_docs: Optional mapping of claim_id to list of doc_ids
             doc_metadata: Optional mapping of doc_id to metadata dict with keys:
-                text (title\\nbody), review_date, language
+                text (title + body), review_date, language
 
         Returns:
-            Tuple of (graph, topic_probabilities, chunk_ids, claim_retrieval_results)
+            Tuple of (graph, topic_probabilities, chunk_ids, claim_retrieval_results):
             - graph: NetworkX graph with all nodes and edges
             - topic_probabilities: numpy array of shape (n_chunks, n_topics)
-            - chunk_ids: list of chunk IDs matching probability rows
-            - claim_retrieval_results: dict mapping claim_id to pre-computed retrieval results
-
-        Example:
-            >>> chunks = [{"chunk_id": "chunk::0::0", "doc_id": "0", ...}]
-            >>> graph, probs, chunk_ids = builder.build_graph(chunks)
-            >>> graph.number_of_nodes()
-            150
+            - chunk_ids: list of chunk IDs matching probability matrix rows
+            - claim_retrieval_results: dict mapping claim_id to pre-computed results
         """
         self.logger.info("=" * 60)
         self.logger.info("BUILDING KNOWLEDGE GRAPH")
@@ -553,6 +890,12 @@ Topic label:"""
         step_start = time.time()
         chunk_to_entities = self._add_entities_and_mentions(chunks)
         self.build_timings["Step 4: Entities & MENTIONS"] = time.time() - step_start
+
+        # Step 4b: Extract keyphrases and add HAS_KEYPHRASE edges
+        self.logger.info("\nStep 4b: Extracting keyphrases and adding HAS_KEYPHRASE edges...")
+        step_start = time.time()
+        self._add_keyphrases(chunks)
+        self.build_timings["Step 4b: Keyphrases"] = time.time() - step_start
 
         # Step 5: Add CO_OCCURS edges (Entity ↔ Entity)
         self.logger.info("\nStep 5: Adding CO_OCCURS edges (Entity ↔ Entity)...")
@@ -723,38 +1066,47 @@ Topic label:"""
         probabilities: np.ndarray,
         chunk_ids: List[str]
     ):
-        """Add theme nodes and HAS_TOPIC edges."""
+        """Add theme nodes and HAS_TOPIC edges using batched LLM labeling."""
         # Get unique topics (excluding -1 which is outlier)
         unique_topics = set(topics)
         if -1 in unique_topics:
             unique_topics.remove(-1)
 
-        # Step 1: Create theme nodes
+        # Step 1: Collect all topics to label
         start_time_themes = time.time()
-        for topic_id in tqdm(unique_topics, desc="Creating theme nodes", disable=self.logger.level > logging.INFO):
-            # Get topic words
-            topic_words = topic_model.get_topic(topic_id)
+        topics_to_label = []
+        topic_keywords_map = {}  # Store processed keywords for later
 
+        for topic_id in sorted(unique_topics):
+            topic_words = topic_model.get_topic(topic_id)
             if not topic_words:
                 continue
-
-            # Process keywords: lemmatize and deduplicate n-grams
+            topics_to_label.append((topic_id, topic_words))
+            # Pre-process and store keywords
             processed_keywords = self._process_topic_keywords(topic_words)
+            topic_keywords_map[topic_id] = processed_keywords
 
-            # Label topic with LLM (mandatory - will raise error if LLM fails)
-            label = self.label_topic_with_llm(topic_words)
+        # Step 2: Label all topics in batches (with auto-tuning)
+        self.logger.info(f"Labeling {len(topics_to_label)} topics using batched LLM requests...")
+        labels = self.label_topics_batch(topics_to_label)
 
-            # Add theme node with processed keywords
+        # Step 3: Create theme nodes with labels
+        for topic_id in sorted(unique_topics):
+            if topic_id not in labels:
+                self.logger.warning(f"No label for topic {topic_id}, skipping node creation")
+                continue
+
+            processed_keywords = topic_keywords_map.get(topic_id, [])
             theme_node = f"theme::{topic_id}"
             self.graph.add_node(
                 theme_node,
                 type="theme",
                 topic_id=topic_id,
-                label=label,
-                keywords=[w for w, s in processed_keywords]  # Use processed keywords
+                label=labels[topic_id],
+                keywords=[w for w, _ in processed_keywords]
             )
 
-        self._log_step_completion("Creating theme nodes", start_time_themes, len(unique_topics))
+        self._log_step_completion("Creating theme nodes (batched)", start_time_themes, len(unique_topics))
 
         # Step 2: Add HAS_TOPIC edges for all topics above threshold OR top-K topics
         start_time_edges = time.time()
@@ -766,7 +1118,7 @@ Topic label:"""
             if topics[idx] == -1:
                 continue
 
-            # Multi-topic assignment avec probabilités
+            # Multi-topic assignment with probabilities
             if probabilities is not None and probabilities.ndim > 1:
                 # probabilities shape: (n_chunks, n_topics)
                 chunk_probs = probabilities[idx]
@@ -795,7 +1147,7 @@ Topic label:"""
                     )
                     edges_added += 1
             else:
-                # Fallback: Hard assignment si pas de probabilités
+                # Fallback: Hard assignment if no probabilities available
                 theme_node = f"theme::{topics[idx]}"
                 self.graph.add_edge(
                     chunk_id,
@@ -906,6 +1258,82 @@ Topic label:"""
         self._log_step_completion("Adding entities and MENTIONS edges", start_time_mentions, len(entity_mentions_in_chunks))
 
         return chunk_to_entities
+
+    def _add_keyphrases(self, chunks: List[Dict]):
+        """
+        Extract keyphrases from chunks using KeyBERT and add keyphrase nodes with HAS_KEYPHRASE edges.
+
+        For each chunk, extracts the top N most relevant keyphrases and creates:
+        - Keyphrase nodes with the extracted phrase text
+        - HAS_KEYPHRASE edges from chunk to keyphrase with relevance score as weight
+
+        Args:
+            chunks: List of chunk dictionaries with 'chunk_id' and 'text' keys
+        """
+        start_time = time.time()
+        keyphrase_count = 0
+        edge_count = 0
+
+        # Track unique keyphrases to avoid duplicates
+        keyphrase_to_node = {}
+
+        for chunk in tqdm(chunks, desc="Extracting keyphrases", disable=self.logger.level > logging.INFO):
+            chunk_id = chunk['chunk_id']
+            text = chunk['text']
+
+            # Skip empty or very short texts
+            if not text or len(text.strip()) < 20:
+                continue
+
+            try:
+                # Extract keyphrases using KeyBERT
+                keyphrases = self.keybert_model.extract_keywords(
+                    text,
+                    keyphrase_ngram_range=self.keyphrase_ngram_range,
+                    stop_words='english',
+                    top_n=self.keyphrase_top_n,
+                    use_mmr=True,  # Use Maximal Marginal Relevance for diversity
+                    diversity=0.5
+                )
+
+                for phrase, score in keyphrases:
+                    # Normalize keyphrase (lowercase, strip)
+                    phrase_normalized = phrase.lower().strip()
+
+                    # Skip very short phrases
+                    if len(phrase_normalized) < 3:
+                        continue
+
+                    # Create or get keyphrase node
+                    keyphrase_node = f"keyphrase::{phrase_normalized}"
+
+                    if keyphrase_node not in keyphrase_to_node:
+                        # Create new keyphrase node
+                        self.graph.add_node(
+                            keyphrase_node,
+                            type="keyphrase",
+                            text=phrase_normalized,
+                            phrase=phrase  # Original casing
+                        )
+                        keyphrase_to_node[keyphrase_node] = True
+                        keyphrase_count += 1
+
+                    # Add HAS_KEYPHRASE edge with relevance score
+                    self.graph.add_edge(
+                        chunk_id,
+                        keyphrase_node,
+                        edge_type="HAS_KEYPHRASE",
+                        weight=float(score)
+                    )
+                    edge_count += 1
+
+            except Exception as e:
+                # Log but don't fail on individual chunk errors
+                self.logger.debug(f"KeyBERT extraction failed for {chunk_id}: {e}")
+                continue
+
+        self.logger.info(f"Created {keyphrase_count} unique keyphrase nodes")
+        self._log_step_completion("Extracting keyphrases", start_time, edge_count)
 
     def _add_entity_co_occurrences(self, chunk_to_entities: Dict[str, Set[str]]):
         """
@@ -1058,7 +1486,7 @@ Topic label:"""
 
         self._log_step_completion("Adding entity SEMANTIC_SIM edges", start_time, edge_count)
 
-    def _add_date_temporal_similarity(self, max_year_gap: int = 10, decay_rate: float = 0.3):
+    def _add_date_temporal_similarity(self, max_year_gap: int, decay_rate: float):
         """
         Add TEMPORAL_DIST edges between year entities with exponential decay.
 
@@ -1067,7 +1495,7 @@ Topic label:"""
 
         Where:
         - year_diff = |year2 - year1|
-        - decay_rate controls how fast the weight decreases (default: 0.3)
+        - decay_rate controls how fast the weight decreases
 
         Examples (with decay_rate=0.3):
         - Same year (diff=0): weight = 1.0
@@ -1078,8 +1506,8 @@ Topic label:"""
         - 10 years diff: weight ≈ 0.05
 
         Args:
-            max_year_gap: Maximum year difference to create edges (default: 10)
-            decay_rate: Decay rate for exponential function (default: 0.3)
+            max_year_gap: Maximum year difference to create edges (from config)
+            decay_rate: Decay rate for exponential function (from config)
         """
         start_time = time.time()
 
@@ -1952,11 +2380,11 @@ Nodes by Type:
     def save_to_postgres(
         self,
         graph_id: str,
-        host: str = "localhost",
-        port: int = 5432,
-        database: str = "knowledge_graph",
-        user: str = "postgres",
-        password: str = "postgres",
+        host: str,
+        port: int,
+        database: str,
+        user: str,
+        password: str,
         metadata: dict = None,
         graph: nx.Graph = None
     ):
@@ -1965,11 +2393,11 @@ Nodes by Type:
 
         Args:
             graph_id: Graph ID (timestamp) for creating versioned tables
-            host: PostgreSQL host
-            port: PostgreSQL port
-            database: Database name
-            user: Username
-            password: Password
+            host: PostgreSQL host (from config)
+            port: PostgreSQL port (from config)
+            database: Database name (from config)
+            user: Username (from config)
+            password: Password (from config)
             metadata: Optional metadata dictionary to store
             graph: Optional graph to save (if None, uses self.graph)
         """
