@@ -93,17 +93,6 @@ def main():
         default="postgres",
         help="PostgreSQL password"
     )
-    parser.add_argument(
-        "--claims-csv",
-        type=str,
-        default="../data/claim_reviews.csv",
-        help="Path to claims CSV file (separate from documents)"
-    )
-    parser.add_argument(
-        "--no-claims",
-        action="store_true",
-        help="Skip claim loading and pre-retrieval (Steps 9-10)"
-    )
     args = parser.parse_args()
 
     # Load build configuration
@@ -144,30 +133,14 @@ def main():
         logger=logger
     )
 
-    # Step 1b: Load claims from separate CSV (optional)
-    claims = None
-    claim_to_docs = None
-    if not args.no_claims:
-        logger.info("\n### STEP 1b: Loading claims ###")
-        # Handle claims CSV path
-        if os.path.isabs(args.claims_csv):
-            claims_csv_path = args.claims_csv
-        elif args.claims_csv.startswith(".."):
-            claims_csv_path = os.path.join(os.path.dirname(__file__), args.claims_csv)
-        else:
-            claims_csv_path = args.claims_csv
-
-        if os.path.exists(claims_csv_path):
-            claims, claim_to_docs = load_claims(
-                csv_path=claims_csv_path,
-                max_claims=args.max_docs,  # Use same limit as documents
-                logger=logger
-            )
-        else:
-            logger.warning(f"Claims CSV not found: {claims_csv_path}")
-            logger.warning("Skipping claim loading (Steps 9-10 will be skipped)")
-    else:
-        logger.info("\n### STEP 1b: Skipping claim loading (--no-claims flag) ###")
+    # Step 1b: Load claims from claim_reviews.csv (same directory as main CSV)
+    logger.info("\n### STEP 1b: Loading claims ###")
+    claims_csv_path = os.path.join(os.path.dirname(os.path.abspath(csv_path)), "claim_reviews.csv")
+    claims, claim_to_docs = load_claims(
+        csv_path=claims_csv_path,
+        max_claims=args.max_docs,  # Use same limit as documents
+        logger=logger
+    )
 
     # Step 2: Initialize graph builder
     logger.info("\n### STEP 2: Initializing graph builder ###")

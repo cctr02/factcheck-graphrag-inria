@@ -18,7 +18,9 @@ from bertopic import BERTopic
 import logging
 from tqdm import tqdm
 import time as time
-from nltk.stem.snowball import SnowballStemmer
+import nltk
+from nltk.stem import WordNetLemmatizer
+nltk.download('wordnet', quiet=True)
 import threading
 import sys
 import types
@@ -112,8 +114,8 @@ class KnowledgeGraphBuilder:
         self.topic_keywords_initial = topic_keywords_initial
         self.topic_keywords_final = topic_keywords_final
 
-        # Initialize NLTK stemmer
-        self.stemmer = SnowballStemmer('english')
+        # Initialize NLTK lemmatizer
+        self.lemmatizer = WordNetLemmatizer()
 
         # LLM configuration
         self.llm_endpoint = llm_endpoint
@@ -340,74 +342,36 @@ class KnowledgeGraphBuilder:
         if not topic_words:
             return []
 
-        # Step 1: Stem and merge variants (take top N initially)
-        stem_scores = {}
+        # Step 1: take top N initial keywords
+        candidates = topic_words[:self.topic_keywords_initial]
 
-        for word, score in topic_words[:self.topic_keywords_initial]:
-            # Stem using NLTK SnowballStemmer
-            # For multi-word phrases, stem each word individually
-            words = word.split()
-            stemmed_words = [self.stemmer.stem(w.lower()) for w in words]
-            stem = " ".join(stemmed_words)
-
-            # Merge scores for same stem (sum the scores)
-            if stem not in stem_scores:
-                stem_scores[stem] = 0
-            stem_scores[stem] += score
-
-        # Step 2: Filter redundant n-grams
-        # Strategy: Keep longer n-grams, remove shorter ones that are substrings
-        # Sort by length (descending) then score (descending)
-        sorted_items = sorted(
-            stem_scores.items(),
-            key=lambda x: (len(x[0].split()), x[1]),  # Sort by word count, then score
-            reverse=True
-        )
+        # Step 2: substring deduplication (keep longer / more specific)
+        sorted_words = sorted(candidates, key=lambda x: len(x[0]), reverse=True)
 
         filtered = []
-        for stem, score in sorted_items:
-            is_redundant = False
+        for word, score in sorted_words:
+            word_lower = word.lower()
+            # skip if substring of an already-kept word
+            if any(word_lower in kept_word.lower() for kept_word, _ in filtered):
+                continue
+            filtered.append((word, score))
 
-            # Check if this stem is a substring of any already kept stem
-            for kept_stem, kept_score in filtered:
-                # Check if current stem is contained in a kept stem
-                # Use word boundary checks to avoid false positives
-                stem_words = set(stem.split())
-                kept_words = set(kept_stem.split())
+        # Step 3: lemmatization + score merging for equivalent forms
+        lemma_scores: Dict[str, float] = {}
+        for word, score in filtered:
+            tokens = word.lower().split()
+            lemmas = [self.lemmatizer.lemmatize(t) for t in tokens]
+            lemma_phrase = " ".join(lemmas)
+            lemma_scores[lemma_phrase] = lemma_scores.get(lemma_phrase, 0.0) + score
 
-                # If all words in current stem are in the kept stem, it's redundant
-                if stem_words.issubset(kept_words):
-                    is_redundant = True
-                    break
+        # Step 4: sort by merged score descending
+        final_sorted = sorted(lemma_scores.items(), key=lambda x: x[1], reverse=True)
 
-            if not is_redundant:
-                # Before adding, remove any kept stems that are substrings of current stem
-                to_remove = []
-                for kept_stem, kept_score in filtered:
-                    kept_words = set(kept_stem.split())
-                    stem_words = set(stem.split())
+        # Step 5: keep top N final
+        top_keywords = final_sorted[:self.topic_keywords_final]
 
-                    # If kept stem is subset of current stem, mark for removal
-                    if kept_words.issubset(stem_words) and kept_stem != stem:
-                        to_remove.append((kept_stem, kept_score))
-
-                # Remove redundant kept items
-                for item in to_remove:
-                    filtered.remove(item)
-
-                filtered.append((stem, score))
-
-        # Step 3: Re-sort by score and take top N
-        filtered_sorted = sorted(filtered, key=lambda x: x[1], reverse=True)
-        final_count = min(max(len(filtered_sorted), 3), self.topic_keywords_final)
-        top_keywords = filtered_sorted[:final_count]
-
-        # Return with stemmed forms
-        result = [(stem, score) for stem, score in top_keywords]
-
-        self.logger.debug(f"Processed keywords: {len(topic_words)} -> {len(result)} (removed {len(topic_words) - len(result)} redundant)")
-
-        return result
+        self.logger.debug(f"Processed keywords: {len(topic_words)} -> {len(top_keywords)}")
+        return top_keywords
 
     def label_topic_with_llm(
         self,
@@ -430,13 +394,19 @@ class KnowledgeGraphBuilder:
         # Process keywords: lemmatize and remove redundant n-grams
         processed_keywords = self._process_topic_keywords(topic_words)
 
-        # Extract top words from processed keywords
-        top_words = [word for word, score in processed_keywords]
+        keyword_list = ", ".join([f"{w} ({s:.3f})" for w, s in processed_keywords[:10]])
 
-        prompt = f"""Based on these keywords, provide a short, clear topic label (2-4 words maximum):
-Keywords: {', '.join(top_words)}
+        prompt = f"""You create short, readable topic labels.
 
-Topic label:"""
+Keywords: {keyword_list}
+
+Rules:
+- 2 to 5 words maximum
+- Proper English (avoid stem fragments like "effici", "accuraci")
+- No quotes, no punctuation at the end
+- Output ONLY the label
+
+Label:"""
 
         try:
             response = requests.post(
@@ -454,29 +424,24 @@ Topic label:"""
             )
 
             if response.status_code != 200:
-                raise RuntimeError(
-                    f"LLM request failed with status {response.status_code}: {response.text}"
-                )
+                raise RuntimeError(f"Ollama HTTP {response.status_code}: {response.text[:200]}")
 
-            label = response.json()['response'].strip()
-            # Clean up the response
-            label = label.replace('\n', ' ').strip()
-            # Remove quotes if present
-            label = label.strip('"\'')
-            # Limit length
-            if len(label) > self.llm_label_max_length:
-                label = ' '.join(label.split()[:self.llm_label_max_words])
+            label = (response.json().get("response") or "").strip()
+            label = label.replace('\n', ' ').strip().strip('"').strip("'")
 
-            self.logger.debug(f"LLM labeled topic: {top_words[:3]} -> '{label}'")
-            return label.lower()
+            if not label:
+                raise RuntimeError("Empty label returned by Ollama")
 
-        except requests.exceptions.RequestException as e:
-            raise RuntimeError(
-                f"LLM labeling failed (connection error): {e}. "
-                f"Ensure Ollama is running at {self.llm_endpoint}"
-            ) from e
+            words = label.split()
+            if len(words) > 5:
+                label = " ".join(words[:5])
+
+            self.logger.debug(f"LLM labeled topic: {[w for w, _ in processed_keywords[:3]]} -> '{label}'")
+            return label
+
         except Exception as e:
-            raise RuntimeError(f"LLM labeling failed: {e}") from e
+            self.logger.warning(f"LLM labeling failed: {e}, fallback to keywords")
+            return " ".join([w for w, _ in processed_keywords[:3]])
 
     def build_graph(
         self,
