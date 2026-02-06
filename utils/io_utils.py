@@ -55,7 +55,7 @@ def load_corpus_from_csv(
     df = df[df[lang_col].astype(str).str.lower() == str(lang_value).lower()].copy()
     after = len(df)
     if logger:
-        logger.info(f"Filtered language=={lang_value!r}: kept {after}/{before} rows")
+        logger.info(f"Filtered {lang_col}=={lang_value!r}: {after} documents (from {before} total CSV rows)")
 
     def _combine(row) -> str:
         t = str(row.get(title_col, "") or "").strip()

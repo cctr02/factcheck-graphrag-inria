@@ -7,6 +7,8 @@ This module implements a hybrid retrieval strategy combining:
 3. Thematic Graph Traversal (BFS over theme graph)
 4. Entity Graph Traversal (BFS over entity graph)
 5. Claim-Document Retrieval (semantic similarity with claims, then linked documents)
+6. Claim-Topic Traversal (claim-based + topic distribution weighted by traversal)
+7. Claim-KeyPhrase Similarity (claim-based + KeyBERT phrase similarity)
 """
 
 import networkx as nx
@@ -21,19 +23,34 @@ import logging
 import time
 import random
 
+# Import strategy modules
+from fact_check_kg.retrieval.retrieval_propagation import (
+    propagate_relevance_entities,
+    propagate_relevance_themes
+)
+from fact_check_kg.retrieval.retrieval_semantic import retrieve_semantic as _retrieve_semantic
+from fact_check_kg.retrieval.retrieval_topic import retrieve_topic_distribution as _retrieve_topic_distribution
+from fact_check_kg.retrieval.retrieval_thematic import retrieve_thematic as _retrieve_thematic
+from fact_check_kg.retrieval.retrieval_entity import retrieve_entity as _retrieve_entity, extract_entities
+from fact_check_kg.retrieval.retrieval_claims import retrieve_claim_document as _retrieve_claim_document
+from fact_check_kg.retrieval.retrieval_claim_topic import retrieve_claim_topic_traversal as _retrieve_claim_topic_traversal
+from fact_check_kg.retrieval.retrieval_claim_keyphrase import retrieve_claim_keyphrase_similarity as _retrieve_claim_keyphrase_similarity
+
 
 class HybridRetriever:
     """
     Hybrid retrieval system for fact-checking claims.
 
-    Combines five retrieval strategies:
+    Combines seven retrieval strategies:
     - Strategy 1 (Semantic Similarity): Direct embedding similarity
     - Strategy 2 (Topic Distribution Similarity): Jensen-Shannon divergence between topic distributions
     - Strategy 3 (Thematic Graph Traversal): BFS over theme graph
     - Strategy 4 (Entity Graph Traversal): BFS over entity graph
     - Strategy 5 (Claim-Document Retrieval): Chunks from documents linked to semantically similar claims
+    - Strategy 6 (Claim-Topic Traversal): Claim traversal with topic distribution weighting
+    - Strategy 7 (Claim-KeyPhrase Similarity): Claim traversal with KeyBERT phrase matching
 
-    The final score is a weighted combination of all five (weights must sum to 1.0).
+    The final score is a weighted combination of all strategies (weights must sum to 1.0).
     """
 
     def __init__(
@@ -296,534 +313,62 @@ class HybridRetriever:
             self.logger.warning(f"Error loading claim retrieval results: {e}")
             self.logger.warning("Strategy 5 will fall back to computing results at retrieval time")
 
-    def extract_entities(self, text: str) -> List[Tuple[str, str]]:
-        """
-        Extract entities from text (same as in graph_builder).
-
-        Args:
-            text: Input text
-
-        Returns:
-            List of (entity_text, entity_type) tuples
-        """
-        doc = self.nlp(text)
-        entities = []
-
-        for ent in doc.ents:
-            if ent.label_ in self.entity_types:
-                entity_text = ent.text.strip().lower()
-                if len(entity_text) > 2:
-                    entities.append((entity_text, ent.label_))
-
-        return entities
-
-    def _propagate_relevance_entities(
-        self,
-        seed_entities: List[str],
-        relevance_threshold: float
-    ) -> Dict[str, float]:
-        """
-        Propagate relevance through entity graph using BFS.
-
-        Args:
-            seed_entities: List of entity node IDs to start from
-            relevance_threshold: Minimum relevance to continue traversal
-
-        Returns:
-            Dictionary mapping entity_node to final relevance score
-        """
-        from collections import deque
-
-        # Entity relevance scores
-        entity_relevance = {}
-        for entity in seed_entities:
-            entity_relevance[entity] = 1.0  # Seed entities start with relevance 1.0
-
-        # BFS queue: (entity_node, current_relevance)
-        queue = deque([(entity, 1.0) for entity in seed_entities])
-        visited = set(seed_entities)
-
-        while queue:
-            current_entity, current_relevance = queue.popleft()
-
-            # Explore neighbors (other entities connected via CO_OCCURS or SEMANTIC_SIM)
-            for neighbor in self.graph.neighbors(current_entity):
-                if self.graph.nodes[neighbor].get('type') != 'entity':
-                    continue  # Skip non-entity nodes
-
-                edge_data = self.graph[current_entity][neighbor]
-                edge_type = edge_data.get('edge_type')
-
-                if edge_type not in ['CO_OCCURS', 'SEMANTIC_SIM']:
-                    continue  # Only traverse entity-entity edges
-
-                # Get edge weight
-                edge_weight = edge_data.get('weight', 0)
-
-                # Calculate propagated relevance
-                propagated_relevance = current_relevance * edge_weight
-
-                # Only continue if above threshold
-                if propagated_relevance < relevance_threshold:
-                    continue
-
-                # Update relevance (take maximum if entity already visited)
-                if neighbor not in entity_relevance:
-                    entity_relevance[neighbor] = propagated_relevance
-                else:
-                    entity_relevance[neighbor] = max(entity_relevance[neighbor], propagated_relevance)
-
-                # Add to queue if not visited yet
-                if neighbor not in visited:
-                    visited.add(neighbor)
-                    queue.append((neighbor, propagated_relevance))
-
-        return entity_relevance
-
-    def _propagate_relevance_themes(
-        self,
-        seed_themes: List[Tuple[str, float]],
-        relevance_threshold: float
-    ) -> Dict[str, float]:
-        """
-        Propagate relevance through theme graph using BFS.
-
-        Args:
-            seed_themes: List of (theme_node, initial_probability) tuples
-            relevance_threshold: Minimum relevance to continue traversal
-
-        Returns:
-            Dictionary mapping theme_node to final relevance score
-        """
-        from collections import deque
-
-        # Theme relevance scores
-        theme_relevance = {}
-        queue = deque()
-        visited = set()
-
-        for theme_node, initial_prob in seed_themes:
-            theme_relevance[theme_node] = initial_prob
-            queue.append((theme_node, initial_prob))
-            visited.add(theme_node)
-
-        while queue:
-            current_theme, current_relevance = queue.popleft()
-
-            # Explore neighbors (other themes connected via CO_PRESENCE or SEMANTIC_SIM)
-            for neighbor in self.graph.neighbors(current_theme):
-                if self.graph.nodes[neighbor].get('type') != 'theme':
-                    continue  # Skip non-theme nodes
-
-                edge_data = self.graph[current_theme][neighbor]
-                edge_type = edge_data.get('edge_type')
-
-                if edge_type not in ['CO_PRESENCE', 'SEMANTIC_SIM']:
-                    continue  # Only traverse theme-theme edges
-
-                # Get edge weight
-                edge_weight = edge_data.get('weight', 0)
-
-                # Calculate propagated relevance
-                propagated_relevance = current_relevance * edge_weight
-
-                # Only continue if above threshold
-                if propagated_relevance < relevance_threshold:
-                    continue
-
-                # Update relevance (take maximum if theme already visited)
-                if neighbor not in theme_relevance:
-                    theme_relevance[neighbor] = propagated_relevance
-                else:
-                    theme_relevance[neighbor] = max(theme_relevance[neighbor], propagated_relevance)
-
-                # Add to queue if not visited yet
-                if neighbor not in visited:
-                    visited.add(neighbor)
-                    queue.append((neighbor, propagated_relevance))
-
-        return theme_relevance
-
     def retrieve_semantic(self, claim: str) -> Dict[str, float]:
-        """
-        Strategy 1: Semantic Similarity using embedding similarity.
-
-        Args:
-            claim: Claim text to verify
-
-        Returns:
-            Dictionary mapping chunk_id to semantic score (normalized)
-        """
-        self.logger.info("\n--- Strategy 1: Semantic Similarity ---")
-
-        # Embed claim
-        claim_embedding = self.embedding_model.encode(
-            [claim],
-            normalize_embeddings=True
-        )[0]
-
-        # Compute similarities
-        similarities = np.matmul(self.chunk_embeddings, claim_embedding)
-
-        # Create score dictionary
-        scores = {}
-        for chunk_node, sim in zip(self.chunk_nodes, similarities):
-            scores[chunk_node] = float(sim)
-
-        # Normalize scores (min-max)
-        if scores:
-            min_score = min(scores.values())
-            max_score = max(scores.values())
-            if max_score > min_score:
-                scores = {
-                    k: (v - min_score) / (max_score - min_score)
-                    for k, v in scores.items()
-                }
-
-        self.logger.info(f"Found {len(scores)} chunks with semantic scores")
-        self.logger.info(f"Top score: {max(scores.values()):.3f}")
-
-        return scores
+        """Strategy 1: Semantic Similarity using embedding similarity."""
+        return _retrieve_semantic(
+            claim=claim,
+            embedding_model=self.embedding_model,
+            chunk_embeddings=self.chunk_embeddings,
+            chunk_nodes=self.chunk_nodes,
+            logger=self.logger
+        )
 
     def retrieve_thematic(self, claim: str) -> Tuple[Dict[str, float], List[Dict]]:
-        """
-        Strategy 3: Thematic Graph Traversal using topic model and graph traversal with relevance propagation.
-
-        Uses BFS to propagate relevance through theme graph (CO_PRESENCE, SEMANTIC_SIM edges),
-        then scores chunks based on theme relevance weighted by probabilities from HAS_TOPIC edges.
-
-        Args:
-            claim: Claim text to verify
-
-        Returns:
-            Tuple of (scores dict mapping chunk_id to thematic score, detected_themes info list)
-        """
-        self.logger.info("\n--- Strategy 3: Thematic Graph Traversal ---")
-
-        # Classify claim into topics
-        topic_probs = self.topic_model.transform([claim])[1][0]
-
-        # Detect themes above threshold
-        detected_themes = [
-            (idx, prob)
-            for idx, prob in enumerate(topic_probs)
-            if prob > self.theme_threshold
-        ]
-
-        # Collect theme info for output (label, keywords, probability)
-        detected_themes_info = []
-        for idx, prob in sorted(detected_themes, key=lambda x: x[1], reverse=True):
-            theme_node = f"theme::{idx}"
-            node_data = self.graph.nodes.get(theme_node, {})
-            detected_themes_info.append({
-                'theme_node': theme_node,
-                'topic_id': idx,
-                'label': node_data.get('label', f'topic_{idx}'),
-                'probability': round(float(prob), 4),
-                'keywords': node_data.get('keywords', [])[:5]
-            })
-
-        self.logger.info(f"Detected {len(detected_themes)} themes in claim")
-        for info in detected_themes_info:
-            self.logger.info(f"  Theme {info['topic_id']} ({info['label']}): {info['probability']:.3f}")
-
-        # Build seed theme list with initial probabilities
-        seed_themes = []
-        for theme_id, prob in detected_themes:
-            theme_node = f"theme::{theme_id}"
-            if self.graph.has_node(theme_node):
-                seed_themes.append((theme_node, prob))
-            else:
-                self.logger.debug(f"Theme not in graph: {theme_node}")
-
-        if not seed_themes:
-            self.logger.warning("No themes from claim found in graph")
-            return {}, detected_themes_info
-
-        self.logger.info(f"Found {len(seed_themes)} seed themes in graph")
-
-        # Propagate relevance through theme graph
-        theme_relevance = self._propagate_relevance_themes(
-            seed_themes=seed_themes,
-            relevance_threshold=self.theme_relevance_threshold
+        """Strategy 3: Thematic Graph Traversal using topic model and graph traversal."""
+        return _retrieve_thematic(
+            claim=claim,
+            graph=self.graph,
+            topic_model=self.topic_model,
+            theme_threshold=self.theme_threshold,
+            theme_relevance_threshold=self.theme_relevance_threshold,
+            logger=self.logger
         )
-
-        self.logger.info(f"Relevance propagated to {len(theme_relevance)} themes")
-
-        # Score chunks based on theme relevance and HAS_TOPIC edge weights (probabilities)
-        scores = defaultdict(float)
-
-        for theme_node, relevance in theme_relevance.items():
-            # Find chunks connected via HAS_TOPIC edges
-            for neighbor in self.graph.neighbors(theme_node):
-                edge_data = self.graph[theme_node][neighbor]
-
-                # Only consider HAS_TOPIC edges pointing to chunks
-                if (edge_data.get('edge_type') == 'HAS_TOPIC' and
-                    self.graph.nodes[neighbor].get('type') == 'chunk'):
-
-                    # Get probability weight from HAS_TOPIC edge
-                    prob_weight = edge_data.get('weight', 0.0)
-
-                    # Chunk score = theme relevance × HAS_TOPIC probability
-                    chunk_score = relevance * prob_weight
-
-                    # Accumulate scores (chunks can be associated with multiple themes)
-                    scores[neighbor] += chunk_score
-
-        # Normalize scores
-        if scores:
-            min_score = min(scores.values())
-            max_score = max(scores.values())
-            if max_score > min_score:
-                scores = {
-                    k: (v - min_score) / (max_score - min_score)
-                    for k, v in scores.items()
-                }
-
-        self.logger.info(f"Found {len(scores)} chunks via thematic graph traversal")
-        if scores:
-            self.logger.info(f"Top score: {max(scores.values()):.3f}")
-
-        return dict(scores), detected_themes_info
 
     def retrieve_entity(self, claim: str) -> Dict[str, float]:
-        """
-        Strategy 4: Entity Graph Traversal using graph traversal with relevance propagation.
-
-        Uses BFS to propagate relevance through entity graph (CO_OCCURS, SEMANTIC_SIM edges),
-        then scores chunks based on entity relevance weighted by TF-IDF from MENTIONS edges.
-
-        Args:
-            claim: Claim text to verify
-
-        Returns:
-            Dictionary mapping chunk_id to entity score (normalized)
-        """
-        self.logger.info("\n--- Strategy 4: Entity Graph Traversal ---")
-
-        # Extract entities from claim
-        entities_claim = self.extract_entities(claim)
-
-        self.logger.info(f"Extracted {len(entities_claim)} entities from claim:")
-        for ent_text, ent_type in entities_claim:
-            self.logger.info(f"  {ent_type}: {ent_text}")
-
-        # Build seed entity list (only entities present in graph)
-        seed_entities = []
-        for entity_text, entity_type in entities_claim:
-            entity_node = f"entity::{entity_type}::{entity_text}"
-            if self.graph.has_node(entity_node):
-                seed_entities.append(entity_node)
-            else:
-                self.logger.debug(f"Entity not in graph: {entity_node}")
-
-        if not seed_entities:
-            self.logger.warning("No entities from claim found in graph")
-            return {}
-
-        self.logger.info(f"Found {len(seed_entities)} seed entities in graph")
-
-        # Propagate relevance through entity graph
-        entity_relevance = self._propagate_relevance_entities(
-            seed_entities=seed_entities,
-            relevance_threshold=self.entity_relevance_threshold
+        """Strategy 4: Entity Graph Traversal using graph traversal with relevance propagation."""
+        return _retrieve_entity(
+            claim=claim,
+            graph=self.graph,
+            nlp=self.nlp,
+            entity_types=set(self.entity_types),
+            entity_relevance_threshold=self.entity_relevance_threshold,
+            logger=self.logger
         )
 
-        self.logger.info(f"Relevance propagated to {len(entity_relevance)} entities")
-
-        # Score chunks based on entity relevance and MENTIONS edge weights (TF-IDF)
-        scores = defaultdict(float)
-
-        for entity_node, relevance in entity_relevance.items():
-            # Find chunks connected via MENTIONS edges
-            for neighbor in self.graph.neighbors(entity_node):
-                edge_data = self.graph[entity_node][neighbor]
-
-                if (edge_data.get('edge_type') == 'MENTIONS' and
-                    self.graph.nodes[neighbor].get('type') == 'chunk'):
-
-                    # Get TF-IDF weight from MENTIONS edge
-                    tf_idf_weight = edge_data.get('weight', 1.0)
-
-                    # Chunk score = entity relevance × TF-IDF weight
-                    chunk_score = relevance * tf_idf_weight
-
-                    # Accumulate scores (chunks can be mentioned by multiple entities)
-                    scores[neighbor] += chunk_score
-
-        # Normalize scores
-        if scores:
-            min_score = min(scores.values())
-            max_score = max(scores.values())
-            if max_score > min_score:
-                scores = {
-                    k: (v - min_score) / (max_score - min_score)
-                    for k, v in scores.items()
-                }
-
-        self.logger.info(f"Found {len(scores)} chunks via entity graph traversal")
-        if scores:
-            self.logger.info(f"Top score: {max(scores.values()):.3f}")
-
-        return dict(scores)
-
     def retrieve_topic_distribution(self, claim: str) -> Dict[str, float]:
-        """
-        Strategy 2: Topic Distribution Similarity using Jensen-Shannon divergence.
-
-        Compares the topic probability distribution of the claim with each chunk's
-        topic distribution. Uses Jensen-Shannon divergence (symmetric, bounded [0,1]).
-
-        Args:
-            claim: Claim text to verify
-
-        Returns:
-            Dictionary mapping chunk_id to distribution similarity score (normalized)
-        """
-        self.logger.info("\n--- Strategy 2: Topic Distribution Similarity ---")
-
-        # Get topic distribution for claim
-        _, claim_topic_probs = self.topic_model.transform([claim])
-        claim_distribution = claim_topic_probs[0]
-
-        self.logger.info(f"Claim topic distribution shape: {claim_distribution.shape}")
-
-        # Show top topics in claim
-        top_topics = np.argsort(claim_distribution)[-5:][::-1]
-        self.logger.info("Top 5 topics in claim:")
-        for topic_id in top_topics:
-            if claim_distribution[topic_id] > 0.01:
-                theme_label = self.graph.nodes.get(f"theme::{topic_id}", {}).get('label', f'topic_{topic_id}')
-                self.logger.info(f"  Topic {topic_id} ({theme_label}): {claim_distribution[topic_id]:.3f}")
-
-        # Compute Jensen-Shannon divergence for each chunk
-        scores = {}
-        for chunk_id, dist_idx in self.chunk_to_dist_idx.items():
-            chunk_distribution = self.chunk_topic_distributions[dist_idx]
-
-            # Jensen-Shannon divergence (returns value in [0, 1])
-            # Lower divergence = more similar distributions
-            js_divergence = jensenshannon(claim_distribution, chunk_distribution)
-
-            # Convert to similarity score (1 - divergence)
-            # So higher score = more similar
-            similarity = 1.0 - js_divergence
-
-            scores[chunk_id] = float(similarity)
-
-        # Normalize scores (min-max normalization)
-        if scores:
-            min_score = min(scores.values())
-            max_score = max(scores.values())
-            if max_score > min_score:
-                scores = {
-                    k: (v - min_score) / (max_score - min_score)
-                    for k, v in scores.items()
-                }
-
-        self.logger.info(f"Found {len(scores)} chunks with topic distribution scores")
-        if scores:
-            self.logger.info(f"Top score: {max(scores.values()):.3f}")
-            self.logger.info(f"Mean score: {np.mean(list(scores.values())):.3f}")
-
-        return scores
+        """Strategy 2: Topic Distribution Similarity using Jensen-Shannon divergence."""
+        return _retrieve_topic_distribution(
+            claim=claim,
+            graph=self.graph,
+            topic_model=self.topic_model,
+            chunk_topic_distributions=self.chunk_topic_distributions,
+            chunk_to_dist_idx=self.chunk_to_dist_idx,
+            logger=self.logger
+        )
 
     def retrieve_claim_document(self, query: str) -> Tuple[Dict[str, float], List[Dict]]:
-        """
-        Strategy 5: Claim-Based Retrieval using pre-computed claim retrieval results.
-
-        Finds claims semantically similar to the query, then returns:
-        1. Chunk scores from pre-computed retrieval results for those claims
-        2. Details about which claims were matched and their similarity to the query
-
-        Args:
-            query: Query text to match against claims
-
-        Returns:
-            Tuple of:
-            - Dictionary mapping chunk_id to score based on claim retrieval
-            - List of matched claim details with their retrieval results
-        """
-        self.logger.info("\n--- Strategy 5: Claim-Based Retrieval (Pre-computed) ---")
-
-        matched_claims_details = []
-
-        # Check if claims exist
-        if self.claim_embeddings is None or len(self.claim_nodes) == 0:
-            self.logger.warning("No claims in graph, skipping Strategy 5")
-            return {}, matched_claims_details
-
-        # Embed query
-        query_embedding = self.embedding_model.encode(
-            [query],
-            normalize_embeddings=True
-        )[0]
-
-        # Compute similarities with all claims
-        similarities = np.matmul(self.claim_embeddings, query_embedding)
-
-        # Get top-k claims
-        top_indices = np.argsort(similarities)[-self.claim_top_k:][::-1]
-
-        self.logger.info(f"Top {self.claim_top_k} claims by similarity to query:")
-        scores = {}
-
-        for idx in top_indices:
-            claim_node = self.claim_nodes[idx]
-            claim_similarity = float(similarities[idx])
-            claim_text = self.claim_texts[idx]
-
-            claim_text_preview = claim_text[:100] + "..." if len(claim_text) > 100 else claim_text
-            self.logger.info(f"  {claim_node}: similarity={claim_similarity:.3f}")
-            self.logger.info(f"    Claim: {claim_text_preview}")
-
-            # Get pre-computed retrieval results for this claim
-            if claim_node in self.claim_retrieval_results:
-                claim_data = self.claim_retrieval_results[claim_node]
-                retrieval_results = claim_data.get('retrieval_results', [])
-
-                self.logger.info(f"    Pre-computed results: {len(retrieval_results)} chunks")
-
-                # Store matched claim details (pull rating from graph node)
-                node_data = self.graph.nodes.get(claim_node, {})
-                matched_claims_details.append({
-                    'claim_node': claim_node,
-                    'claim_text': claim_text,
-                    'query_similarity': claim_similarity,
-                    'rating': node_data.get('rating', ''),
-                    'retrieval_results': retrieval_results[:10]  # Top 10 chunks per claim
-                })
-
-                # Add chunk scores weighted by claim similarity
-                for result in retrieval_results:
-                    chunk_id = result['chunk_id']
-                    chunk_score = result['score_total']
-                    # Final score = claim similarity × chunk retrieval score
-                    combined_score = claim_similarity * chunk_score
-
-                    if chunk_id not in scores:
-                        scores[chunk_id] = combined_score
-                    else:
-                        scores[chunk_id] = max(scores[chunk_id], combined_score)
-            else:
-                self.logger.warning(f"    No pre-computed results for {claim_node}")
-
-        # Normalize scores (min-max)
-        if scores:
-            min_score = min(scores.values())
-            max_score = max(scores.values())
-            if max_score > min_score:
-                scores = {
-                    k: (v - min_score) / (max_score - min_score)
-                    for k, v in scores.items()
-                }
-
-        self.logger.info(f"Found {len(scores)} chunks via claim-based retrieval")
-        if scores:
-            self.logger.info(f"Top score: {max(scores.values()):.3f}")
-
-        return scores, matched_claims_details
+        """Strategy 5: Claim-Based Retrieval using pre-computed claim retrieval results."""
+        return _retrieve_claim_document(
+            query=query,
+            graph=self.graph,
+            embedding_model=self.embedding_model,
+            claim_embeddings=self.claim_embeddings,
+            claim_nodes=self.claim_nodes,
+            claim_texts=self.claim_texts,
+            claim_retrieval_results=self.claim_retrieval_results,
+            claim_top_k=self.claim_top_k,
+            logger=self.logger
+        )
 
     def retrieve(self, claim: str) -> List[Dict]:
         """

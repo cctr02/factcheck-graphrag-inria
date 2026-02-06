@@ -22,7 +22,7 @@ from datetime import datetime
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-from fact_check_kg.core.config_loader import get_build_config, get_retrieval_config
+from fact_check_kg.core.config_loader import get_build_config, get_retrieval_config, get_config
 from fact_check_kg.core.logger import get_logger
 
 logger = None
@@ -528,6 +528,9 @@ def stats(graph_id, use_postgres, detailed):
     from fact_check_kg.analysis.graph_manager import get_latest_graph_id, load_graph_by_id
     import pickle
 
+    config = get_retrieval_config()
+    logger = get_logger("cli", config.logging.level)
+
     logger.info("=" * 60)
     logger.info("KNOWLEDGE GRAPH STATISTICS")
     logger.info("=" * 60)
@@ -596,6 +599,9 @@ def relabel(use_postgres, llm_model):
     """Relabel topics using LLM."""
     from fact_check_kg.analysis.relabel_topics import relabel_graph
 
+    config = get_build_config()
+    logger = get_logger("cli", config.logging.level)
+
     logger.info("=" * 60)
     logger.info("RELABELING TOPICS WITH LLM")
     logger.info("=" * 60)
@@ -622,6 +628,9 @@ def relabel(use_postgres, llm_model):
 @click.option('--validate', is_flag=True, help='Validate configuration file')
 def config_cmd(show, validate):
     """Manage configuration."""
+    config = get_config()
+    logger = get_logger("cli_config", "INFO")
+
     if show:
         import yaml
         logger.info("=" * 60)
@@ -657,13 +666,15 @@ def config_cmd(show, validate):
 @click.option('--dirs', is_flag=True, help='Create directory structure')
 def init(postgres, dirs):
     """Initialize the system (create directories, database, etc.)."""
+    config = get_config()
+    logger = get_logger("cli_init", "INFO")
+
     logger.info("=" * 60)
     logger.info("INITIALIZING SYSTEM")
     logger.info("=" * 60)
 
     if dirs:
         # Create directories
-        from pathlib import Path
         directories = [
             config.paths.logs_dir,
             config.paths.outputs_dir,
