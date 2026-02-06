@@ -19,6 +19,7 @@ from bertopic import BERTopic
 from scipy.spatial.distance import jensenshannon
 import logging
 import time
+import random
 
 
 class HybridRetriever:
@@ -484,7 +485,7 @@ class HybridRetriever:
 
         return scores
 
-    def retrieve_thematic(self, claim: str) -> Dict[str, float]:
+    def retrieve_thematic(self, claim: str) -> Tuple[Dict[str, float], List[Dict]]:
         """
         Strategy 3: Thematic Graph Traversal using topic model and graph traversal with relevance propagation.
 
@@ -495,7 +496,7 @@ class HybridRetriever:
             claim: Claim text to verify
 
         Returns:
-            Dictionary mapping chunk_id to thematic score (normalized)
+            Tuple of (scores dict mapping chunk_id to thematic score, detected_themes info list)
         """
         self.logger.info("\n--- Strategy 3: Thematic Graph Traversal ---")
 
@@ -509,10 +510,22 @@ class HybridRetriever:
             if prob > self.theme_threshold
         ]
 
+        # Collect theme info for output (label, keywords, probability)
+        detected_themes_info = []
+        for idx, prob in sorted(detected_themes, key=lambda x: x[1], reverse=True):
+            theme_node = f"theme::{idx}"
+            node_data = self.graph.nodes.get(theme_node, {})
+            detected_themes_info.append({
+                'theme_node': theme_node,
+                'topic_id': idx,
+                'label': node_data.get('label', f'topic_{idx}'),
+                'probability': round(float(prob), 4),
+                'keywords': node_data.get('keywords', [])[:5]
+            })
+
         self.logger.info(f"Detected {len(detected_themes)} themes in claim")
-        for idx, prob in detected_themes:
-            theme_label = self.graph.nodes.get(f"theme::{idx}", {}).get('label', f'topic_{idx}')
-            self.logger.info(f"  Theme {idx} ({theme_label}): {prob:.3f}")
+        for info in detected_themes_info:
+            self.logger.info(f"  Theme {info['topic_id']} ({info['label']}): {info['probability']:.3f}")
 
         # Build seed theme list with initial probabilities
         seed_themes = []
@@ -525,7 +538,7 @@ class HybridRetriever:
 
         if not seed_themes:
             self.logger.warning("No themes from claim found in graph")
-            return {}
+            return {}, detected_themes_info
 
         self.logger.info(f"Found {len(seed_themes)} seed themes in graph")
 
@@ -572,7 +585,7 @@ class HybridRetriever:
         if scores:
             self.logger.info(f"Top score: {max(scores.values()):.3f}")
 
-        return dict(scores)
+        return dict(scores), detected_themes_info
 
     def retrieve_entity(self, claim: str) -> Dict[str, float]:
         """
@@ -772,11 +785,13 @@ class HybridRetriever:
 
                 self.logger.info(f"    Pre-computed results: {len(retrieval_results)} chunks")
 
-                # Store matched claim details
+                # Store matched claim details (pull rating from graph node)
+                node_data = self.graph.nodes.get(claim_node, {})
                 matched_claims_details.append({
                     'claim_node': claim_node,
                     'claim_text': claim_text,
                     'query_similarity': claim_similarity,
+                    'rating': node_data.get('rating', ''),
                     'retrieval_results': retrieval_results[:10]  # Top 10 chunks per claim
                 })
 
@@ -852,7 +867,7 @@ class HybridRetriever:
 
         # Strategy 3: Thematic Graph Traversal
         t0 = time.time()
-        S3 = self.retrieve_thematic(claim)
+        S3, detected_themes = self.retrieve_thematic(claim)
         strategy_timings['S3_thematic'] = time.time() - t0
 
         # Strategy 4: Entity Graph Traversal
@@ -908,15 +923,23 @@ class HybridRetriever:
         # Sort by total score
         results.sort(key=lambda x: x['score_total'], reverse=True)
 
+        # Sample random chunks from outside top-K for comparison in reports
+        remaining = results[self.top_k:]
+        random_samples = random.sample(remaining, min(5, len(remaining))) if remaining else []
+
         # Return top-K
         top_results = results[:self.top_k]
 
-        # Add claim and matched claims info to results
+        # Add claim, matched claims, and detected themes info to results
         for i, result in enumerate(top_results):
             result['claim'] = claim
-            # Add matched claims details to first result only (to avoid duplication)
-            if i == 0 and matched_claims:
-                result['matched_claims'] = matched_claims
+            if i == 0:
+                if matched_claims:
+                    result['matched_claims'] = matched_claims
+                if detected_themes:
+                    result['detected_themes'] = detected_themes
+                if random_samples:
+                    result['random_samples'] = random_samples
 
         # Log matched claims summary
         if matched_claims:

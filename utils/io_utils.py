@@ -103,7 +103,7 @@ def load_corpus_from_csv(
 
 def load_claims_from_csv(
     path: str,
-    doc_id_col: str = "id",
+    doc_id_col: str = "fact_check_id",
     claim_id_col: str = "claim_id",
     claim_col: str = "claim",
     claimant_col: str = "claimant",

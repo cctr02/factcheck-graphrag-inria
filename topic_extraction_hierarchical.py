@@ -21,6 +21,7 @@ MÉTHODE:
 - Distance de fusion: basée sur cosine similarity entre représentations c-TF-IDF
 """
 
+import sys
 import time
 import logging
 from typing import List, Tuple, Optional, Dict
@@ -32,7 +33,13 @@ from sentence_transformers import SentenceTransformer
 from sklearn.feature_extraction.text import CountVectorizer
 from umap import UMAP
 from hdbscan import HDBSCAN
-from nltk.stem.snowball import SnowballStemmer
+import nltk
+from nltk.stem import WordNetLemmatizer
+nltk.download('wordnet', quiet=True)
+
+# Ajouter le répertoire du script au path pour les imports locaux (même que build_graph)
+sys.path.insert(0, str(Path(__file__).parent))
+from fact_check_kg.data_loader import load_and_chunk_documents
 
 
 def chunk_text_for_topics(text: str, min_chunk_size: int = 400, max_chunk_size: int = 800, overlap: int = 100) -> List[str]:
@@ -115,8 +122,8 @@ class HierarchicalTopicExtractor:
     def __init__(
         self,
         embedding_model: Optional[SentenceTransformer] = None,
-        topic_keywords_initial: int = 20,
-        topic_keywords_final: int = 5,
+        topic_keywords_initial: int = 40,
+        topic_keywords_final: int = 15,
         logger: Optional[logging.Logger] = None,
         llm_endpoint: str = "http://localhost:11434/api/generate",
         llm_model: str = "llama3.1:latest",
@@ -129,7 +136,7 @@ class HierarchicalTopicExtractor:
         self.train_docs = None
         self.topic_keywords_final = topic_keywords_final
         self.logger = logger or logging.getLogger(__name__)
-        self.stemmer = SnowballStemmer("english")
+        self.lemmatizer = WordNetLemmatizer()
         self.topic_model = None
         self.hierarchical_topics_df = None
         self.topic_to_supertopic = {}
@@ -155,10 +162,9 @@ class HierarchicalTopicExtractor:
         self.logger.info("Training BERTopic model with hierarchical structure...")
         self.logger.info(f"Computing embeddings for {len(chunk_texts)} chunks...")
 
-        # Adaptive min_cluster_size
         if min_topic_size is None:
-            min_topic_size = max(10, len(chunk_texts) // 100)
-        self.logger.info(f"Using adaptive min_cluster_size={min_topic_size} for {len(chunk_texts)} chunks")
+            min_topic_size = 10
+        self.logger.info(f"Using min_cluster_size={min_topic_size} for {len(chunk_texts)} chunks")
 
         # CountVectorizer
         min_df_value = min(2, max(1, len(chunk_texts) // 5))
@@ -329,51 +335,52 @@ class HierarchicalTopicExtractor:
         }
 
     def _process_topic_keywords(self, topic_words: List[Tuple[str, float]]) -> List[Tuple[str, float]]:
-        """Traite les keywords: stemming et déduplication (identique à isolated)."""
+        """
+        Pipeline:
+        1. Prendre top-N keywords BERTopic
+        2. Supprimer les keywords qui sont sous-chaînes d'autres (garder le plus long)
+        3. Lemmatiser
+        4. Fusionner les scores des formes équivalentes
+        5. Garder top 15
+        """
         if not topic_words:
             return []
 
-        stem_scores = {}
-        for word, score in topic_words[:self.topic_keywords_initial]:
-            words = word.split()
-            stemmed_words = [self.stemmer.stem(w.lower()) for w in words]
-            stem = " ".join(stemmed_words)
-            if stem not in stem_scores:
-                stem_scores[stem] = 0
-            stem_scores[stem] += score
+        # Step 1 — garder top N init
+        candidates = topic_words[:self.topic_keywords_initial]
 
-        sorted_items = sorted(
-            stem_scores.items(),
-            key=lambda x: (len(x[0].split()), x[1]),
-            reverse=True
-        )
+        # Step 2 — substring dedup
+        # Trier par longueur décroissante pour garder les plus spécifiques
+        sorted_words = sorted(candidates, key=lambda x: len(x[0]), reverse=True)
 
         filtered = []
-        for stem, score in sorted_items:
-            is_redundant = False
-            for kept_stem, kept_score in filtered:
-                stem_words = set(stem.split())
-                kept_words = set(kept_stem.split())
-                if stem_words.issubset(kept_words):
-                    is_redundant = True
-                    break
+        for word, score in sorted_words:
+            word_lower = word.lower()
 
-            if not is_redundant:
-                to_remove = []
-                for kept_stem, kept_score in filtered:
-                    kept_words = set(kept_stem.split())
-                    stem_words = set(stem.split())
-                    if kept_words.issubset(stem_words) and kept_stem != stem:
-                        to_remove.append((kept_stem, kept_score))
-                for item in to_remove:
-                    filtered.remove(item)
-                filtered.append((stem, score))
+            # skip si sous-chaîne d'un mot déjà gardé
+            if any(word_lower in kept_word.lower() for kept_word, _ in filtered):
+                continue
 
-        filtered_sorted = sorted(filtered, key=lambda x: x[1], reverse=True)
-        final_count = min(max(len(filtered_sorted), 3), self.topic_keywords_final)
-        top_keywords = filtered_sorted[:final_count]
+            filtered.append((word, score))
 
-        return [(stem, score) for stem, score in top_keywords]
+        # Step 3 — lemmatization
+        lemma_scores: Dict[str, float] = {}
+
+        for word, score in filtered:
+            tokens = word.lower().split()
+            lemmas = [self.lemmatizer.lemmatize(t) for t in tokens]
+            lemma_phrase = " ".join(lemmas)
+
+            lemma_scores[lemma_phrase] = lemma_scores.get(lemma_phrase, 0.0) + score
+
+        # Step 4 — sort by score
+        final_sorted = sorted(lemma_scores.items(), key=lambda x: x[1], reverse=True)
+
+        # Step 5 — top 15
+        top_keywords = final_sorted[:self.topic_keywords_final]
+
+        return top_keywords
+
 
     def get_topic_label(
         self,
@@ -636,7 +643,8 @@ class HierarchicalTopicExtractor:
         topics_info: dict,
         supertopics_info: dict,
         output_dir: str = "topic_extraction_results",
-        sample_chunks_indices: Optional[List[int]] = None
+        sample_chunks_indices: Optional[List[int]] = None,
+        chunk_ids: Optional[List[str]] = None
     ) -> str:
         """
         Génère un rapport HTML hiérarchique montrant topics ET supertopics.
@@ -646,12 +654,16 @@ class HierarchicalTopicExtractor:
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        if sample_chunks_indices is None:
-            import random
-            random.seed(42)
-            sample_chunks_indices = random.sample(range(len(chunk_texts)), min(3, len(chunk_texts)))
-
+        
         topic_assignments = self.assign_topics_to_chunks(topics, probabilities, top_k=3)
+        import random
+
+        max_display = 1000
+        all_indices = list(range(len(chunk_texts)))
+        random.seed(42)  # reproductible
+        display_indices = random.sample(all_indices, min(max_display, len(all_indices)))
+        display_indices.sort()
+
 
         # Calculer les assignations de supertopics
         supertopic_assignments = []
@@ -1013,14 +1025,15 @@ class HierarchicalTopicExtractor:
 """
 
         # Assignations pour tous les chunks
-        for idx in range(len(chunk_texts)):
+        for idx in display_indices:
             chunk_topics = topic_assignments[idx]
             chunk_supertopics = supertopic_assignments[idx]
+            chunk_id_display = chunk_ids[idx] if chunk_ids and idx < len(chunk_ids) else ""
 
             html += f"""
         <div class="chunk-card">
-            <div class="chunk-header">Chunk {idx + 1}</div>
-            <div class="chunk-text">{chunk_texts[idx][:200]}...</div>
+            <div class="chunk-header">Chunk {idx + 1} <span style="color: #7f8c8d; font-weight: normal; font-size: 0.9em;">(ID: {chunk_id_display})</span></div>
+            <div class="chunk-text">{chunk_texts[idx]}...</div>
 
             <div class="hierarchy-section">
                 <div class="hierarchy-panel supertopics-panel">
@@ -1062,130 +1075,13 @@ class HierarchicalTopicExtractor:
         </div>
 """
 
-        html += """    </div>
-
-    <h2>🔬 Detailed Analysis: Sample Chunks</h2>
-    <p>Deep dive into 3 fixed chunks with complete hierarchical topic details.</p>
-    <div class="chunks-section">
-"""
-
-        # Section détaillée pour les 3 chunks échantillons
-        for sample_idx in sample_chunks_indices:
-            chunk_text = chunk_texts[sample_idx]
-            chunk_topics = topic_assignments[sample_idx]
-            chunk_supertopics = supertopic_assignments[sample_idx]
-
-            html += f"""
-        <div class="chunk-card" style="border-left: 5px solid #e74c3c;">
-            <div class="chunk-header" style="font-size: 1.3em;">📄 Sample Chunk #{sample_idx + 1}</div>
-            <div class="chunk-text" style="font-size: 1.05em;">{chunk_text}</div>
-
-            <h3 style="color: #667eea; margin-top: 25px;">🌟 Assigned Supertopics (Broad Themes):</h3>
-"""
-
-            # Détails des supertopics
-            for super_id, prob in chunk_supertopics:
-                super_info = supertopics_info.get(super_id, {})
-                super_label = super_info.get('label', 'unknown')
-                keywords = super_info.get('keywords', [])
-                child_topics = super_info.get('child_topics', [])
-                prob_percent = prob * 100
-
-                html += f"""
-            <div style="background: linear-gradient(135deg, rgba(102, 126, 234, 0.15) 0%, rgba(118, 75, 162, 0.15) 100%); padding: 20px; margin-bottom: 20px; border-radius: 8px; border-left: 5px solid #667eea;">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                    <div style="font-size: 1.2em; font-weight: bold; color: #2c3e50;">Supertopic {super_id}: "{super_label}"</div>
-                    <div style="background: linear-gradient(135deg, #667eea, #764ba2); color: white; padding: 5px 15px; border-radius: 15px; font-weight: bold;">
-                        {prob:.3f} ({prob_percent:.1f}%)
-                    </div>
-                </div>
-
-                <div style="margin-top: 12px;">
-                    <strong>Aggregated Keywords:</strong> {', '.join(keywords)}
-                </div>
-
-                <div style="margin-top: 12px;">
-                    <strong>Contains {len(child_topics)} topics:</strong>
-                    <div style="margin-top: 8px;">
-"""
-                for child_id in child_topics:
-                    child_label = topics_info.get(child_id, {}).get('label', 'unknown')
-                    html += f'                        <span style="background-color: rgba(255,255,255,0.7); padding: 5px 10px; margin: 3px; border-radius: 5px; display: inline-block; font-size: 0.9em;">Topic {child_id}: {child_label}</span>\n'
-
-                html += """                    </div>
-                </div>
-            </div>
-"""
-
-            html += """
-            <h3 style="color: #27ae60; margin-top: 25px;">📊 Assigned Topics (Fine-Grained):</h3>
-"""
-
-            # Détails des topics
-            for topic_id, prob in chunk_topics:
-                topic_info = topics_info.get(topic_id, {})
-                topic_label = topic_info.get('label', 'unknown')
-                keywords = topic_info.get('keywords', [])
-                keyword_scores = topic_info.get('keyword_scores', [])
-                super_id = topic_info.get('supertopic', topic_id)
-                super_label = supertopics_info.get(super_id, {}).get('label', 'unknown')
-                count = topic_info.get('count', 0)
-                prob_percent = prob * 100
-
-                html += f"""
-            <div style="background-color: #e8f5e9; padding: 20px; margin-bottom: 20px; border-radius: 8px; border-left: 5px solid #27ae60;">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                    <div style="font-size: 1.2em; font-weight: bold; color: #2c3e50;">Topic {topic_id}: "{topic_label}"</div>
-                    <div style="background-color: #27ae60; color: white; padding: 5px 15px; border-radius: 15px; font-weight: bold;">
-                        {prob:.3f} ({prob_percent:.1f}%)
-                    </div>
-                </div>
-
-                <div style="font-style: italic; color: #7f8c8d; margin-bottom: 12px;">
-                    ↑ Part of Supertopic {super_id}: "{super_label}"
-                </div>
-
-                <div style="margin-top: 12px;">
-                    <strong>Keywords:</strong> {', '.join(keywords)}
-                </div>
-
-                <div style="margin-top: 12px;">
-                    <strong>Documents in topic:</strong> {count}
-                </div>
-
-                <div style="margin-top: 15px;">
-                    <strong>Keyword Scores:</strong>
-                    <div style="margin-left: 15px; margin-top: 8px;">
-"""
-                for kw, score in keyword_scores:
-                    score_width = min(score * 100, 100)
-                    html += f"""
-                        <div style="margin-bottom: 6px;">
-                            <div style="display: flex; justify-content: space-between;">
-                                <span style="font-weight: 600;">{kw}</span>
-                                <span style="color: #7f8c8d; font-size: 0.9em;">{score:.4f}</span>
-                            </div>
-                            <div style="height: 6px; background-color: #ecf0f1; border-radius: 3px; margin-top: 2px;">
-                                <div style="height: 100%; background: linear-gradient(90deg, #27ae60, #2ecc71); width: {score_width}%;"></div>
-                            </div>
-                        </div>
-"""
-
-                html += """                    </div>
-                </div>
-            </div>
-"""
-
-            html += """        </div>
-"""
-
+        
         html += f"""
     </div>
 
     <div class="timestamp">
         Generated on {timestamp}<br>
         Hierarchical Structure: {len(topics_info)} topics grouped into {len(supertopics_info)} supertopics<br>
-        Sample chunks: {', '.join(f'#{i+1}' for i in sample_chunks_indices)}
     </div>
 </body>
 </html>
@@ -1209,78 +1105,32 @@ def main():
     )
     logger = logging.getLogger(__name__)
 
-    # Mêmes templates que isolated
-    templates = [
-        """Climate change is affecting global temperatures and weather patterns across the world.
-        Scientists have observed unprecedented changes in ice caps and glaciers. The melting of polar ice
-        is accelerating at rates far exceeding previous predictions. Rising sea levels threaten coastal
-        communities worldwide. Extreme weather events are becoming more frequent and severe. Governments
-        are implementing new policies to reduce carbon emissions. Renewable energy sources like solar and
-        wind power are becoming increasingly viable alternatives to fossil fuels.""",
+    # Configuration du chargement (même pipeline que build_graph.py)
+    MAX_DOCS = 1000  # 1000 premières lignes du CSV (≈ 9 200 chunks)
+    CHUNK_SIZE = 500
+    CHUNK_OVERLAP = 100
 
-        """The stock market experienced significant volatility today as investors reacted to economic data.
-        Technology companies led the market rally with strong quarterly earnings. Major indices showed mixed
-        performance throughout the trading session. Analysts are concerned about the economic outlook for the
-        coming quarters. Interest rate decisions by central banks continue to influence market sentiment.
-        Retail investors are increasingly participating in equity markets through mobile trading platforms.
-        Financial advisors recommend diversification to manage portfolio risk.""",
+    # Chemin vers le CSV (même fichier que build_graph)
+    csv_path = str(Path(__file__).parent / "data" / "english_fact_checks.csv")
 
-        """Artificial intelligence and machine learning are transforming various industries at an unprecedented pace.
-        Deep learning models are achieving state-of-the-art results in computer vision and natural language processing.
-        Companies are investing heavily in AI research and development. Ethical considerations around AI deployment
-        are gaining importance. Automation is reshaping the future of work across sectors. Neural networks continue
-        to improve in accuracy and efficiency. AI applications in healthcare are showing promising results in
-        disease diagnosis and drug discovery.""",
+    logger.info(f"Loading documents from CSV: {csv_path}")
+    logger.info(f"Max documents: {MAX_DOCS} (None = tous)")
 
-        """The recent election results surprised many political analysts and pollsters. Voter turnout reached
-        historic levels in several key districts. Campaign strategies focused heavily on social media engagement.
-        Political polarization continues to shape electoral outcomes. Young voters played a crucial role in
-        determining election results. Debates around election integrity and voting access remain contentious.
-        The newly elected officials face significant challenges in addressing public concerns.""",
+    # Charger et chunker (même fonction que build_graph → data_loader)
+    chunks, n_docs = load_and_chunk_documents(
+        csv_path=csv_path,
+        chunk_size=CHUNK_SIZE,
+        chunk_overlap=CHUNK_OVERLAP,
+        max_docs=MAX_DOCS,
+        logger=logger
+    )
 
-        """Global supply chain disruptions are affecting businesses worldwide. Manufacturing delays are causing
-        shortages of consumer goods. Shipping costs have increased dramatically due to logistics challenges.
-        Companies are reconsidering their supply chain strategies to improve resilience. Just-in-time inventory
-        systems are being reevaluated in light of recent disruptions. International trade tensions add complexity
-        to global commerce. Digital transformation is helping companies adapt to supply chain challenges.""",
+    # Extraire textes et IDs (format: "chunk::{doc_id}::{chunk_idx}")
+    sample_texts = [c['text'] for c in chunks]
+    chunk_ids = [c['chunk_id'] for c in chunks]
 
-        """Space exploration is entering a new era with increased private sector involvement. Commercial spaceflight
-        companies are making space more accessible. Mars missions are being planned by multiple space agencies.
-        Satellite technology is revolutionizing communications and Earth observation. The International Space Station
-        continues to serve as a platform for scientific research. Space tourism is becoming a reality for wealthy
-        individuals. Debates about space regulation and resource extraction are intensifying.""",
-
-        """Healthcare systems worldwide are facing unprecedented challenges and opportunities. Medical research is
-        advancing rapidly with breakthrough treatments. Telemedicine is expanding access to healthcare services.
-        Pharmaceutical companies are developing new medications. Patient care is improving through technology.
-        Healthcare workers are dealing with increased workload demands. Public health policies are being reformed.""",
-
-        """Education systems are adapting to digital transformation. Online learning platforms are expanding globally.
-        Students are engaging with new educational technologies. Teachers are developing innovative teaching methods.
-        Educational institutions are rethinking traditional approaches. Access to education is improving worldwide.
-        Lifelong learning is becoming increasingly important."""
-    ]
-
-    # Générer 1000 documents
-    sample_documents = []
-    import random
-    random.seed(42)
-
-    for i in range(1000):
-        template = random.choice(templates)
-        doc = template + f" This is document number {i+1} with specific context."
-        sample_documents.append(doc)
-
-    # Chunking
-    logger.info("Chunking documents...")
-    all_chunks = []
-    for doc in sample_documents:
-        chunks = chunk_text_for_topics(doc, min_chunk_size=400, max_chunk_size=800, overlap=100)
-        all_chunks.extend(chunks)
-
-    logger.info(f"Created {len(all_chunks)} chunks from {len(sample_documents)} documents")
-
-    sample_texts = all_chunks
+    logger.info(f"Loaded {len(sample_texts)} chunks from {n_docs} documents")
+    logger.info(f"Example chunk IDs: {chunk_ids[:5]}")
 
     # Initialiser l'extracteur hiérarchique
     logger.info("Initializing HierarchicalTopicExtractor...")
@@ -1330,7 +1180,8 @@ def main():
         topics_info=topics_info,
         supertopics_info=supertopics_info,
         output_dir="topic_extraction_results",
-        sample_chunks_indices=fixed_sample_chunks
+        sample_chunks_indices=fixed_sample_chunks,
+        chunk_ids=chunk_ids
     )
 
     logger.info(f"\n✓ Hierarchical HTML report saved to: {output_file}")
