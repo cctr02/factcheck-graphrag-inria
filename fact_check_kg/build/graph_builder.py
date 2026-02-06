@@ -292,14 +292,13 @@ class KnowledgeGraphBuilder:
             max_features=1000     # More features
         )
 
-        # Custom UMAP with progress bar but silent epoch callback
+        # Custom UMAP for dimensionality reduction
         umap_model = UMAP(
             n_neighbors=15,
             n_components=5,
             min_dist=0.0,
             metric='cosine',
-            verbose=True,  # Show UMAP tqdm progress bar
-            n_epochs_callback=lambda *args, **kwargs: None  # Suppress "completed X / Y epochs" text
+            verbose=True
         )
 
         # Create HDBSCAN model

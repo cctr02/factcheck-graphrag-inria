@@ -65,11 +65,15 @@ class HybridRetriever:
         gamma: float,
         delta: float,
         epsilon: float,
-        top_k: int,
-        theme_threshold: float,
-        entity_relevance_threshold: float,
-        theme_relevance_threshold: float,
-        claim_top_k: int,
+        zeta: float = 0.0,
+        eta: float = 0.0,
+        top_k: int = 10,
+        theme_threshold: float = 0.01,
+        entity_relevance_threshold: float = 0.1,
+        theme_relevance_threshold: float = 0.1,
+        claim_top_k: int = 5,
+        keyphrase_top_n: int = 5,
+        keybert_model = None,
         graph_id: Optional[str] = None,
         cache_dir: Optional[str] = None,
         models_dir: Optional[str] = None,
@@ -89,11 +93,15 @@ class HybridRetriever:
             gamma: Weight for thematic score (S3)
             delta: Weight for entity score (S4)
             epsilon: Weight for claim-document score (S5)
+            zeta: Weight for claim-topic traversal score (S6)
+            eta: Weight for claim-keyphrase score (S7)
             top_k: Number of chunks to return
             theme_threshold: Minimum confidence for theme detection
             entity_relevance_threshold: Minimum relevance to continue entity traversal
             theme_relevance_threshold: Minimum relevance to continue theme traversal
-            claim_top_k: Number of top claims to consider for Strategy 5
+            claim_top_k: Number of top claims to consider for Strategies 5, 6, 7
+            keyphrase_top_n: Number of keyphrases to extract for Strategy 7
+            keybert_model: Optional KeyBERT model for Strategy 7 (lazy-loaded if None)
             graph_id: Optional graph ID for loading cached data
             cache_dir: Optional directory containing FAISS embeddings cache
             models_dir: Optional directory containing topic models and probabilities
@@ -111,6 +119,8 @@ class HybridRetriever:
         self.gamma = gamma
         self.delta = delta
         self.epsilon = epsilon
+        self.zeta = zeta
+        self.eta = eta
 
         # Parameters
         self.top_k = top_k
@@ -118,6 +128,10 @@ class HybridRetriever:
         self.entity_relevance_threshold = entity_relevance_threshold
         self.theme_relevance_threshold = theme_relevance_threshold
         self.claim_top_k = claim_top_k
+        self.keyphrase_top_n = keyphrase_top_n
+
+        # KeyBERT model for Strategy 7 (lazy-loaded if not provided)
+        self.keybert_model = keybert_model
 
         # Cache parameters
         self.graph_id = graph_id
@@ -370,9 +384,48 @@ class HybridRetriever:
             logger=self.logger
         )
 
+    def retrieve_claim_topic_traversal(self, query: str) -> Tuple[Dict[str, float], List[Dict]]:
+        """Strategy 6: Claim-Based Topic Distribution Traversal."""
+        return _retrieve_claim_topic_traversal(
+            query=query,
+            graph=self.graph,
+            topic_model=self.topic_model,
+            embedding_model=self.embedding_model,
+            chunk_topic_distributions=self.chunk_topic_distributions,
+            chunk_to_dist_idx=self.chunk_to_dist_idx,
+            claim_embeddings=self.claim_embeddings,
+            claim_nodes=self.claim_nodes,
+            claim_texts=self.claim_texts,
+            claim_retrieval_results=self.claim_retrieval_results,
+            claim_top_k=self.claim_top_k,
+            logger=self.logger
+        )
+
+    def retrieve_claim_keyphrase_similarity(self, query: str) -> Tuple[Dict[str, float], List[Dict]]:
+        """Strategy 7: Claim-Based KeyBERT Phrase Similarity."""
+        # Lazy-load KeyBERT model if not provided
+        if self.keybert_model is None:
+            from keybert import KeyBERT
+            self.logger.info("Initializing KeyBERT model for Strategy 7...")
+            self.keybert_model = KeyBERT(model=self.embedding_model)
+
+        return _retrieve_claim_keyphrase_similarity(
+            query=query,
+            graph=self.graph,
+            embedding_model=self.embedding_model,
+            keybert_model=self.keybert_model,
+            claim_embeddings=self.claim_embeddings,
+            claim_nodes=self.claim_nodes,
+            claim_texts=self.claim_texts,
+            claim_retrieval_results=self.claim_retrieval_results,
+            claim_top_k=self.claim_top_k,
+            keyphrase_top_n=self.keyphrase_top_n,
+            logger=self.logger
+        )
+
     def retrieve(self, claim: str) -> List[Dict]:
         """
-        Hybrid retrieval: combine all five strategies.
+        Hybrid retrieval: combine all seven strategies.
 
         Args:
             claim: Claim text to verify
@@ -388,6 +441,8 @@ class HybridRetriever:
             - score_entity: float (entity score)
             - score_topic_dist: float (topic distribution score)
             - score_claim_doc: float (claim-document score)
+            - score_claim_topic: float (claim-topic traversal score)
+            - score_claim_keyphrase: float (claim-keyphrase score)
             - claim: str (the original claim)
             - config: Dict (complete configuration used for retrieval, included in first result only)
             - retrieval_timestamp: str (ISO format timestamp, included in first result only)
@@ -425,12 +480,22 @@ class HybridRetriever:
         S5, matched_claims = self.retrieve_claim_document(claim)
         strategy_timings['S5_claim_doc'] = time.time() - t0
 
+        # Strategy 6: Claim-Based Topic Distribution Traversal
+        t0 = time.time()
+        S6, matched_claims_s6 = self.retrieve_claim_topic_traversal(claim)
+        strategy_timings['S6_claim_topic'] = time.time() - t0
+
+        # Strategy 7: Claim-Based KeyBERT Phrase Similarity
+        t0 = time.time()
+        S7, matched_claims_s7 = self.retrieve_claim_keyphrase_similarity(claim)
+        strategy_timings['S7_claim_keyphrase'] = time.time() - t0
+
         # Fusion: combine scores
-        all_chunks = set(S1.keys()) | set(S2.keys()) | set(S3.keys()) | set(S4.keys()) | set(S5.keys())
+        all_chunks = set(S1.keys()) | set(S2.keys()) | set(S3.keys()) | set(S4.keys()) | set(S5.keys()) | set(S6.keys()) | set(S7.keys())
 
         self.logger.info("\n--- Fusion ---")
         self.logger.info(f"Total unique chunks: {len(all_chunks)}")
-        self.logger.info(f"Weights: alpha={self.alpha}, beta={self.beta}, gamma={self.gamma}, delta={self.delta}, epsilon={self.epsilon}")
+        self.logger.info(f"Weights: alpha={self.alpha}, beta={self.beta}, gamma={self.gamma}, delta={self.delta}, epsilon={self.epsilon}, zeta={self.zeta}, eta={self.eta}")
 
         results = []
         for chunk_id in all_chunks:
@@ -439,6 +504,8 @@ class HybridRetriever:
             score_theme = S3.get(chunk_id, 0)
             score_entity = S4.get(chunk_id, 0)
             score_claim_doc = S5.get(chunk_id, 0)
+            score_claim_topic = S6.get(chunk_id, 0)
+            score_claim_keyphrase = S7.get(chunk_id, 0)
 
             # Final weighted score
             final_score = (
@@ -446,7 +513,9 @@ class HybridRetriever:
                 self.beta * score_topic_dist +
                 self.gamma * score_theme +
                 self.delta * score_entity +
-                self.epsilon * score_claim_doc
+                self.epsilon * score_claim_doc +
+                self.zeta * score_claim_topic +
+                self.eta * score_claim_keyphrase
             )
 
             # Get document ID
@@ -462,7 +531,9 @@ class HybridRetriever:
                 'score_theme': score_theme,
                 'score_entity': score_entity,
                 'score_topic_dist': score_topic_dist,
-                'score_claim_doc': score_claim_doc
+                'score_claim_doc': score_claim_doc,
+                'score_claim_topic': score_claim_topic,
+                'score_claim_keyphrase': score_claim_keyphrase
             })
 
         # Sort by total score
@@ -480,7 +551,11 @@ class HybridRetriever:
             result['claim'] = claim
             if i == 0:
                 if matched_claims:
-                    result['matched_claims'] = matched_claims
+                    result['matched_claims_s5'] = matched_claims
+                if matched_claims_s6:
+                    result['matched_claims_s6'] = matched_claims_s6
+                if matched_claims_s7:
+                    result['matched_claims_s7'] = matched_claims_s7
                 if detected_themes:
                     result['detected_themes'] = detected_themes
                 if random_samples:
@@ -488,11 +563,25 @@ class HybridRetriever:
 
         # Log matched claims summary
         if matched_claims:
-            self.logger.info(f"\n--- Matched Claims for Strategy 5 ---")
+            self.logger.info(f"\n--- Matched Claims (S5) ---")
             for mc in matched_claims:
                 self.logger.info(f"  Claim: {mc['claim_node']} (similarity: {mc['query_similarity']:.3f})")
                 self.logger.info(f"    Text: {mc['claim_text'][:80]}...")
                 self.logger.info(f"    Pre-computed chunks: {len(mc['retrieval_results'])}")
+
+        if matched_claims_s6:
+            self.logger.info(f"\n--- Matched Claims (S6 Topic) ---")
+            for mc in matched_claims_s6:
+                self.logger.info(f"  Claim: {mc['claim_node']} (similarity: {mc['query_similarity']:.3f})")
+                self.logger.info(f"    Rating: {mc.get('rating', 'N/A')} | Chunks found: {mc['chunks_found']}")
+
+        # S7 returns a dict with 'matched_claims' key
+        s7_claims = matched_claims_s7.get('matched_claims', []) if isinstance(matched_claims_s7, dict) else matched_claims_s7
+        if s7_claims:
+            self.logger.info(f"\n--- Matched Claims (S7 KeyPhrase) ---")
+            for mc in s7_claims:
+                self.logger.info(f"  Claim: {mc['claim_node']} (similarity: {mc['query_similarity']:.3f})")
+                self.logger.info(f"    Rating: {mc.get('rating', 'N/A')} | Chunks found: {mc['chunks_found']}")
 
         self.logger.info(f"\nTop {len(top_results)} results:")
         for i, result in enumerate(top_results[:5], 1):
@@ -503,7 +592,9 @@ class HybridRetriever:
                 f"Theme: {result['score_theme']:.3f} | "
                 f"Entity: {result['score_entity']:.3f} | "
                 f"TopicDist: {result['score_topic_dist']:.3f} | "
-                f"ClaimDoc: {result['score_claim_doc']:.3f}"
+                f"ClaimDoc: {result['score_claim_doc']:.3f} | "
+                f"ClaimTopic: {result['score_claim_topic']:.3f} | "
+                f"ClaimKP: {result['score_claim_keyphrase']:.3f}"
             )
 
         # Display text previews of top 3 results
@@ -519,12 +610,14 @@ class HybridRetriever:
         strategy_timings['total'] = retrieval_time
 
         self.logger.info(f"\n--- Strategy Timings ---")
-        self.logger.info(f"  S1 (Semantic):      {strategy_timings['S1_semantic']:.4f}s")
-        self.logger.info(f"  S2 (Topic Dist):    {strategy_timings['S2_topic_dist']:.4f}s")
-        self.logger.info(f"  S3 (Thematic):      {strategy_timings['S3_thematic']:.4f}s")
-        self.logger.info(f"  S4 (Entity):        {strategy_timings['S4_entity']:.4f}s")
-        self.logger.info(f"  S5 (Claim-Doc):     {strategy_timings['S5_claim_doc']:.4f}s")
-        self.logger.info(f"  Total:              {retrieval_time:.4f}s")
+        self.logger.info(f"  S1 (Semantic):        {strategy_timings['S1_semantic']:.4f}s")
+        self.logger.info(f"  S2 (Topic Dist):      {strategy_timings['S2_topic_dist']:.4f}s")
+        self.logger.info(f"  S3 (Thematic):        {strategy_timings['S3_thematic']:.4f}s")
+        self.logger.info(f"  S4 (Entity):          {strategy_timings['S4_entity']:.4f}s")
+        self.logger.info(f"  S5 (Claim-Doc):       {strategy_timings['S5_claim_doc']:.4f}s")
+        self.logger.info(f"  S6 (Claim-Topic):     {strategy_timings['S6_claim_topic']:.4f}s")
+        self.logger.info(f"  S7 (Claim-KeyPhrase): {strategy_timings['S7_claim_keyphrase']:.4f}s")
+        self.logger.info(f"  Total:                {retrieval_time:.4f}s")
 
         # Add timing info to first result
         if top_results:

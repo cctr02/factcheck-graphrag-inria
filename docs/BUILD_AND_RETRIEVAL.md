@@ -319,6 +319,58 @@ Leverages pre-existing fact-checked claims:
    S5(chunk) = max(claim_similarity × precomputed_score(claim, chunk))
    ```
 
+### Strategy 6: Claim-Based Topic Distribution Traversal (S6)
+
+**Module:** `retrieval_claim_topic.py`
+
+Combines claim-based retrieval with topic distribution analysis. Uses matched claims
+to traverse the graph and scores chunks based on topic distribution similarity
+weighted by traversal relevance.
+
+**Algorithm:**
+1. **Find similar claims** using embedding cosine similarity (top K)
+2. **Get chunks** connected to claims via pre-computed graph traversal
+3. **Compute topic distribution similarity** between query and each chunk using Jensen-Shannon divergence
+4. **Weight by relevance propagation** from claim to chunk (from pre-computed S5)
+5. **Boost chunks with high HAS_TOPIC confidence** (TF-IDF-like weighting)
+
+**Score Formula:**
+```
+S6(chunk) = claim_sim × traversal_rel × topic_sim × topic_conf
+```
+
+Where:
+- `claim_sim` = cos(embed(query), embed(claim))
+- `traversal_rel` = pre-computed relevance score from claim to chunk (from S5)
+- `topic_sim` = 1 - JSD(query_distribution, chunk_distribution)
+- `topic_conf` = max(HAS_TOPIC_weight) for chunk's topics
+
+### Strategy 7: Claim-Based KeyBERT Phrase Similarity (S7)
+
+**Module:** `retrieval_claim_keyphrase.py`
+
+Extracts keyphrases from the query using KeyBERT and computes semantic similarity
+with chunk keyphrases found through claim-based retrieval.
+
+**Algorithm:**
+1. **Find similar claims** using embedding cosine similarity (top K)
+2. **Extract query keyphrases** using KeyBERT with MMR diversity
+3. **Get chunks** connected to claims via pre-computed graph traversal
+4. **Compute keyphrase similarity** between query keyphrases and chunk keyphrases
+5. **Weight by keyphrase importance** (HAS_KEYPHRASE edge weight)
+6. **Weight by traversal relevance** from claim to chunk
+
+**Score Formula:**
+```
+S7(chunk) = claim_sim × traversal_rel × keyphrase_sim × keyphrase_importance
+```
+
+Where:
+- `claim_sim` = cos(embed(query), embed(claim))
+- `traversal_rel` = pre-computed relevance score from claim to chunk (from S5)
+- `keyphrase_sim` = max(cos(embed(query_kp), embed(chunk_kp))) for all keyphrase pairs
+- `keyphrase_importance` = max(HAS_KEYPHRASE_weight) for matched keyphrases
+
 ---
 
 ## Mathematical Formulas
@@ -365,14 +417,29 @@ Where `w_e` is the edge weight and the product is over all edges in path `p`.
 ### Combined Retrieval Score
 
 ```
-final_score = w1×S1 + w2×S2 + w3×S3 + w4×S4 + w5×S5
+final_score = α×S1 + β×S2 + γ×S3 + δ×S4 + ε×S5 + ζ×S6 + η×S7
 ```
 
-Default weights: `w1 = w2 = w3 = w4 = w5 = 0.20`
+Where:
+- `α (alpha)` = weight for semantic similarity (S1)
+- `β (beta)` = weight for topic distribution similarity (S2)
+- `γ (gamma)` = weight for thematic graph traversal (S3)
+- `δ (delta)` = weight for entity graph traversal (S4)
+- `ε (epsilon)` = weight for claim-document retrieval (S5)
+- `ζ (zeta)` = weight for claim-topic distribution traversal (S6)
+- `η (eta)` = weight for claim-keyphrase similarity (S7)
+
+All weights should sum to 1.0.
+
+Default weights (5-strategy): `α = β = γ = δ = ε = 0.20`, `ζ = η = 0.0`
+
+Example 7-strategy weights: `α = β = γ = δ = ε = 0.15`, `ζ = η = 0.125`
 
 ---
 
 ## Configuration Parameters
+
+### Build Parameters
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -380,6 +447,26 @@ Default weights: `w1 = w2 = w3 = w4 = w5 = 0.20`
 | `co_occur_threshold` | 2 | Min co-occurrences for CO_OCCURS edges |
 | `temporal_decay_rate` | 0.3 | λ in exponential decay |
 | `temporal_max_year_gap` | 10 | Max years for TEMPORAL_DIST |
+
+### Retrieval Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
 | `theme_threshold` | 0.01 | Min probability for theme detection |
-| `entity_relevance_threshold` | 0.1 | Min relevance for BFS propagation |
-| `claim_top_k` | 5 | Number of claims for S5 |
+| `entity_relevance_threshold` | 0.1 | Min relevance for entity BFS propagation |
+| `theme_relevance_threshold` | 0.1 | Min relevance for theme BFS propagation |
+| `claim_top_k` | 5 | Number of top claims for S5, S6, S7 |
+| `keyphrase_top_n` | 5 | Number of keyphrases to extract for S7 |
+| `top_k` | 10 | Number of chunks to return |
+
+### Strategy Weights
+
+| Weight | Parameter | Default | Strategy |
+|--------|-----------|---------|----------|
+| α | `alpha` | 0.20 | Semantic Similarity (S1) |
+| β | `beta` | 0.20 | Topic Distribution (S2) |
+| γ | `gamma` | 0.20 | Thematic Traversal (S3) |
+| δ | `delta` | 0.20 | Entity Traversal (S4) |
+| ε | `epsilon` | 0.20 | Claim-Document (S5) |
+| ζ | `zeta` | 0.00 | Claim-Topic (S6) |
+| η | `eta` | 0.00 | Claim-KeyPhrase (S7) |

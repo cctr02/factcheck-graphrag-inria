@@ -131,19 +131,22 @@ class RetrievalConfig:
     gamma: float
     delta: float
     epsilon: float
-    entity_types: List[str]
-    top_k: int
-    theme_threshold: float
-    entity_relevance_threshold: float
-    theme_relevance_threshold: float
-    direct_path_weight: float
-    co_occurrence_path_weight: float
-    theme_path_weight: float
-    claim_top_k: int
+    zeta: float = 0.0  # Weight for claim-topic traversal (S6)
+    eta: float = 0.0  # Weight for claim-keyphrase similarity (S7)
+    entity_types: List[str] = None
+    top_k: int = 10
+    theme_threshold: float = 0.01
+    entity_relevance_threshold: float = 0.1
+    theme_relevance_threshold: float = 0.1
+    direct_path_weight: float = 1.0
+    co_occurrence_path_weight: float = 0.8
+    theme_path_weight: float = 0.6
+    claim_top_k: int = 5
+    keyphrase_top_n: int = 5  # Number of keyphrases for Strategy 7
 
     def __post_init__(self):
         """Validate that weights sum to 1.0."""
-        total = self.alpha + self.beta + self.gamma + self.delta + self.epsilon
+        total = self.alpha + self.beta + self.gamma + self.delta + self.epsilon + self.zeta + self.eta
         if abs(total - 1.0) > 0.01:
             raise ConfigError(f"Retrieval weights must sum to 1.0, got {total}")
 
