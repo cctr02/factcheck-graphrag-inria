@@ -145,7 +145,8 @@ class HybridRetriever:
         self._precompute_chunk_embeddings(graph_id, cache_dir)
         self._precompute_chunk_topic_distributions(graph_id, models_dir)
         self._precompute_claim_embeddings()
-        self._load_claim_retrieval_results(graph_id, models_dir)
+        # Note: Claim retrieval results are no longer precomputed — S5/S6/S7 traverse
+        # REVIEWS → CONTAINS edges on-the-fly at retrieval time.
 
     def _precompute_chunk_embeddings(self, graph_id: Optional[str] = None, cache_dir: Optional[str] = None):
         """
@@ -294,39 +295,6 @@ class HybridRetriever:
 
         self.logger.info(f"Pre-computed embeddings for {len(self.claim_nodes)} claims")
 
-    def _load_claim_retrieval_results(self, graph_id: Optional[str] = None, models_dir: Optional[str] = None):
-        """
-        Load pre-computed claim retrieval results from build phase.
-
-        Args:
-            graph_id: Graph ID to load results for
-            models_dir: Directory containing claim retrieval results
-        """
-        import json
-        from pathlib import Path
-
-        self.claim_retrieval_results = {}
-
-        if not graph_id or not models_dir:
-            self.logger.warning("No graph_id or models_dir provided, claim pre-retrieval results not loaded")
-            return
-
-        try:
-            models_path = Path(models_dir)
-            claim_retrieval_file = models_path / f"claim_retrieval_{graph_id}.json"
-
-            if claim_retrieval_file.exists():
-                self.logger.info(f"Loading claim pre-retrieval results from: {claim_retrieval_file}")
-                with open(claim_retrieval_file, 'r', encoding='utf-8') as f:
-                    self.claim_retrieval_results = json.load(f)
-                self.logger.info(f"Loaded pre-retrieval results for {len(self.claim_retrieval_results)} claims")
-            else:
-                self.logger.warning(f"Claim retrieval file not found: {claim_retrieval_file}")
-                self.logger.warning("Strategy 5 will fall back to computing results at retrieval time")
-        except Exception as e:
-            self.logger.warning(f"Error loading claim retrieval results: {e}")
-            self.logger.warning("Strategy 5 will fall back to computing results at retrieval time")
-
     def retrieve_semantic(self, claim: str) -> Dict[str, float]:
         """Strategy 1: Semantic Similarity using embedding similarity."""
         return _retrieve_semantic(
@@ -371,7 +339,7 @@ class HybridRetriever:
         )
 
     def retrieve_claim_document(self, query: str) -> Tuple[Dict[str, float], List[Dict]]:
-        """Strategy 5: Claim-Based Retrieval using pre-computed claim retrieval results."""
+        """Strategy 5: Claim-Based Retrieval via REVIEWS → CONTAINS graph traversal."""
         return _retrieve_claim_document(
             query=query,
             graph=self.graph,
@@ -379,13 +347,12 @@ class HybridRetriever:
             claim_embeddings=self.claim_embeddings,
             claim_nodes=self.claim_nodes,
             claim_texts=self.claim_texts,
-            claim_retrieval_results=self.claim_retrieval_results,
             claim_top_k=self.claim_top_k,
             logger=self.logger
         )
 
     def retrieve_claim_topic_traversal(self, query: str) -> Tuple[Dict[str, float], List[Dict]]:
-        """Strategy 6: Claim-Based Topic Distribution Traversal."""
+        """Strategy 6: Claim-Based Topic Distribution Traversal via REVIEWS → CONTAINS."""
         return _retrieve_claim_topic_traversal(
             query=query,
             graph=self.graph,
@@ -396,13 +363,12 @@ class HybridRetriever:
             claim_embeddings=self.claim_embeddings,
             claim_nodes=self.claim_nodes,
             claim_texts=self.claim_texts,
-            claim_retrieval_results=self.claim_retrieval_results,
             claim_top_k=self.claim_top_k,
             logger=self.logger
         )
 
     def retrieve_claim_keyphrase_similarity(self, query: str) -> Tuple[Dict[str, float], List[Dict]]:
-        """Strategy 7: Claim-Based KeyBERT Phrase Similarity."""
+        """Strategy 7: Claim-Based KeyBERT Phrase Similarity via REVIEWS → CONTAINS."""
         # Lazy-load KeyBERT model if not provided
         if self.keybert_model is None:
             from keybert import KeyBERT
@@ -417,7 +383,6 @@ class HybridRetriever:
             claim_embeddings=self.claim_embeddings,
             claim_nodes=self.claim_nodes,
             claim_texts=self.claim_texts,
-            claim_retrieval_results=self.claim_retrieval_results,
             claim_top_k=self.claim_top_k,
             keyphrase_top_n=self.keyphrase_top_n,
             logger=self.logger

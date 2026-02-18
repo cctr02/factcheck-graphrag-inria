@@ -116,7 +116,7 @@ def main():
         logger.info(f"After filtering: {len(claims)} claims linked to loaded documents")
     else:
         logger.warning(f"Claims CSV not found: {claims_csv_path}")
-        logger.warning("Skipping claim loading (Steps 9-10 will be skipped)")
+        logger.warning("Skipping claim loading (Step 9 will be skipped)")
 
     # Step 2: Initialize graph builder
     logger.info("\n### STEP 2: Initializing graph builder ###")
@@ -217,13 +217,7 @@ def main():
     )
     logger.info(f"Topic probabilities saved to: {topic_probs_path} (shape: {topic_probabilities.shape})")
 
-    # 2c. Save claim pre-retrieval results for Strategy 5
-    if claim_retrieval_results:
-        claim_retrieval_filename = f"claim_retrieval_{timestamp}.json"
-        claim_retrieval_path = models_dir / claim_retrieval_filename
-        with open(claim_retrieval_path, 'w', encoding='utf-8') as f:
-            json.dump(claim_retrieval_results, f, indent=2, ensure_ascii=False)
-        logger.info(f"Claim pre-retrieval results saved to: {claim_retrieval_path} ({len(claim_retrieval_results)} claims)")
+    # Note: Claim pre-retrieval results (S5/S6/S7) are computed on-the-fly at retrieval time
 
     # 3. Save chunk embeddings to FAISS index in outputs/embeddings
     logger.info("Computing and saving chunk embeddings to FAISS...")
@@ -262,7 +256,7 @@ def main():
             "graph": str(pickle_path),
             "topic_model": str(topic_model_path),
             "topic_probs": str(topic_probs_path),
-            "claim_retrieval": str(models_dir / f"claim_retrieval_{timestamp}.json") if claim_retrieval_results else None,
+            "claim_retrieval": None,  # Computed on-the-fly at retrieval time
             "embeddings_faiss": str(embeddings_dir / f"embeddings_{timestamp}.faiss"),
             "embeddings_meta": str(embeddings_dir / f"embeddings_{timestamp}.pkl"),
         },

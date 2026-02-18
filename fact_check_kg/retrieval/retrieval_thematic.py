@@ -123,15 +123,13 @@ def retrieve_thematic(
                 # Accumulate scores (chunks can be associated with multiple themes)
                 scores[neighbor] += chunk_score
 
-    # Normalize scores
+    # Normalize by sum of seed probabilities (theoretical max).
+    # Each seed contributes at most prob_i × 1.0 to any chunk score,
+    # so dividing by Σ(prob_i) guarantees scores ∈ [0, 1].
     if scores:
-        min_score = min(scores.values())
-        max_score = max(scores.values())
-        if max_score > min_score:
-            scores = {
-                k: (v - min_score) / (max_score - min_score)
-                for k, v in scores.items()
-            }
+        sum_seed_probs = sum(prob for _, prob in seed_themes)
+        if sum_seed_probs > 0:
+            scores = {k: min(v / sum_seed_probs, 1.0) for k, v in scores.items()}
 
     logger.info(f"Found {len(scores)} chunks via thematic graph traversal")
     if scores:

@@ -54,3 +54,4 @@ From claim found close to the query, do a relevance propagation to find other cl
 
 - try to run this : https://aclanthology.org/2025.findings-emnlp.852.pdf
 
+mettre un vrai stemmer à la fin 

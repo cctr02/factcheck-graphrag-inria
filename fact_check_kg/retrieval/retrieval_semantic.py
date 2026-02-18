@@ -56,15 +56,8 @@ def retrieve_semantic(
     for chunk_node, sim in zip(chunk_nodes, similarities):
         scores[chunk_node] = float(sim)
 
-    # Normalize scores (min-max)
-    if scores:
-        min_score = min(scores.values())
-        max_score = max(scores.values())
-        if max_score > min_score:
-            scores = {
-                k: (v - min_score) / (max_score - min_score)
-                for k, v in scores.items()
-            }
+    # Clip to [0, 1]: cosine of normalized embeddings is in [-1, 1], negative = unrelated
+    scores = {k: max(0.0, v) for k, v in scores.items()}
 
     logger.info(f"Found {len(scores)} chunks with semantic scores")
     if scores:

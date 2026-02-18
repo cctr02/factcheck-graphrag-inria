@@ -9,20 +9,11 @@ Algorithm:
     1. Embed the query using SentenceTransformer
     2. Find top-k claims most similar to the query:
        similarity(q, c) = cos(embed(q), embed(c))
-    3. For each matched claim, retrieve pre-computed chunk scores
-    4. Combine scores: final_score = claim_similarity × chunk_score
+    3. For each matched claim, traverse REVIEWS edges to find linked documents,
+       then CONTAINS edges to find chunks in those documents
+    4. Score each chunk: S5(c) = max over matched claims of claim_similarity
 
-Score Calculation:
-    For each chunk c reached via claim clm:
-        S5(c) = max over matched claims of:
-            cos(query, claim) × precomputed_score(claim, chunk)
-
-    Where precomputed_score is the combined S1-S4 score computed at build time.
-
-This strategy is particularly useful when:
-- The query is semantically similar to a known false claim
-- The fact-check documents contain authoritative refutations
-- Cross-referencing multiple fact-checks strengthens evidence
+Score is naturally bounded to [0, 1] (cosine similarity, clipped at 0).
 """
 
 import logging
@@ -38,46 +29,39 @@ def retrieve_claim_document(
     claim_embeddings: Optional[np.ndarray],
     claim_nodes: List[str],
     claim_texts: List[str],
-    claim_retrieval_results: Dict,
     claim_top_k: int,
     logger: logging.Logger
 ) -> Tuple[Dict[str, float], List[Dict]]:
     """
-    Strategy 5: Claim-Based Retrieval using pre-computed claim retrieval results.
+    Strategy 5: Claim-Based Retrieval via graph traversal (REVIEWS → CONTAINS).
 
-    Finds claims semantically similar to the query, then returns:
-    1. Chunk scores from pre-computed retrieval results for those claims
-    2. Details about which claims were matched and their similarity to the query
+    Finds claims semantically similar to the query, then traverses REVIEWS edges
+    to linked documents, and CONTAINS edges to retrieve their chunks.
+
+    Score formula:
+        S5(chunk) = max over matched claims of: max(0, cos(embed(query), embed(claim)))
+
+    Scores are bounded to [0, 1] — no min-max normalization applied.
 
     Args:
         query: Query text to match against claims
-        graph: Knowledge graph (for claim node data)
+        graph: Knowledge graph (contains REVIEWS and CONTAINS edges)
         embedding_model: SentenceTransformer model
         claim_embeddings: Pre-computed claim embeddings (n_claims, dim) or None
         claim_nodes: List of claim node IDs
         claim_texts: List of claim texts corresponding to nodes
-        claim_retrieval_results: Dict mapping claim_node to pre-computed results
         claim_top_k: Number of top claims to consider
         logger: Logger instance
 
     Returns:
         Tuple of:
-        - scores: Dictionary mapping chunk_id to score (normalized 0-1)
-        - matched_claims_details: List of matched claim info with retrieval results
-
-    Example:
-        >>> scores, claims = retrieve_claim_document(
-        ...     "Vaccines cause autism",
-        ...     graph, model, embeddings, nodes, texts, results, 5, logger
-        ... )
-        >>> claims[0]['rating']
-        'False'
+        - scores: Dictionary mapping chunk_id to score ∈ [0, 1]
+        - matched_claims_details: List of matched claim info
     """
-    logger.info("\n--- Strategy 5: Claim-Based Retrieval (Pre-computed) ---")
+    logger.info("\n--- Strategy 5: Claim-Based Retrieval (REVIEWS traversal) ---")
 
     matched_claims_details = []
 
-    # Check if claims exist
     if claim_embeddings is None or len(claim_nodes) == 0:
         logger.warning("No claims in graph, skipping Strategy 5")
         return {}, matched_claims_details
@@ -99,53 +83,46 @@ def retrieve_claim_document(
 
     for idx in top_indices:
         claim_node = claim_nodes[idx]
-        claim_similarity = float(similarities[idx])
+        claim_sim = max(0.0, float(similarities[idx]))  # Clip to [0, 1]
         claim_text = claim_texts[idx]
 
         claim_text_preview = claim_text[:100] + "..." if len(claim_text) > 100 else claim_text
-        logger.info(f"  {claim_node}: similarity={claim_similarity:.3f}")
+        logger.info(f"  {claim_node}: similarity={claim_sim:.3f}")
         logger.info(f"    Claim: {claim_text_preview}")
 
-        # Get pre-computed retrieval results for this claim
-        if claim_node in claim_retrieval_results:
-            claim_data = claim_retrieval_results[claim_node]
-            retrieval_results = claim_data.get('retrieval_results', [])
+        # Traverse REVIEWS edges to find linked documents
+        chunks_found = 0
+        node_data = graph.nodes.get(claim_node, {})
 
-            logger.info(f"    Pre-computed results: {len(retrieval_results)} chunks")
+        for neighbor in graph.neighbors(claim_node):
+            edge_data = graph[claim_node][neighbor]
+            if edge_data.get('edge_type') != 'REVIEWS':
+                continue
 
-            # Store matched claim details (pull rating from graph node)
-            node_data = graph.nodes.get(claim_node, {})
-            matched_claims_details.append({
-                'claim_node': claim_node,
-                'claim_text': claim_text,
-                'query_similarity': claim_similarity,
-                'rating': node_data.get('rating', ''),
-                'retrieval_results': retrieval_results[:10]  # Top 10 chunks per claim
-            })
+            doc_node = neighbor
 
-            # Add chunk scores weighted by claim similarity
-            for result in retrieval_results:
-                chunk_id = result['chunk_id']
-                chunk_score = result['score_total']
-                # Final score = claim similarity × chunk retrieval score
-                combined_score = claim_similarity * chunk_score
+            # Traverse CONTAINS edges to find chunks of this document
+            for doc_neighbor in graph.neighbors(doc_node):
+                doc_edge_data = graph[doc_node][doc_neighbor]
+                if (doc_edge_data.get('edge_type') == 'CONTAINS' and
+                        graph.nodes[doc_neighbor].get('type') == 'chunk'):
+                    chunk_id = doc_neighbor
+                    # Score = claim similarity (take max across multiple claims)
+                    if chunk_id not in scores:
+                        scores[chunk_id] = claim_sim
+                    else:
+                        scores[chunk_id] = max(scores[chunk_id], claim_sim)
+                    chunks_found += 1
 
-                if chunk_id not in scores:
-                    scores[chunk_id] = combined_score
-                else:
-                    scores[chunk_id] = max(scores[chunk_id], combined_score)
-        else:
-            logger.warning(f"    No pre-computed results for {claim_node}")
+        matched_claims_details.append({
+            'claim_node': claim_node,
+            'claim_text': claim_text,
+            'query_similarity': claim_sim,
+            'rating': node_data.get('rating', ''),
+            'chunks_found': chunks_found
+        })
 
-    # Normalize scores (min-max)
-    if scores:
-        min_score = min(scores.values())
-        max_score = max(scores.values())
-        if max_score > min_score:
-            scores = {
-                k: (v - min_score) / (max_score - min_score)
-                for k, v in scores.items()
-            }
+        logger.info(f"    Found {chunks_found} chunks via REVIEWS traversal")
 
     logger.info(f"Found {len(scores)} chunks via claim-based retrieval")
     if scores:

@@ -7,23 +7,24 @@ semantic similarity with chunks found through claim traversal.
 
 Algorithm:
 1. Extract keyphrases from query using KeyBERT
-2. Find claims similar to query (via S5)
-3. Get chunks connected to claims via graph traversal
-4. Compute semantic similarity between query keyphrases and chunk text
-5. Weight by relevance propagation from claim to chunk
+2. Find claims similar to query (cosine similarity)
+3. Traverse REVIEWS → CONTAINS to get chunks linked to matched claims
+4. Compute semantic similarity between query keyphrases and each chunk
+5. Score = claim_sim × keyphrase_sim × keyphrase_importance
 
 Final Score:
-    S7(chunk) = claim_sim × traversal_relevance × keyphrase_similarity
+    S7(chunk) = claim_sim × keyphrase_sim × keyphrase_importance
 
 Where:
-- claim_sim = cos(embed(query), embed(claim))
-- traversal_relevance = propagated relevance from claim to chunk
-- keyphrase_similarity = max cosine similarity between query keyphrases and chunk
+- claim_sim = max(0, cos(embed(query), embed(claim)))
+- keyphrase_sim = max cosine similarity between query keyphrases and chunk
+- keyphrase_importance = KeyBERT relevance score for the best-matching keyphrase
+
+All components ∈ [0, 1], so the product is ∈ [0, 1]. No min-max normalization.
 """
 
 import logging
 from typing import Dict, List, Tuple, Optional
-from collections import defaultdict
 import numpy as np
 import networkx as nx
 from keybert import KeyBERT
@@ -37,25 +38,21 @@ def retrieve_claim_keyphrase_similarity(
     claim_embeddings: Optional[np.ndarray],
     claim_nodes: List[str],
     claim_texts: List[str],
-    claim_retrieval_results: Dict,
     claim_top_k: int,
     keyphrase_top_n: int,
     logger: logging.Logger
 ) -> Tuple[Dict[str, float], List[Dict]]:
     """
-    Strategy 7: Claim-Based KeyBERT Phrase Similarity.
+    Strategy 7: Claim-Based KeyBERT Phrase Similarity via REVIEWS graph edges.
 
-    Extracts keyphrases from query, finds similar claims, traverses to
-    chunks, and scores based on keyphrase-chunk semantic similarity
-    weighted by claim traversal relevance.
+    Extracts keyphrases from query, finds similar claims, traverses REVIEWS → CONTAINS
+    to reach chunks, and scores based on keyphrase-chunk semantic similarity
+    weighted by claim similarity and keyphrase importance.
 
     Score Formula:
-        score = claim_sim × traversal_rel × keyphrase_sim
+        score = claim_sim × keyphrase_sim × keyphrase_importance
 
-    Where:
-    - claim_sim: Cosine similarity between query and matched claim
-    - traversal_rel: Relevance score from claim's pre-computed retrieval
-    - keyphrase_sim: Max cosine similarity between query keyphrases and chunk
+    Scores are bounded to [0, 1] — no min-max normalization applied.
 
     Args:
         query: Query text
@@ -65,22 +62,14 @@ def retrieve_claim_keyphrase_similarity(
         claim_embeddings: Pre-computed claim embeddings
         claim_nodes: List of claim node IDs
         claim_texts: List of claim texts
-        claim_retrieval_results: Pre-computed retrieval results per claim
         claim_top_k: Number of top claims to consider
         keyphrase_top_n: Number of keyphrases to extract from query
         logger: Logger instance
 
     Returns:
         Tuple of:
-        - scores: Dictionary mapping chunk_id to score (normalized 0-1)
+        - scores: Dictionary mapping chunk_id to score ∈ [0, 1]
         - details: Details including extracted keyphrases and matched claims
-
-    Example:
-        >>> scores, details = retrieve_claim_keyphrase_similarity(
-        ...     "COVID vaccines cause autism",
-        ...     graph, embed_model, keybert_model,
-        ...     claim_embeds, claim_nodes, claim_texts, claim_results, 5, 5, logger
-        ... )
     """
     logger.info("\n--- Strategy 7: Claim-Based KeyBERT Phrase Similarity ---")
 
@@ -89,7 +78,6 @@ def retrieve_claim_keyphrase_similarity(
         'matched_claims': []
     }
 
-    # Check if claims exist
     if claim_embeddings is None or len(claim_nodes) == 0:
         logger.warning("No claims in graph, skipping Strategy 7")
         return {}, details
@@ -137,114 +125,93 @@ def retrieve_claim_keyphrase_similarity(
     top_claim_indices = np.argsort(claim_similarities)[-claim_top_k:][::-1]
 
     # Step 4: Process each matched claim
-    scores = defaultdict(float)
-    chunk_texts_cache = {}  # Cache chunk texts to avoid repeated lookups
+    scores = {}
+    chunk_embed_cache = {}  # Cache chunk embeddings to avoid recomputing
 
     for claim_idx in top_claim_indices:
         claim_node = claim_nodes[claim_idx]
-        claim_sim = float(claim_similarities[claim_idx])
+        claim_sim = max(0.0, float(claim_similarities[claim_idx]))  # Clip to [0, 1]
         claim_text = claim_texts[claim_idx]
 
         logger.info(f"Processing claim: {claim_node} (similarity: {claim_sim:.3f})")
 
-        # Get pre-computed retrieval results for this claim
-        if claim_node not in claim_retrieval_results:
-            logger.debug(f"No pre-computed results for {claim_node}")
-            continue
-
-        claim_data = claim_retrieval_results[claim_node]
-        retrieval_results = claim_data.get('retrieval_results', [])
-
-        # Store claim details
         node_data = graph.nodes.get(claim_node, {})
+        chunks_to_embed = []
+        chunk_ids_batch = []
+
+        # Step 5: Traverse REVIEWS → CONTAINS to collect chunk IDs
+        for neighbor in graph.neighbors(claim_node):
+            edge_data = graph[claim_node][neighbor]
+            if edge_data.get('edge_type') != 'REVIEWS':
+                continue
+
+            doc_node = neighbor
+
+            for doc_neighbor in graph.neighbors(doc_node):
+                doc_edge_data = graph[doc_node][doc_neighbor]
+                if (doc_edge_data.get('edge_type') == 'CONTAINS' and
+                        graph.nodes[doc_neighbor].get('type') == 'chunk'):
+                    chunk_id = doc_neighbor
+                    if chunk_id not in chunk_embed_cache:
+                        chunk_text = graph.nodes[chunk_id].get('text', '')
+                        if chunk_text:
+                            chunks_to_embed.append(chunk_text)
+                            chunk_ids_batch.append(chunk_id)
+
+        # Step 6: Batch-embed chunks not yet cached
+        if chunks_to_embed:
+            batch_embeddings = embedding_model.encode(
+                chunks_to_embed,
+                normalize_embeddings=True,
+                show_progress_bar=False
+            )
+            for cid, emb in zip(chunk_ids_batch, batch_embeddings):
+                chunk_embed_cache[cid] = emb
+
+        # Step 7: Score each chunk
+        chunks_scored = 0
+        for neighbor in graph.neighbors(claim_node):
+            edge_data = graph[claim_node][neighbor]
+            if edge_data.get('edge_type') != 'REVIEWS':
+                continue
+            doc_node = neighbor
+            for doc_neighbor in graph.neighbors(doc_node):
+                doc_edge_data = graph[doc_node][doc_neighbor]
+                if (doc_edge_data.get('edge_type') != 'CONTAINS' or
+                        graph.nodes[doc_neighbor].get('type') != 'chunk'):
+                    continue
+                chunk_id = doc_neighbor
+                if chunk_id not in chunk_embed_cache:
+                    continue
+
+                chunk_embedding = chunk_embed_cache[chunk_id]
+
+                # Max cosine similarity over all query keyphrases
+                keyphrase_chunk_sims = np.matmul(keyphrase_embeddings, chunk_embedding)
+                max_keyphrase_sim = max(0.0, float(np.max(keyphrase_chunk_sims)))
+
+                best_keyphrase_idx = int(np.argmax(keyphrase_chunk_sims))
+                best_keyphrase = query_keyphrases[best_keyphrase_idx]
+                keyphrase_importance = keyphrase_scores.get(best_keyphrase, 0.5)
+
+                # Score = claim_sim × keyphrase_sim × keyphrase_importance ∈ [0, 1]
+                final_score = claim_sim * max_keyphrase_sim * keyphrase_importance
+
+                if chunk_id not in scores or final_score > scores[chunk_id]:
+                    scores[chunk_id] = final_score
+                chunks_scored += 1
+
         details['matched_claims'].append({
             'claim_node': claim_node,
             'claim_text': claim_text,
             'query_similarity': claim_sim,
             'rating': node_data.get('rating', ''),
-            'chunks_found': len(retrieval_results)
+            'chunks_found': chunks_scored
         })
-
-        # Collect all chunk texts for batch embedding
-        chunk_ids_to_process = []
-        chunk_relevances = {}
-
-        for result in retrieval_results:
-            chunk_id = result['chunk_id']
-            traversal_relevance = result['score_total']
-
-            if chunk_id not in chunk_texts_cache:
-                if graph.has_node(chunk_id):
-                    chunk_text = graph.nodes[chunk_id].get('text', '')
-                    if chunk_text:
-                        chunk_texts_cache[chunk_id] = chunk_text
-                        chunk_ids_to_process.append(chunk_id)
-
-            chunk_relevances[chunk_id] = traversal_relevance
-
-        # Step 5: Embed chunk texts (batch)
-        if chunk_ids_to_process:
-            chunk_texts_list = [chunk_texts_cache[cid] for cid in chunk_ids_to_process]
-            chunk_embeddings = embedding_model.encode(
-                chunk_texts_list,
-                normalize_embeddings=True,
-                show_progress_bar=False
-            )
-
-            # Create embedding lookup
-            chunk_embed_map = {
-                cid: emb for cid, emb in zip(chunk_ids_to_process, chunk_embeddings)
-            }
-        else:
-            chunk_embed_map = {}
-
-        # Step 6: Score each chunk
-        for result in retrieval_results:
-            chunk_id = result['chunk_id']
-            traversal_relevance = chunk_relevances.get(chunk_id, 0)
-
-            if chunk_id not in chunk_embed_map:
-                continue
-
-            chunk_embedding = chunk_embed_map[chunk_id]
-
-            # Compute similarity between each keyphrase and chunk
-            # Take maximum similarity across all keyphrases
-            keyphrase_chunk_sims = np.matmul(keyphrase_embeddings, chunk_embedding)
-            max_keyphrase_sim = float(np.max(keyphrase_chunk_sims))
-
-            # Weight by keyphrase importance (optional enhancement)
-            # Use the score of the best-matching keyphrase
-            best_keyphrase_idx = np.argmax(keyphrase_chunk_sims)
-            best_keyphrase = query_keyphrases[best_keyphrase_idx]
-            keyphrase_importance = keyphrase_scores.get(best_keyphrase, 0.5)
-
-            # Compute final score
-            # score = claim_sim × traversal_rel × keyphrase_sim × keyphrase_importance
-            final_score = (
-                claim_sim *
-                traversal_relevance *
-                max_keyphrase_sim *
-                keyphrase_importance
-            )
-
-            # Keep maximum score across all claims
-            if chunk_id not in scores or final_score > scores[chunk_id]:
-                scores[chunk_id] = final_score
-
-    # Normalize scores (min-max)
-    if scores:
-        min_score = min(scores.values())
-        max_score = max(scores.values())
-        if max_score > min_score:
-            scores = {
-                k: (v - min_score) / (max_score - min_score)
-                for k, v in scores.items()
-            }
 
     logger.info(f"Found {len(scores)} chunks via claim-keyphrase similarity")
     if scores:
         logger.info(f"Top score: {max(scores.values()):.3f}")
         logger.info(f"Mean score: {np.mean(list(scores.values())):.3f}")
 
-    return dict(scores), details
+    return scores, details

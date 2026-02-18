@@ -19,7 +19,10 @@ outputs/
 *.csv
 *.json
 *.faiss
-
+data/*
+!data/articles.csv
+!data/claim_reviews.csv
+!data/english_fact_checks.csv
 
 # Project specific
 uv.lock
