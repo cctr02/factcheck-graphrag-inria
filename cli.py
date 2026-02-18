@@ -48,7 +48,9 @@ def cli():
               help='Maximum number of documents to process (default: from config_build.yaml)')
 @click.option('--log-level', type=click.Choice(['DEBUG', 'INFO', 'WARNING', 'ERROR']),
               default='INFO', help='Logging level')
-def build(max_docs, log_level):
+@click.option('--resume', is_flag=True,
+              help='Resume from last checkpoint instead of starting fresh')
+def build(max_docs, log_level, resume):
     """
     Build the knowledge graph from CSV data.
 
@@ -59,6 +61,8 @@ def build(max_docs, log_level):
     - PostgreSQL: tables graph_{timestamp}, nodes_{timestamp}
 
     All other parameters (chunk_size, chunk_overlap, etc.) are read from config_build.yaml.
+
+    Use --resume to continue from the last checkpoint after an interruption.
     """
     import subprocess
 
@@ -67,6 +71,8 @@ def build(max_docs, log_level):
 
     logger.info("=" * 60)
     logger.info("BUILDING KNOWLEDGE GRAPH")
+    if resume:
+        logger.info("  MODE: RESUME from checkpoint")
     logger.info("=" * 60)
 
     # Build command - only pass CLI overrides if explicitly provided
@@ -79,6 +85,9 @@ def build(max_docs, log_level):
     # Only pass --max-docs if explicitly provided via CLI (override)
     if max_docs is not None:
         cmd.extend(["--max-docs", str(max_docs)])
+
+    if resume:
+        cmd.append("--resume")
 
     try:
         result = subprocess.run(cmd, check=True, capture_output=False)
@@ -486,7 +495,7 @@ def retrieve(claim, alpha, beta, gamma, delta, epsilon, zeta, eta, top_k, graph_
                     graph_id=graph_id, custom_name=name,
                     config=raw_config, config_retrieval=raw_config_retrieval,
                     matched_claims=matched_claims,
-                    epsilon=epsilon,
+                    epsilon=epsilon, zeta=zeta, eta=eta,
                     detected_themes=detected_themes,
                     random_samples=random_samples
                 )

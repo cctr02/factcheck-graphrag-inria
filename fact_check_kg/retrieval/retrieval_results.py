@@ -76,6 +76,8 @@ class RetrievalResultsManager:
         gamma: float,
         delta: float,
         epsilon: float = 0.0,
+        zeta: float = 0.0,
+        eta: float = 0.0,
         config: dict = None,
         config_retrieval: dict = None,
         matched_claims: List[Dict] = None,
@@ -93,6 +95,8 @@ class RetrievalResultsManager:
             gamma: Thematic weight (S3)
             delta: Entity weight (S4)
             epsilon: Claim-document weight (S5)
+            zeta: Claim-topic traversal weight (S6)
+            eta: Claim-keyphrase weight (S7)
             config: Optional common configuration dict
             config_retrieval: Optional retrieval-specific configuration dict
             matched_claims: Optional list of matched claims (S5 query expansion)
@@ -113,7 +117,9 @@ class RetrievalResultsManager:
                     "beta_topic_dist": beta,
                     "gamma_thematic": gamma,
                     "delta_entity": delta,
-                    "epsilon_claim_doc": epsilon
+                    "epsilon_claim_doc": epsilon,
+                    "zeta_claim_topic": zeta,
+                    "eta_claim_keyphrase": eta
                 },
                 "total_results": len(results)
             },
@@ -167,7 +173,9 @@ class RetrievalResultsManager:
                         "thematic": round(r['score_theme'], 4),
                         "entity": round(r['score_entity'], 4),
                         "topic_dist": round(r['score_topic_dist'], 4),
-                        "claim_doc": round(r.get('score_claim_doc', 0), 4)
+                        "claim_doc": round(r.get('score_claim_doc', 0), 4),
+                        "claim_topic": round(r.get('score_claim_topic', 0), 4),
+                        "claim_keyphrase": round(r.get('score_claim_keyphrase', 0), 4)
                     }
                 }
                 for r in random_samples
@@ -187,17 +195,21 @@ class RetrievalResultsManager:
                     "thematic": round(result['score_theme'], 4),
                     "entity": round(result['score_entity'], 4),
                     "topic_dist": round(result['score_topic_dist'], 4),
-                    "claim_doc": round(result.get('score_claim_doc', 0), 4)
+                    "claim_doc": round(result.get('score_claim_doc', 0), 4),
+                    "claim_topic": round(result.get('score_claim_topic', 0), 4),
+                    "claim_keyphrase": round(result.get('score_claim_keyphrase', 0), 4)
                 },
                 "score_contributions": {
                     "semantic_contribution": round(result['score_sem'] * alpha, 4),
                     "thematic_contribution": round(result['score_theme'] * gamma, 4),
                     "entity_contribution": round(result['score_entity'] * delta, 4),
                     "topic_dist_contribution": round(result['score_topic_dist'] * beta, 4),
-                    "claim_doc_contribution": round(result.get('score_claim_doc', 0) * epsilon, 4)
+                    "claim_doc_contribution": round(result.get('score_claim_doc', 0) * epsilon, 4),
+                    "claim_topic_contribution": round(result.get('score_claim_topic', 0) * zeta, 4),
+                    "claim_keyphrase_contribution": round(result.get('score_claim_keyphrase', 0) * eta, 4)
                 },
                 "source_query": result.get('source_query', 'original_query'),
-                "score_explanation": self._generate_score_explanation(result, alpha, beta, gamma, delta, epsilon)
+                "score_explanation": self._generate_score_explanation(result, alpha, beta, gamma, delta, epsilon, zeta, eta)
             }
             formatted["results"].append(formatted_result)
 
@@ -210,7 +222,9 @@ class RetrievalResultsManager:
         beta: float,
         gamma: float,
         delta: float,
-        epsilon: float = 0.0
+        epsilon: float = 0.0,
+        zeta: float = 0.0,
+        eta: float = 0.0
     ) -> str:
         """
         Generate human-readable explanation of score calculation.
@@ -222,15 +236,12 @@ class RetrievalResultsManager:
             gamma: Thematic weight (S3)
             delta: Entity weight (S4)
             epsilon: Claim-document weight (S5)
+            zeta: Claim-topic traversal weight (S6)
+            eta: Claim-keyphrase weight (S7)
 
         Returns:
             Score explanation string
         """
-        sem_contrib = result['score_sem'] * alpha
-        theme_contrib = result['score_theme'] * gamma
-        entity_contrib = result['score_entity'] * delta
-        topic_dist_contrib = result['score_topic_dist'] * beta
-        claim_doc_contrib = result.get('score_claim_doc', 0) * epsilon
         total = result['score_total']
 
         explanation = f"Total score: {total:.4f} = "
@@ -238,15 +249,19 @@ class RetrievalResultsManager:
         explanation += f"({result['score_theme']:.4f} × {gamma}) + "
         explanation += f"({result['score_entity']:.4f} × {delta}) + "
         explanation += f"({result['score_topic_dist']:.4f} × {beta}) + "
-        explanation += f"({result.get('score_claim_doc', 0):.4f} × {epsilon})"
+        explanation += f"({result.get('score_claim_doc', 0):.4f} × {epsilon}) + "
+        explanation += f"({result.get('score_claim_topic', 0):.4f} × {zeta}) + "
+        explanation += f"({result.get('score_claim_keyphrase', 0):.4f} × {eta})"
 
         # Identify dominant component
         components = [
-            ("semantic", sem_contrib),
-            ("thematic", theme_contrib),
-            ("entity", entity_contrib),
-            ("topic_dist", topic_dist_contrib),
-            ("claim_doc", claim_doc_contrib)
+            ("semantic", result['score_sem'] * alpha),
+            ("topic_dist", result['score_topic_dist'] * beta),
+            ("thematic", result['score_theme'] * gamma),
+            ("entity", result['score_entity'] * delta),
+            ("claim_doc", result.get('score_claim_doc', 0) * epsilon),
+            ("claim_topic", result.get('score_claim_topic', 0) * zeta),
+            ("claim_keyphrase", result.get('score_claim_keyphrase', 0) * eta),
         ]
         dominant = max(components, key=lambda x: x[1])
         explanation += f"\nDominant component: {dominant[0]} ({dominant[1]:.4f})"
@@ -357,6 +372,8 @@ class RetrievalResultsManager:
         entity_scores = [r['score_entity'] for r in results]
         topic_dist_scores = [r['score_topic_dist'] for r in results]
         claim_doc_scores = [r.get('score_claim_doc', 0) for r in results]
+        claim_topic_scores = [r.get('score_claim_topic', 0) for r in results]
+        claim_keyphrase_scores = [r.get('score_claim_keyphrase', 0) for r in results]
 
         for name, scores in [
             ("total", total_scores),
@@ -364,7 +381,9 @@ class RetrievalResultsManager:
             ("thematic", theme_scores),
             ("entity", entity_scores),
             ("topic_dist", topic_dist_scores),
-            ("claim_doc", claim_doc_scores)
+            ("claim_doc", claim_doc_scores),
+            ("claim_topic", claim_topic_scores),
+            ("claim_keyphrase", claim_keyphrase_scores)
         ]:
             stats["score_statistics"][name] = {
                 "mean": sum(scores) / len(scores),
@@ -380,7 +399,9 @@ class RetrievalResultsManager:
                 "thematic": result['score_theme'],
                 "entity": result['score_entity'],
                 "topic_dist": result['score_topic_dist'],
-                "claim_doc": result.get('score_claim_doc', 0)
+                "claim_doc": result.get('score_claim_doc', 0),
+                "claim_topic": result.get('score_claim_topic', 0),
+                "claim_keyphrase": result.get('score_claim_keyphrase', 0)
             }
             dominant = max(scores, key=scores.get)
             stats["component_analysis"][dominant] = stats["component_analysis"].get(dominant, 0) + 1
@@ -402,6 +423,8 @@ class RetrievalResultsManager:
         config_retrieval: dict = None,
         matched_claims: List[Dict] = None,
         epsilon: float = 0.0,
+        zeta: float = 0.0,
+        eta: float = 0.0,
         detected_themes: List[Dict] = None,
         random_samples: List[Dict] = None
     ) -> Tuple[str, str]:
@@ -422,6 +445,8 @@ class RetrievalResultsManager:
             config_retrieval: Optional retrieval-specific configuration dict
             matched_claims: Optional list of matched claims for query expansion
             epsilon: Claim-document weight (S5)
+            zeta: Claim-topic traversal weight (S6)
+            eta: Claim-keyphrase weight (S7)
             detected_themes: Optional list of themes detected from the query (S3)
             random_samples: Optional list of random chunks sampled outside top-K for comparison
 
@@ -443,7 +468,7 @@ class RetrievalResultsManager:
         # Format results (include configs if provided)
         formatted = self.format_results_detailed(
             claim, results, alpha, beta, gamma, delta,
-            epsilon=epsilon,
+            epsilon=epsilon, zeta=zeta, eta=eta,
             config=config, config_retrieval=config_retrieval,
             matched_claims=matched_claims,
             detected_themes=detected_themes,
@@ -516,6 +541,8 @@ class RetrievalResultsManager:
         report.append(f"  Gamma (Thematic): {formatted['metadata']['weights']['gamma_thematic']}")
         report.append(f"  Delta (Entity): {formatted['metadata']['weights']['delta_entity']}")
         report.append(f"  Epsilon (Claim Doc): {formatted['metadata']['weights']['epsilon_claim_doc']}")
+        report.append(f"  Zeta (Claim Topic): {formatted['metadata']['weights']['zeta_claim_topic']}")
+        report.append(f"  Eta (Claim KeyPhrase): {formatted['metadata']['weights']['eta_claim_keyphrase']}")
         report.append(f"\nTotal Results: {formatted['metadata']['total_results']}")
         report.append("")
 
@@ -569,6 +596,8 @@ class RetrievalResultsManager:
             report.append(f"     Entity: {result['scores']['entity']:.4f} (contrib: {result['score_contributions']['entity_contribution']:.4f})")
             report.append(f"     Topic Dist: {result['scores']['topic_dist']:.4f} (contrib: {result['score_contributions']['topic_dist_contribution']:.4f})")
             report.append(f"     Claim Doc:  {result['scores'].get('claim_doc', 0):.4f} (contrib: {result['score_contributions'].get('claim_doc_contribution', 0):.4f})")
+            report.append(f"     Claim Topic: {result['scores'].get('claim_topic', 0):.4f} (contrib: {result['score_contributions'].get('claim_topic_contribution', 0):.4f})")
+            report.append(f"     Claim KP:   {result['scores'].get('claim_keyphrase', 0):.4f} (contrib: {result['score_contributions'].get('claim_keyphrase_contribution', 0):.4f})")
             report.append(f"   Source: {result.get('source_query', 'original_query')}")
             report.append(f"   {result['score_explanation']}")
             report.append(f"   Text: {result['text_preview']}")
@@ -581,7 +610,7 @@ class RetrievalResultsManager:
                 s = sample["scores"]
                 report.append(f"\n{i}. Document: {sample['document_id']} | Chunk: {sample['chunk_id']}")
                 report.append(f"   Total Score: {s['total']:.4f}")
-                report.append(f"   Scores: Sem={s['semantic']:.4f} | Theme={s['thematic']:.4f} | Entity={s['entity']:.4f} | TopicDist={s['topic_dist']:.4f} | ClaimDoc={s['claim_doc']:.4f}")
+                report.append(f"   Scores: Sem={s['semantic']:.4f} | Theme={s['thematic']:.4f} | Entity={s['entity']:.4f} | TopicDist={s['topic_dist']:.4f} | ClaimDoc={s['claim_doc']:.4f} | ClaimTopic={s.get('claim_topic', 0):.4f} | ClaimKP={s.get('claim_keyphrase', 0):.4f}")
                 report.append(f"   Text: {sample['text_preview']}")
 
         # Alternative rankings
@@ -642,12 +671,14 @@ class RetrievalResultsManager:
             print(f"Document ID: {result['doc_id']}")
             print(f"Chunk ID: {result['chunk_id']}")
             print(f"\nScores:")
-            print(f"  Total:      {result['score_total']:.4f}")
-            print(f"  Semantic:   {result['score_sem']:.4f}")
-            print(f"  Thematic:   {result['score_theme']:.4f}")
-            print(f"  Entity:     {result['score_entity']:.4f}")
-            print(f"  Topic Dist: {result['score_topic_dist']:.4f}")
-            print(f"  Claim Doc:  {result.get('score_claim_doc', 0):.4f}")
+            print(f"  Total:           {result['score_total']:.4f}")
+            print(f"  Semantic:        {result['score_sem']:.4f}")
+            print(f"  Thematic:        {result['score_theme']:.4f}")
+            print(f"  Entity:          {result['score_entity']:.4f}")
+            print(f"  Topic Dist:      {result['score_topic_dist']:.4f}")
+            print(f"  Claim Doc:       {result.get('score_claim_doc', 0):.4f}")
+            print(f"  Claim Topic:     {result.get('score_claim_topic', 0):.4f}")
+            print(f"  Claim KeyPhrase: {result.get('score_claim_keyphrase', 0):.4f}")
             print(f"\nText preview:")
             text_preview = result['text'][:300] + "..." if len(result['text']) > 300 else result['text']
             print(f"  {text_preview}")
@@ -658,7 +689,9 @@ class RetrievalResultsManager:
                 'thematic': result['score_theme'],
                 'entity': result['score_entity'],
                 'topic_dist': result['score_topic_dist'],
-                'claim_doc': result.get('score_claim_doc', 0)
+                'claim_doc': result.get('score_claim_doc', 0),
+                'claim_topic': result.get('score_claim_topic', 0),
+                'claim_keyphrase': result.get('score_claim_keyphrase', 0)
             }
             dominant = max(scores, key=scores.get)
             print(f"\nDominant component: {dominant} ({scores[dominant]:.4f})")

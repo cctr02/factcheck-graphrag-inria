@@ -21,6 +21,7 @@ from fact_check_kg.core.config_loader import get_build_config, load_raw_config
 from fact_check_kg.core.logger import get_logger
 from fact_check_kg.build.data_loader import load_and_chunk_documents, load_claims
 from fact_check_kg.build.graph_builder import KnowledgeGraphBuilder
+from fact_check_kg.build.checkpoint_manager import CheckpointManager
 
 
 def main():
@@ -39,6 +40,11 @@ def main():
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Logging level"
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from last checkpoint instead of starting fresh"
+    )
     args = parser.parse_args()
 
     # Load build configuration - ALL parameters come from config
@@ -52,6 +58,30 @@ def main():
     if args.max_docs is not None:
         logger.info(f"[CLI OVERRIDE] max_docs: {config.graph_construction.max_documents} -> {args.max_docs}")
         max_docs = args.max_docs
+
+    # Initialize checkpoint manager
+    checkpoint_dir = Path("outputs/checkpoints")
+    checkpoint_manager = CheckpointManager(checkpoint_dir, logger=logger)
+
+    if args.resume:
+        last = checkpoint_manager.get_last_completed()
+        if last:
+            logger.info(f"[CHECKPOINT] Resuming from: {last}")
+            summary = checkpoint_manager.get_summary()
+            logger.info(f"[CHECKPOINT] Completed steps: {summary.get('completed_steps', [])}")
+            logger.info(f"[CHECKPOINT] Total checkpoint size: {summary.get('total_size_mb', 0):.1f} MB")
+
+            # Validate config hasn't changed
+            if not checkpoint_manager.validate_config(config, max_docs):
+                logger.error("[CHECKPOINT] Config has changed since checkpoint was created!")
+                logger.error("Run without --resume to start fresh, or delete outputs/checkpoints/")
+                sys.exit(1)
+        else:
+            logger.info("[CHECKPOINT] No checkpoint found, starting fresh build")
+    else:
+        # Fresh build - clear old checkpoints
+        checkpoint_manager.clear()
+        checkpoint_manager.init_run(config, max_docs)
 
     # All parameters from config
     csv_path = config.paths.csv_file
@@ -169,7 +199,8 @@ def main():
         nr_topics=config.graph_construction.nr_topics,
         claims=claims,
         claim_to_docs=claim_to_docs,
-        doc_metadata=doc_metadata
+        doc_metadata=doc_metadata,
+        checkpoint_manager=checkpoint_manager
     )
 
     # Step 4: Save graph and models
@@ -233,11 +264,19 @@ def main():
     chunk_nodes = [n for n, d in graph.nodes(data=True) if d.get('type') == 'chunk']
     chunk_texts = [graph.nodes[n]['text'] for n in chunk_nodes]
 
-    # Compute embeddings
+    # Compute embeddings with optimal batch size for GPU
+    import torch
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    batch_size = 128 if device == 'cuda' else 32
+
+    logger.info(f"Computing embeddings on {device.upper()} with batch_size={batch_size}...")
     embeddings = builder.embedding_model.encode(
         chunk_texts,
+        batch_size=batch_size,
         show_progress_bar=True,
-        normalize_embeddings=True
+        normalize_embeddings=True,
+        convert_to_numpy=True,
+        device=device
     )
 
     # Build and save FAISS index

@@ -368,10 +368,19 @@ def add_theme_semantic_similarity(
 
     # Embed theme representations
     logger.info(f"Embedding {len(theme_representations)} themes...")
+
+    # Use optimal batch size based on device
+    import torch
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    batch_size = 128 if device == 'cuda' else 32
+
     theme_embeddings = embedding_model.encode(
         theme_representations,
+        batch_size=batch_size,
         show_progress_bar=False,
-        normalize_embeddings=True
+        normalize_embeddings=True,
+        convert_to_numpy=True,
+        device=device
     )
 
     # Compute similarity matrix

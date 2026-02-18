@@ -314,23 +314,32 @@ def precompute_claim_retrieval(
     claim_ids, claim_texts = zip(*valid_claims)
     logger.info(f"Processing {len(claim_texts)} valid claims")
 
+    # Determine optimal batch size based on device
+    import torch
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    batch_size = 128 if device == 'cuda' else 32
+
     # BATCH 1: Pre-compute chunk embeddings
     chunk_texts = [graph.nodes[cid].get('text', '') for cid in chunk_ids]
-    logger.info("Computing chunk embeddings (batch)...")
+    logger.info(f"Computing chunk embeddings (batch) on {device.upper()} with batch_size={batch_size}...")
     chunk_embeddings = embedding_model.encode(
         chunk_texts,
+        batch_size=batch_size,
         show_progress_bar=True,
         normalize_embeddings=True,
-        batch_size=64
+        convert_to_numpy=True,
+        device=device
     )
 
     # BATCH 2: Pre-compute claim embeddings
-    logger.info("Computing claim embeddings (batch)...")
+    logger.info(f"Computing claim embeddings (batch) on {device.upper()} with batch_size={batch_size}...")
     claim_embeddings = embedding_model.encode(
         list(claim_texts),
+        batch_size=batch_size,
         show_progress_bar=True,
         normalize_embeddings=True,
-        batch_size=64
+        convert_to_numpy=True,
+        device=device
     )
 
     # BATCH 3: Compute semantic similarities (claims × chunks)

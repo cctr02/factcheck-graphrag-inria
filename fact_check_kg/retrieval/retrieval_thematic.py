@@ -8,6 +8,7 @@ based on thematic similarity.
 import logging
 from typing import Dict, List, Tuple
 from collections import defaultdict
+import numpy as np
 import networkx as nx
 from bertopic import BERTopic
 
@@ -58,8 +59,16 @@ def retrieve_thematic(
     detected_themes = [
         (idx, prob)
         for idx, prob in enumerate(topic_probs)
-        if prob > theme_threshold
+        if prob >= theme_threshold
     ]
+
+    # Fallback: if no theme passes the threshold, keep the top-1 theme
+    if not detected_themes and len(topic_probs) > 0:
+        best_idx = int(np.argmax(topic_probs))
+        best_prob = float(topic_probs[best_idx])
+        if best_prob > 0:
+            detected_themes = [(best_idx, best_prob)]
+            logger.info(f"No theme above threshold ({theme_threshold}), using top-1 fallback (prob={best_prob:.4f})")
 
     # Collect theme info for output (label, keywords, probability)
     detected_themes_info = []

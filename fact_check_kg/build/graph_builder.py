@@ -148,12 +148,41 @@ class KnowledgeGraphBuilder:
         """
         self.logger = logger or logging.getLogger(__name__)
 
-        # Initialize models
-        self.logger.info(f"Loading SentenceTransformer model: {embedding_model}")
-        self.embedding_model = SentenceTransformer(embedding_model)
+        # Detect GPU availability
+        import torch
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        if torch.cuda.is_available():
+            self.logger.info(f"✓ GPU detected: {torch.cuda.get_device_name(0)}")
+            self.logger.info(f"  CUDA version: {torch.version.cuda}")
+            self.logger.info(f"  GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+        else:
+            self.logger.warning("⚠ No GPU detected, using CPU (this will be slower)")
+
+        # Initialize models with GPU support
+        self.logger.info(f"Loading SentenceTransformer model: {embedding_model} on {self.device.upper()}")
+        self.embedding_model = SentenceTransformer(embedding_model, device=self.device)
+
+        # Enable GPU for spaCy BEFORE loading the model
+        if self.device == 'cuda':
+            self.logger.info("Enabling GPU acceleration for spaCy...")
+            try:
+                spacy.require_gpu()
+                self.logger.info("✓ spaCy GPU enabled successfully")
+            except Exception as e:
+                self.logger.warning(f"⚠ Failed to enable spaCy GPU: {e}")
+                self.logger.warning("  spaCy will run on CPU")
 
         self.logger.info(f"Loading spaCy NER model: {ner_model}")
         self.nlp = spacy.load(ner_model)
+
+        # Configure spaCy for batch processing
+        # Increase batch size for GPU processing
+        if self.device == 'cuda':
+            # Larger batches for GPU
+            self.nlp.batch_size = 1000
+        else:
+            # Smaller batches for CPU
+            self.nlp.batch_size = 50
 
         # Configuration
         self.entity_types = entity_types
@@ -256,7 +285,8 @@ class KnowledgeGraphBuilder:
         self,
         chunk_texts: List[str],
         min_topic_size: int = 10,
-        nr_topics: Optional[int] = None
+        nr_topics: Optional[int] = None,
+        embeddings: Optional[np.ndarray] = None
     ) -> Tuple[BERTopic, List[int], np.ndarray]:
         """
         Build topic model using BERTopic.
@@ -265,6 +295,7 @@ class KnowledgeGraphBuilder:
             chunk_texts: List of chunk texts
             min_topic_size: Minimum size for a topic
             nr_topics: Number of topics (None = auto)
+            embeddings: Pre-computed embeddings (None = compute from scratch)
 
         Returns:
             Tuple of (topic_model, topics, probabilities)
@@ -278,11 +309,13 @@ class KnowledgeGraphBuilder:
         """
         start_time = time.time()
         self.logger.info("Training BERTopic model...")
-        self.logger.info(f"Computing embeddings for {len(chunk_texts)} chunks...")
+        if embeddings is not None:
+            self.logger.info(f"Using pre-computed embeddings: {embeddings.shape}")
+        else:
+            self.logger.info(f"Computing embeddings for {len(chunk_texts)} chunks...")
 
         # Create vectorizer with stop words
         from sklearn.feature_extraction.text import CountVectorizer
-        from umap import UMAP
         from hdbscan import HDBSCAN
 
         vectorizer_model = CountVectorizer(
@@ -292,24 +325,42 @@ class KnowledgeGraphBuilder:
             max_features=1000     # More features
         )
 
-        # Custom UMAP for dimensionality reduction
-        umap_model = UMAP(
-            n_neighbors=15,
-            n_components=5,
-            min_dist=0.0,
-            metric='cosine',
-            verbose=True
-        )
+        # Custom UMAP for dimensionality reduction with GPU support if available
+        try:
+            if self.device == 'cuda':
+                # Try to use cuML UMAP (GPU-accelerated)
+                from cuml.manifold import UMAP as cumlUMAP
+                umap_model = cumlUMAP(
+                    n_neighbors=15,
+                    n_components=5,
+                    min_dist=0.0,
+                    metric='cosine',
+                    verbose=True
+                )
+                self.logger.info("✓ Using GPU-accelerated UMAP (cuML)")
+            else:
+                raise ImportError("CPU mode")
+        except ImportError:
+            # Fallback to CPU UMAP
+            from umap import UMAP
+            umap_model = UMAP(
+                n_neighbors=15,
+                n_components=5,
+                min_dist=0.0,
+                metric='cosine',
+                verbose=True
+            )
+            if self.device == 'cuda':
+                self.logger.warning("⚠ cuML not available, using CPU UMAP (install rapids-cuml for GPU acceleration)")
 
         # Create HDBSCAN model
         # prediction_data=True required for calculate_probabilities (multi-topic assignment)
-        # core_dist_n_jobs=1 reduces memory spikes (sequential instead of parallel)
         hdbscan_model = HDBSCAN(
             min_cluster_size=min_topic_size,
             metric='euclidean',
             cluster_selection_method='eom',
             prediction_data=True,  # Required for multi-topic probabilities
-            core_dist_n_jobs=1  # Reduces memory spikes
+            core_dist_n_jobs=-1  # Use ALL CPU cores for parallel distance computation
         )
 
         # Initialize BERTopic with custom components
@@ -326,9 +377,13 @@ class KnowledgeGraphBuilder:
 
         # Fit and transform with progress logging
         self.logger.info(f"Starting BERTopic pipeline on {len(chunk_texts)} text chunks...")
-        self.logger.info("  → Stage 1/4: Computing embeddings (GPU-accelerated)...")
+        device_str = "GPU" if self.device == 'cuda' else "CPU"
+        if embeddings is not None:
+            self.logger.info("  → Stage 1/4: Embeddings SKIPPED (using pre-computed from checkpoint)")
+        else:
+            self.logger.info(f"  → Stage 1/4: Computing embeddings ({device_str}-accelerated)...")
         self.logger.info("  → Stage 2/4: UMAP dimensionality reduction (kNN-based)...")
-        self.logger.info("  → Stage 3/4: HDBSCAN clustering (CPU, typically 30s-2min)...")
+        self.logger.info("  → Stage 3/4: HDBSCAN clustering (CPU, all cores)...")
 
         # Wrapper to show message after HDBSCAN
         original_extract_topics = topic_model._extract_topics
@@ -340,7 +395,11 @@ class KnowledgeGraphBuilder:
 
         topic_model._extract_topics = extract_topics_with_logging
 
-        topics, probabilities = topic_model.fit_transform(chunk_texts)
+        # Pass pre-computed embeddings if available, otherwise BERTopic computes them
+        topics, probabilities = topic_model.fit_transform(
+            chunk_texts,
+            embeddings=embeddings  # None = BERTopic computes; ndarray = skip embedding step
+        )
 
         # Restore original method to allow pickling
         topic_model._extract_topics = original_extract_topics
@@ -364,14 +423,16 @@ class KnowledgeGraphBuilder:
         nr_topics: Optional[int] = None,
         claims: Optional[List[Dict]] = None,
         claim_to_docs: Optional[Dict[str, List[str]]] = None,
-        doc_metadata: Optional[Dict[str, Dict]] = None
+        doc_metadata: Optional[Dict[str, Dict]] = None,
+        checkpoint_manager=None
     ) -> Tuple[nx.Graph, np.ndarray, List[str], Dict[str, Dict]]:
         """
         Build the complete knowledge graph through a 10-step pipeline.
 
         Pipeline steps:
         1. Add document and chunk nodes (CONTAINS edges)
-        2. Train BERTopic model for topic modeling
+        2a. Compute chunk embeddings (GPU)
+        2b. Train BERTopic model (UMAP + HDBSCAN + c-TF-IDF)
         3. Add theme nodes with LLM labels and HAS_TOPIC edges (top-3 per chunk)
         4. Extract entities and add MENTIONS edges (TF-IDF weighted)
         4b. Extract keyphrases and add HAS_KEYPHRASE edges (KeyBERT)
@@ -393,6 +454,7 @@ class KnowledgeGraphBuilder:
             claim_to_docs: Optional mapping of claim_id to list of doc_ids
             doc_metadata: Optional mapping of doc_id to metadata dict with keys:
                 text (title + body), review_date, language
+            checkpoint_manager: Optional CheckpointManager for save/resume
 
         Returns:
             Tuple of (graph, topic_probabilities, chunk_ids, claim_retrieval_results):
@@ -401,8 +463,12 @@ class KnowledgeGraphBuilder:
             - chunk_ids: list of chunk IDs matching probability matrix rows
             - claim_retrieval_results: dict mapping claim_id to pre-computed results
         """
+        cm = checkpoint_manager  # shorthand
+
         self.logger.info("=" * 60)
         self.logger.info("BUILDING KNOWLEDGE GRAPH")
+        if cm and cm.get_last_completed():
+            self.logger.info(f"  RESUMING from checkpoint: {cm.get_last_completed()}")
         self.logger.info("=" * 60)
 
         # Initialize timing
@@ -414,102 +480,206 @@ class KnowledgeGraphBuilder:
         chunk_ids = [c['chunk_id'] for c in chunks]
         doc_ids = [c['doc_id'] for c in chunks]
 
+        # ================================================================
         # Step 1: Add document and chunk nodes
-        self.logger.info("\nStep 1: Adding documents and chunks...")
-        step_start = time.time()
-        add_documents_and_chunks(self.graph, chunks, doc_metadata, self.logger, self._log_step_completion)
-        self.build_timings["Step 1: Documents & Chunks"] = time.time() - step_start
-
-        # Step 2: Topic modeling
-        self.logger.info("\nStep 2: Running topic modeling...")
-        step_start = time.time()
-        topic_model, topics, probabilities = self.build_topic_model(
-            chunk_texts,
-            min_topic_size=min_topic_size,
-            nr_topics=nr_topics
-        )
-        self.build_timings["Step 2: Topic Modeling"] = time.time() - step_start
-
-        # Step 3: Add themes and HAS_TOPIC edges (requires LLM for labeling)
-        self.logger.info("\nStep 3: Adding themes and HAS_TOPIC edges...")
-        step_start = time.time()
-        add_themes_and_edges(self.graph, topic_model, topics, probabilities, chunk_ids, self.topic_labeler, self.logger, self._log_step_completion)
-        self.build_timings["Step 3: Themes & HAS_TOPIC"] = time.time() - step_start
-
-        # Step 3b: Build hierarchical topic structure (supertopics)
-        self.logger.info("\nStep 3b: Building hierarchical topics (supertopics)...")
-        step_start = time.time()
-        self.topic_to_supertopic = build_hierarchical_topics(
-            self.graph, topic_model, chunk_texts, self.topic_labeler,
-            nr_supertopics=None,  # Auto: ~40% of topics
-            logger=self.logger, log_step_fn=self._log_step_completion
-        )
-        self.build_timings["Step 3b: Hierarchical Topics"] = time.time() - step_start
-
-        # Step 4: Extract entities and add MENTIONS edges
-        self.logger.info("\nStep 4: Extracting entities and adding MENTIONS edges...")
-        step_start = time.time()
-        chunk_to_entities = add_entities_and_mentions(self.graph, chunks, self.nlp, self.entity_types, self.logger, self._log_step_completion)
-        self.build_timings["Step 4: Entities & MENTIONS"] = time.time() - step_start
-
-        # Step 4b: Extract keyphrases and add HAS_KEYPHRASE edges
-        self.logger.info("\nStep 4b: Extracting keyphrases and adding HAS_KEYPHRASE edges...")
-        step_start = time.time()
-        add_keyphrases(self.graph, chunks, self.keybert_model, self.keyphrase_top_n, self.keyphrase_ngram_range, self.logger, self._log_step_completion)
-        self.build_timings["Step 4b: Keyphrases"] = time.time() - step_start
-
-        # Step 5: Add CO_OCCURS edges (Entity ↔ Entity)
-        self.logger.info("\nStep 5: Adding CO_OCCURS edges (Entity ↔ Entity)...")
-        step_start = time.time()
-        add_entity_co_occurrences(self.graph, chunk_to_entities, self.co_occur_threshold, self.logger, self._log_step_completion)
-        self.build_timings["Step 5: CO_OCCURS"] = time.time() - step_start
-
-        # Step 6: Add SEMANTIC_SIM edges (Entity ↔ Entity, excluding DATEs)
-        self.logger.info("\nStep 6: Adding SEMANTIC_SIM edges (Entity ↔ Entity)...")
-        step_start = time.time()
-        add_entity_semantic_similarity(self.graph, self.embedding_model, self.semantic_sim_threshold, self.logger, self._log_step_completion)
-        self.build_timings["Step 6: Entity SEMANTIC_SIM"] = time.time() - step_start
-
-        # Step 6b: Add TEMPORAL_DIST edges (DATE ↔ DATE)
-        self.logger.info("\nStep 6b: Adding TEMPORAL_DIST edges (DATE ↔ DATE)...")
-        step_start = time.time()
-        add_date_temporal_similarity(self.graph, self.temporal_max_year_gap, self.temporal_decay_rate, self.logger, self._log_step_completion)
-        self.build_timings["Step 6b: TEMPORAL_DIST"] = time.time() - step_start
-
-        # Step 7: Add SEMANTIC_SIM edges (Theme ↔ Theme)
-        self.logger.info("\nStep 7: Adding SEMANTIC_SIM edges (Theme ↔ Theme)...")
-        step_start = time.time()
-        add_theme_semantic_similarity(self.graph, topic_model, self.embedding_model, self.semantic_sim_threshold, self.logger, self._log_step_completion)
-        self.build_timings["Step 7: Theme SEMANTIC_SIM"] = time.time() - step_start
-
-        # Step 8: Add CO_PRESENCE edges (Theme ↔ Theme)
-        self.logger.info("\nStep 8: Adding CO_PRESENCE edges (Theme ↔ Theme)...")
-        step_start = time.time()
-        add_theme_co_presence(self.graph, chunk_ids, self.co_occur_threshold, self.logger, self._log_step_completion)
-        self.build_timings["Step 8: CO_PRESENCE"] = time.time() - step_start
-
-        # Step 9: Add claim nodes and REVIEWS edges (Claim → Document)
-        if claims and claim_to_docs:
-            self.logger.info("\nStep 9: Adding claims and REVIEWS edges (Claim → Document)...")
+        # ================================================================
+        if cm and cm.should_skip("step_01_chunks"):
+            self.logger.info("\n[SKIP] Step 1: Documents & Chunks (from checkpoint)")
+            data = cm.load("step_01_chunks")
+            self.graph = data['graph']
+        else:
+            self.logger.info("\nStep 1: Adding documents and chunks...")
             step_start = time.time()
-            add_claims_and_edges(self.graph, claims, claim_to_docs, self.logger, self._log_step_completion)
-            self.build_timings["Step 9: Claims & REVIEWS"] = time.time() - step_start
+            add_documents_and_chunks(self.graph, chunks, doc_metadata, self.logger, self._log_step_completion)
+            self.build_timings["Step 1: Documents & Chunks"] = time.time() - step_start
+            if cm:
+                cm.save("step_01_chunks", {'graph': self.graph},
+                        metadata={'n_docs': len(set(doc_ids)), 'n_chunks': len(chunks)})
 
-            # Step 10: Pre-compute claim retrieval (run 4 strategies for each claim)
-            self.logger.info("\nStep 10: Pre-computing claim retrieval results...")
+        # ================================================================
+        # Step 2a: Compute embeddings (GPU, fast - CRITICAL CHECKPOINT)
+        # ================================================================
+        if cm and cm.should_skip("step_02a_embeddings"):
+            self.logger.info("\n[SKIP] Step 2a: Embeddings (from checkpoint)")
+            data = cm.load("step_02a_embeddings")
+            embeddings = data['embeddings']
+            self.logger.info(f"  Loaded embeddings: {embeddings.shape}")
+        else:
+            self.logger.info("\nStep 2a: Computing chunk embeddings...")
             step_start = time.time()
-            claim_retrieval_results = precompute_claim_retrieval(
-                graph=self.graph,
-                claims=claims,
-                topic_model=topic_model,
-                probabilities=probabilities,
-                chunk_ids=chunk_ids,
-                embedding_model=self.embedding_model,
-                nlp=self.nlp,
-                entity_types=set(self.entity_types),
-                logger=self.logger
+            batch_size = 128 if self.device == 'cuda' else 32
+            embeddings = self.embedding_model.encode(
+                chunk_texts,
+                batch_size=batch_size,
+                show_progress_bar=True,
+                normalize_embeddings=True,
+                convert_to_numpy=True,
+                device=self.device
             )
-            self.build_timings["Step 10: Claim Pre-Retrieval"] = time.time() - step_start
+            self.build_timings["Step 2a: Embeddings"] = time.time() - step_start
+            if cm:
+                cm.save("step_02a_embeddings", {'embeddings': embeddings},
+                        metadata={'shape': list(embeddings.shape)})
+                self.logger.info("[CHECKPOINT] Embeddings saved - safe to interrupt during HDBSCAN!")
+
+        # ================================================================
+        # Step 2b: Topic modeling (UMAP + HDBSCAN + c-TF-IDF - CPU, slow)
+        # ================================================================
+        if cm and cm.should_skip("step_02b_topics"):
+            self.logger.info("\n[SKIP] Step 2b: Topic modeling (from checkpoint)")
+            data = cm.load("step_02b_topics")
+            topic_model = data['topic_model']
+            topics = data['topics']
+            probabilities = data['probabilities']
+            self.topic_model = topic_model
+        else:
+            self.logger.info("\nStep 2b: Running topic modeling (UMAP + HDBSCAN)...")
+            step_start = time.time()
+            topic_model, topics, probabilities = self.build_topic_model(
+                chunk_texts,
+                min_topic_size=min_topic_size,
+                nr_topics=nr_topics,
+                embeddings=embeddings  # Use pre-computed embeddings!
+            )
+            self.build_timings["Step 2b: Topic Modeling"] = time.time() - step_start
+            if cm:
+                cm.save("step_02b_topics", {
+                    'topic_model': topic_model,
+                    'topics': topics,
+                    'probabilities': probabilities
+                }, metadata={'n_topics': len(set(topics)) - (1 if -1 in topics else 0)})
+
+        # ================================================================
+        # Step 3: Add themes + hierarchical topics
+        # ================================================================
+        if cm and cm.should_skip("step_03_graph_themes"):
+            self.logger.info("\n[SKIP] Step 3: Themes & Hierarchical topics (from checkpoint)")
+            data = cm.load("step_03_graph_themes")
+            self.graph = data['graph']
+            self.topic_to_supertopic = data.get('topic_to_supertopic', {})
+        else:
+            # Step 3: Add themes and HAS_TOPIC edges (requires LLM for labeling)
+            self.logger.info("\nStep 3: Adding themes and HAS_TOPIC edges...")
+            step_start = time.time()
+            add_themes_and_edges(self.graph, topic_model, topics, probabilities, chunk_ids, self.topic_labeler, self.logger, self._log_step_completion)
+            self.build_timings["Step 3: Themes & HAS_TOPIC"] = time.time() - step_start
+
+            # Step 3b: Build hierarchical topic structure (supertopics)
+            self.logger.info("\nStep 3b: Building hierarchical topics (supertopics)...")
+            step_start = time.time()
+            self.topic_to_supertopic = build_hierarchical_topics(
+                self.graph, topic_model, chunk_texts, self.topic_labeler,
+                nr_supertopics=None,  # Auto: ~40% of topics
+                logger=self.logger, log_step_fn=self._log_step_completion
+            )
+            self.build_timings["Step 3b: Hierarchical Topics"] = time.time() - step_start
+            if cm:
+                cm.save("step_03_graph_themes", {
+                    'graph': self.graph,
+                    'topic_to_supertopic': self.topic_to_supertopic
+                })
+
+        # ================================================================
+        # Step 4: Entities + Keyphrases
+        # ================================================================
+        if cm and cm.should_skip("step_04_graph_entities"):
+            self.logger.info("\n[SKIP] Step 4: Entities & Keyphrases (from checkpoint)")
+            data = cm.load("step_04_graph_entities")
+            self.graph = data['graph']
+            chunk_to_entities = data['chunk_to_entities']
+        else:
+            # Step 4: Extract entities and add MENTIONS edges
+            self.logger.info("\nStep 4: Extracting entities and adding MENTIONS edges...")
+            step_start = time.time()
+            chunk_to_entities = add_entities_and_mentions(self.graph, chunks, self.nlp, self.entity_types, self.logger, self._log_step_completion)
+            self.build_timings["Step 4: Entities & MENTIONS"] = time.time() - step_start
+
+            # Step 4b: Extract keyphrases and add HAS_KEYPHRASE edges
+            self.logger.info("\nStep 4b: Extracting keyphrases and adding HAS_KEYPHRASE edges...")
+            step_start = time.time()
+            add_keyphrases(self.graph, chunks, self.keybert_model, self.keyphrase_top_n, self.keyphrase_ngram_range, self.logger, self._log_step_completion)
+            self.build_timings["Step 4b: Keyphrases"] = time.time() - step_start
+            if cm:
+                cm.save("step_04_graph_entities", {
+                    'graph': self.graph,
+                    'chunk_to_entities': dict(chunk_to_entities)  # Convert defaultdict
+                })
+
+        # ================================================================
+        # Steps 5-8: All cross-edges
+        # ================================================================
+        if cm and cm.should_skip("step_05_graph_edges"):
+            self.logger.info("\n[SKIP] Steps 5-8: Cross-edges (from checkpoint)")
+            data = cm.load("step_05_graph_edges")
+            self.graph = data['graph']
+        else:
+            # Step 5: Add CO_OCCURS edges (Entity ↔ Entity)
+            self.logger.info("\nStep 5: Adding CO_OCCURS edges (Entity ↔ Entity)...")
+            step_start = time.time()
+            add_entity_co_occurrences(self.graph, chunk_to_entities, self.co_occur_threshold, self.logger, self._log_step_completion)
+            self.build_timings["Step 5: CO_OCCURS"] = time.time() - step_start
+
+            # Step 6: Add SEMANTIC_SIM edges (Entity ↔ Entity, excluding DATEs)
+            self.logger.info("\nStep 6: Adding SEMANTIC_SIM edges (Entity ↔ Entity)...")
+            step_start = time.time()
+            add_entity_semantic_similarity(self.graph, self.embedding_model, self.semantic_sim_threshold, self.logger, self._log_step_completion)
+            self.build_timings["Step 6: Entity SEMANTIC_SIM"] = time.time() - step_start
+
+            # Step 6b: Add TEMPORAL_DIST edges (DATE ↔ DATE)
+            self.logger.info("\nStep 6b: Adding TEMPORAL_DIST edges (DATE ↔ DATE)...")
+            step_start = time.time()
+            add_date_temporal_similarity(self.graph, self.temporal_max_year_gap, self.temporal_decay_rate, self.logger, self._log_step_completion)
+            self.build_timings["Step 6b: TEMPORAL_DIST"] = time.time() - step_start
+
+            # Step 7: Add SEMANTIC_SIM edges (Theme ↔ Theme)
+            self.logger.info("\nStep 7: Adding SEMANTIC_SIM edges (Theme ↔ Theme)...")
+            step_start = time.time()
+            add_theme_semantic_similarity(self.graph, topic_model, self.embedding_model, self.semantic_sim_threshold, self.logger, self._log_step_completion)
+            self.build_timings["Step 7: Theme SEMANTIC_SIM"] = time.time() - step_start
+
+            # Step 8: Add CO_PRESENCE edges (Theme ↔ Theme)
+            self.logger.info("\nStep 8: Adding CO_PRESENCE edges (Theme ↔ Theme)...")
+            step_start = time.time()
+            add_theme_co_presence(self.graph, chunk_ids, self.co_occur_threshold, self.logger, self._log_step_completion)
+            self.build_timings["Step 8: CO_PRESENCE"] = time.time() - step_start
+            if cm:
+                cm.save("step_05_graph_edges", {'graph': self.graph})
+
+        # ================================================================
+        # Steps 9-10: Claims (optional)
+        # ================================================================
+        if claims and claim_to_docs:
+            if cm and cm.should_skip("step_06_graph_claims"):
+                self.logger.info("\n[SKIP] Steps 9-10: Claims (from checkpoint)")
+                data = cm.load("step_06_graph_claims")
+                self.graph = data['graph']
+                claim_retrieval_results = data.get('claim_retrieval_results', {})
+            else:
+                self.logger.info("\nStep 9: Adding claims and REVIEWS edges (Claim → Document)...")
+                step_start = time.time()
+                add_claims_and_edges(self.graph, claims, claim_to_docs, self.logger, self._log_step_completion)
+                self.build_timings["Step 9: Claims & REVIEWS"] = time.time() - step_start
+
+                # Step 10: Pre-compute claim retrieval (run 4 strategies for each claim)
+                self.logger.info("\nStep 10: Pre-computing claim retrieval results...")
+                step_start = time.time()
+                claim_retrieval_results = precompute_claim_retrieval(
+                    graph=self.graph,
+                    claims=claims,
+                    topic_model=topic_model,
+                    probabilities=probabilities,
+                    chunk_ids=chunk_ids,
+                    embedding_model=self.embedding_model,
+                    nlp=self.nlp,
+                    entity_types=set(self.entity_types),
+                    logger=self.logger
+                )
+                self.build_timings["Step 10: Claim Pre-Retrieval"] = time.time() - step_start
+                if cm:
+                    cm.save("step_06_graph_claims", {
+                        'graph': self.graph,
+                        'claim_retrieval_results': claim_retrieval_results
+                    })
         else:
             claim_retrieval_results = {}
 
