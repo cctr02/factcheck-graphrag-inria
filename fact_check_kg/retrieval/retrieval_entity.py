@@ -136,15 +136,12 @@ def retrieve_entity(
                 # Accumulate scores (chunks can be mentioned by multiple entities)
                 scores[neighbor] += chunk_score
 
-    # Normalize scores
-    if scores:
-        min_score = min(scores.values())
-        max_score = max(scores.values())
-        if max_score > min_score:
-            scores = {
-                k: (v - min_score) / (max_score - min_score)
-                for k, v in scores.items()
-            }
+    # Normalize by number of seed entities (theoretical max).
+    # Each seed contributes at most 1.0 × MENTIONS_weight ≤ 1.0 per chunk,
+    # so dividing by n_seeds guarantees scores ∈ [0, 1].
+    n_seeds = len(seed_entities)
+    if scores and n_seeds > 0:
+        scores = {k: min(v / n_seeds, 1.0) for k, v in scores.items()}
 
     logger.info(f"Found {len(scores)} chunks via entity graph traversal")
     if scores:

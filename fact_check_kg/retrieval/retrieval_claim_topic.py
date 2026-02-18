@@ -3,23 +3,23 @@ Strategy 6: Claim-Based Topic Distribution Traversal.
 
 Combines claim-based retrieval with topic distribution analysis.
 Uses matched claims to traverse the graph and scores chunks based on
-topic distribution similarity weighted by traversal relevance.
+topic distribution similarity weighted by claim similarity.
 
 Algorithm:
-1. Find claims similar to query (via S5)
-2. Get chunks connected to claims via graph traversal
+1. Find claims similar to query (cosine similarity)
+2. Traverse REVIEWS → CONTAINS to get chunks linked to matched claims
 3. Compute topic distribution similarity between query and each chunk
-4. Weight by relevance propagation from claim to chunk
-5. Boost chunks with high HAS_TOPIC confidence (TF-IDF-like weighting)
+4. Score = claim_sim × topic_sim × topic_confidence
 
 Final Score:
-    S6(chunk) = claim_sim × traversal_relevance × topic_sim × topic_confidence
+    S6(chunk) = claim_sim × topic_sim × topic_confidence
 
 Where:
-- claim_sim = cos(embed(query), embed(claim))
-- traversal_relevance = propagated relevance from claim to chunk
-- topic_sim = 1 - JSD(query_dist, chunk_dist)
-- topic_confidence = max(HAS_TOPIC_weight for chunk's topics)
+- claim_sim = max(0, cos(embed(query), embed(claim)))
+- topic_sim = 1 - JSD(query_distribution, chunk_distribution)
+- topic_confidence = max(HAS_TOPIC_weight for chunk's topics), default 0.5
+
+All components ∈ [0, 1], so the product is ∈ [0, 1]. No min-max normalization.
 """
 
 import logging
@@ -41,25 +41,20 @@ def retrieve_claim_topic_traversal(
     claim_embeddings: Optional[np.ndarray],
     claim_nodes: List[str],
     claim_texts: List[str],
-    claim_retrieval_results: Dict,
     claim_top_k: int,
     logger: logging.Logger
 ) -> Tuple[Dict[str, float], List[Dict]]:
     """
-    Strategy 6: Claim-Based Topic Distribution Traversal.
+    Strategy 6: Claim-Based Topic Distribution Traversal via REVIEWS graph edges.
 
-    Finds similar claims, traverses to related chunks, and scores based on
-    topic distribution similarity weighted by traversal relevance and
-    topic confidence (HAS_TOPIC edge weight).
+    Finds similar claims, traverses REVIEWS → CONTAINS to reach chunks,
+    and scores based on topic distribution similarity weighted by claim similarity
+    and topic confidence (HAS_TOPIC edge weight).
 
     Score Formula:
-        score = claim_sim × traversal_rel × (1 - JSD) × topic_conf
+        score = claim_sim × topic_sim × topic_conf
 
-    Where:
-    - claim_sim: Cosine similarity between query and matched claim
-    - traversal_rel: Relevance score from claim's pre-computed retrieval
-    - (1 - JSD): Topic distribution similarity (Jensen-Shannon)
-    - topic_conf: Maximum HAS_TOPIC edge weight for the chunk
+    Scores are bounded to [0, 1] — no min-max normalization applied.
 
     Args:
         query: Query text
@@ -71,27 +66,18 @@ def retrieve_claim_topic_traversal(
         claim_embeddings: Pre-computed claim embeddings
         claim_nodes: List of claim node IDs
         claim_texts: List of claim texts
-        claim_retrieval_results: Pre-computed retrieval results per claim
         claim_top_k: Number of top claims to consider
         logger: Logger instance
 
     Returns:
         Tuple of:
-        - scores: Dictionary mapping chunk_id to score (normalized 0-1)
+        - scores: Dictionary mapping chunk_id to score ∈ [0, 1]
         - matched_claims_details: Details about matched claims
-
-    Example:
-        >>> scores, details = retrieve_claim_topic_traversal(
-        ...     "COVID vaccines are dangerous",
-        ...     graph, topic_model, embed_model, chunk_dists, idx_map,
-        ...     claim_embeds, claim_nodes, claim_texts, claim_results, 5, logger
-        ... )
     """
     logger.info("\n--- Strategy 6: Claim-Based Topic Distribution Traversal ---")
 
     matched_claims_details = []
 
-    # Check if claims exist
     if claim_embeddings is None or len(claim_nodes) == 0:
         logger.warning("No claims in graph, skipping Strategy 6")
         return {}, matched_claims_details
@@ -112,84 +98,69 @@ def retrieve_claim_topic_traversal(
     logger.info(f"Query topic distribution computed (shape: {query_distribution.shape})")
 
     # Step 3: Process each matched claim
-    scores = defaultdict(float)
+    scores = {}
 
     for claim_idx in top_claim_indices:
         claim_node = claim_nodes[claim_idx]
-        claim_sim = float(claim_similarities[claim_idx])
+        claim_sim = max(0.0, float(claim_similarities[claim_idx]))  # Clip to [0, 1]
         claim_text = claim_texts[claim_idx]
 
         logger.info(f"Processing claim: {claim_node} (similarity: {claim_sim:.3f})")
 
-        # Get pre-computed retrieval results for this claim
-        if claim_node not in claim_retrieval_results:
-            logger.debug(f"No pre-computed results for {claim_node}")
-            continue
-
-        claim_data = claim_retrieval_results[claim_node]
-        retrieval_results = claim_data.get('retrieval_results', [])
-
-        # Store claim details
         node_data = graph.nodes.get(claim_node, {})
+        chunks_found = 0
+
+        # Step 4: Traverse REVIEWS → CONTAINS to find chunks
+        for neighbor in graph.neighbors(claim_node):
+            edge_data = graph[claim_node][neighbor]
+            if edge_data.get('edge_type') != 'REVIEWS':
+                continue
+
+            doc_node = neighbor
+
+            for doc_neighbor in graph.neighbors(doc_node):
+                doc_edge_data = graph[doc_node][doc_neighbor]
+                if (doc_edge_data.get('edge_type') != 'CONTAINS' or
+                        graph.nodes[doc_neighbor].get('type') != 'chunk'):
+                    continue
+
+                chunk_id = doc_neighbor
+
+                if chunk_id not in chunk_to_dist_idx:
+                    continue
+
+                # Compute topic distribution similarity (1 - JSD)
+                dist_idx = chunk_to_dist_idx[chunk_id]
+                chunk_distribution = chunk_topic_distributions[dist_idx]
+                js_divergence = jensenshannon(query_distribution, chunk_distribution)
+                topic_similarity = 1.0 - float(js_divergence)
+
+                # Get topic confidence (max HAS_TOPIC weight for this chunk)
+                topic_confidence = 0.5  # default when no HAS_TOPIC found
+                if graph.has_node(chunk_id):
+                    for c_neighbor in graph.neighbors(chunk_id):
+                        c_edge_data = graph[chunk_id][c_neighbor]
+                        if c_edge_data.get('edge_type') == 'HAS_TOPIC':
+                            topic_confidence = max(topic_confidence, c_edge_data.get('weight', 0.0))
+
+                # Score = claim_sim × topic_sim × topic_conf ∈ [0, 1]
+                final_score = claim_sim * topic_similarity * topic_confidence
+
+                if chunk_id not in scores or final_score > scores[chunk_id]:
+                    scores[chunk_id] = final_score
+                chunks_found += 1
+
         matched_claims_details.append({
             'claim_node': claim_node,
             'claim_text': claim_text,
             'query_similarity': claim_sim,
             'rating': node_data.get('rating', ''),
-            'chunks_found': len(retrieval_results)
+            'chunks_found': chunks_found
         })
-
-        # Step 4: Score each chunk from claim traversal
-        for result in retrieval_results:
-            chunk_id = result['chunk_id']
-            traversal_relevance = result['score_total']  # Pre-computed relevance
-
-            # Skip if chunk not in distribution mapping
-            if chunk_id not in chunk_to_dist_idx:
-                continue
-
-            # Get chunk topic distribution
-            dist_idx = chunk_to_dist_idx[chunk_id]
-            chunk_distribution = chunk_topic_distributions[dist_idx]
-
-            # Compute topic distribution similarity (1 - JSD)
-            js_divergence = jensenshannon(query_distribution, chunk_distribution)
-            topic_similarity = 1.0 - js_divergence
-
-            # Get topic confidence (max HAS_TOPIC weight for this chunk)
-            topic_confidence = 0.0
-            if graph.has_node(chunk_id):
-                for neighbor in graph.neighbors(chunk_id):
-                    edge_data = graph[chunk_id][neighbor]
-                    if edge_data.get('edge_type') == 'HAS_TOPIC':
-                        weight = edge_data.get('weight', 0.0)
-                        topic_confidence = max(topic_confidence, weight)
-
-            # If no topics found, use default
-            if topic_confidence == 0.0:
-                topic_confidence = 0.5
-
-            # Compute final score
-            # score = claim_sim × traversal_rel × topic_sim × topic_conf
-            final_score = claim_sim * traversal_relevance * topic_similarity * topic_confidence
-
-            # Keep maximum score across all claims
-            if chunk_id not in scores or final_score > scores[chunk_id]:
-                scores[chunk_id] = final_score
-
-    # Normalize scores (min-max)
-    if scores:
-        min_score = min(scores.values())
-        max_score = max(scores.values())
-        if max_score > min_score:
-            scores = {
-                k: (v - min_score) / (max_score - min_score)
-                for k, v in scores.items()
-            }
 
     logger.info(f"Found {len(scores)} chunks via claim-topic traversal")
     if scores:
         logger.info(f"Top score: {max(scores.values()):.3f}")
         logger.info(f"Mean score: {np.mean(list(scores.values())):.3f}")
 
-    return dict(scores), matched_claims_details
+    return scores, matched_claims_details

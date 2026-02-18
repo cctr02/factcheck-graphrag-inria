@@ -660,28 +660,8 @@ class KnowledgeGraphBuilder:
                 add_claims_and_edges(self.graph, claims, claim_to_docs, self.logger, self._log_step_completion)
                 self.build_timings["Step 9: Claims & REVIEWS"] = time.time() - step_start
 
-                # Step 10: Pre-compute claim retrieval (run 4 strategies for each claim)
-                self.logger.info("\nStep 10: Pre-computing claim retrieval results...")
-                step_start = time.time()
-                claim_retrieval_results = precompute_claim_retrieval(
-                    graph=self.graph,
-                    claims=claims,
-                    topic_model=topic_model,
-                    probabilities=probabilities,
-                    chunk_ids=chunk_ids,
-                    embedding_model=self.embedding_model,
-                    nlp=self.nlp,
-                    entity_types=set(self.entity_types),
-                    logger=self.logger
-                )
-                self.build_timings["Step 10: Claim Pre-Retrieval"] = time.time() - step_start
-                if cm:
-                    cm.save("step_06_graph_claims", {
-                        'graph': self.graph,
-                        'claim_retrieval_results': claim_retrieval_results
-                    })
-        else:
-            claim_retrieval_results = {}
+        # Note: S5/S6/S7 claim retrieval is computed on-the-fly at retrieval time (no precompute)
+        claim_retrieval_results = {}
 
         # Calculate total build time
         total_build_time = time.time() - self.build_start_time

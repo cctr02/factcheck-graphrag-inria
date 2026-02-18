@@ -75,15 +75,8 @@ def retrieve_topic_distribution(
 
         scores[chunk_id] = float(similarity)
 
-    # Normalize scores (min-max normalization)
-    if scores:
-        min_score = min(scores.values())
-        max_score = max(scores.values())
-        if max_score > min_score:
-            scores = {
-                k: (v - min_score) / (max_score - min_score)
-                for k, v in scores.items()
-            }
+    # Scores are already in [0, 1] (1 - JSD where JSD ∈ [0, 1])
+    # No normalization needed
 
     logger.info(f"Found {len(scores)} chunks with topic distribution scores")
     if scores:
