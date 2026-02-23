@@ -72,6 +72,8 @@ class HybridRetriever:
         entity_relevance_threshold: float = 0.1,
         theme_relevance_threshold: float = 0.1,
         claim_top_k: int = 5,
+        explore_similar_claims: bool = True,
+        max_claim_expansion_depth: int = 1,
         keyphrase_top_n: int = 5,
         keybert_model = None,
         graph_id: Optional[str] = None,
@@ -100,6 +102,8 @@ class HybridRetriever:
             entity_relevance_threshold: Minimum relevance to continue entity traversal
             theme_relevance_threshold: Minimum relevance to continue theme traversal
             claim_top_k: Number of top claims to consider for Strategies 5, 6, 7
+            explore_similar_claims: If True, explore claims connected via SIMILAR_CLAIM edges in Strategy 5
+            max_claim_expansion_depth: Maximum depth for exploring SIMILAR_CLAIM edges (default: 1)
             keyphrase_top_n: Number of keyphrases to extract for Strategy 7
             keybert_model: Optional KeyBERT model for Strategy 7 (lazy-loaded if None)
             graph_id: Optional graph ID for loading cached data
@@ -128,6 +132,8 @@ class HybridRetriever:
         self.entity_relevance_threshold = entity_relevance_threshold
         self.theme_relevance_threshold = theme_relevance_threshold
         self.claim_top_k = claim_top_k
+        self.explore_similar_claims = explore_similar_claims
+        self.max_claim_expansion_depth = max_claim_expansion_depth
         self.keyphrase_top_n = keyphrase_top_n
 
         # KeyBERT model for Strategy 7 (lazy-loaded if not provided)
@@ -381,7 +387,9 @@ class HybridRetriever:
             claim_texts=self.claim_texts,
             claim_retrieval_results=self.claim_retrieval_results,
             claim_top_k=self.claim_top_k,
-            logger=self.logger
+            logger=self.logger,
+            explore_similar_claims=self.explore_similar_claims,
+            max_expansion_depth=self.max_claim_expansion_depth
         )
 
     def retrieve_claim_topic_traversal(self, query: str) -> Tuple[Dict[str, float], List[Dict]]:

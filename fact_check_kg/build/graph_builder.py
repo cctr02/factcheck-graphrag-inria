@@ -48,7 +48,8 @@ from fact_check_kg.build.graph_nodes_theme import (
 )
 from fact_check_kg.build.graph_nodes_claims import (
     add_claims_and_edges,
-    precompute_claim_retrieval
+    precompute_claim_retrieval,
+    add_claim_similarity_edges
 )
 from fact_check_kg.build.topic_visualization import generate_topic_html_report
 
@@ -75,6 +76,7 @@ class KnowledgeGraphBuilder:
     - TEMPORAL_DIST: DATE ↔ DATE (weighted by exponential decay based on year difference)
     - CO_PRESENCE: Theme ↔ Theme (weighted by inverse frequency of co-occurrence in chunks)
     - REVIEWS: Claim → Document (links claims to their reviewed documents)
+    - SIMILAR_CLAIM: Claim ↔ Claim (weighted by embedding cosine similarity, enables claim expansion in retrieval)
     """
 
     def __init__(
@@ -84,6 +86,7 @@ class KnowledgeGraphBuilder:
         entity_types: List[str],
         co_occur_threshold: int,
         semantic_sim_threshold: float,
+        claim_similarity_threshold: float,
         topic_prob_threshold: float,
         temporal_max_year_gap: int,
         temporal_decay_rate: float,
@@ -119,7 +122,8 @@ class KnowledgeGraphBuilder:
             ner_model: spaCy model name for NER
             entity_types: List of entity types to extract (PERSON, ORG, etc.)
             co_occur_threshold: Minimum co-occurrences to create edge
-            semantic_sim_threshold: Minimum similarity to create edge
+            semantic_sim_threshold: Minimum similarity to create entity/theme edges
+            claim_similarity_threshold: Minimum similarity to create SIMILAR_CLAIM edges between claims
             topic_prob_threshold: Minimum probability to create HAS_TOPIC edge
             temporal_max_year_gap: Maximum year difference for temporal similarity
             temporal_decay_rate: Decay rate for exponential temporal similarity
@@ -159,6 +163,7 @@ class KnowledgeGraphBuilder:
         self.entity_types = entity_types
         self.co_occur_threshold = co_occur_threshold
         self.semantic_sim_threshold = semantic_sim_threshold
+        self.claim_similarity_threshold = claim_similarity_threshold
         self.topic_prob_threshold = topic_prob_threshold
 
         # Temporal similarity configuration
@@ -494,6 +499,18 @@ class KnowledgeGraphBuilder:
             step_start = time.time()
             add_claims_and_edges(self.graph, claims, claim_to_docs, self.logger, self._log_step_completion)
             self.build_timings["Step 9: Claims & REVIEWS"] = time.time() - step_start
+
+            # Step 9b: Add claim similarity edges (Claim ↔ Claim)
+            self.logger.info("\nStep 9b: Adding SIMILAR_CLAIM edges between semantically similar claims...")
+            step_start = time.time()
+            add_claim_similarity_edges(
+                graph=self.graph,
+                claims=claims,
+                embedding_model=self.embedding_model,
+                similarity_threshold=self.claim_similarity_threshold,
+                logger=self.logger
+            )
+            self.build_timings["Step 9b: SIMILAR_CLAIM edges"] = time.time() - step_start
 
             # Step 10: Pre-compute claim retrieval (run 4 strategies for each claim)
             self.logger.info("\nStep 10: Pre-computing claim retrieval results...")

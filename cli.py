@@ -421,6 +421,8 @@ def retrieve(claim, alpha, beta, gamma, delta, epsilon, zeta, eta, top_k, graph_
             entity_relevance_threshold=retrieval_config.retrieval.entity_relevance_threshold,
             theme_relevance_threshold=retrieval_config.retrieval.theme_relevance_threshold,
             claim_top_k=claim_top_k,
+            explore_similar_claims=retrieval_config.retrieval.explore_similar_claims,
+            max_claim_expansion_depth=retrieval_config.retrieval.max_claim_expansion_depth,
             keyphrase_top_n=keyphrase_top_n,
             graph_id=graph_id,
             cache_dir=retrieval_config.paths.embeddings_dir,

@@ -126,6 +126,7 @@ def main():
         entity_types=config.graph_construction.entity_types,
         co_occur_threshold=config.graph_construction.co_occurrence_threshold,
         semantic_sim_threshold=config.graph_construction.semantic_similarity_threshold,
+        claim_similarity_threshold=config.graph_construction.claim_similarity_threshold,
         topic_prob_threshold=config.graph_construction.topic_probability_threshold,
         temporal_max_year_gap=config.graph_construction.temporal_max_year_gap,
         temporal_decay_rate=config.graph_construction.temporal_decay_rate,

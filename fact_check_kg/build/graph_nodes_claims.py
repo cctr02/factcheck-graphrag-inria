@@ -419,3 +419,94 @@ def precompute_claim_retrieval(
 
     logger.info(f"Pre-computed retrieval for {len(claim_retrieval_results)} claims")
     return claim_retrieval_results
+
+
+def add_claim_similarity_edges(
+    graph: nx.Graph,
+    claims: List[Dict],
+    embedding_model,
+    similarity_threshold: float = 0.7,
+    logger: logging.Logger = None
+):
+    """
+    Add semantic similarity edges between claims based on embedding cosine similarity.
+
+    Creates SIMILAR_CLAIM edges between claims that exceed the similarity threshold.
+    This enables retrieval strategies to explore semantically related claims during search.
+
+    Algorithm:
+    1. Compute embeddings for all claims (batch processing)
+    2. Calculate pairwise cosine similarities
+    3. Add edges for pairs exceeding threshold
+
+    Args:
+        graph: NetworkX graph to add edges to
+        claims: List of claim dictionaries with 'claim_id' and 'text'
+        embedding_model: SentenceTransformer model for embeddings
+        similarity_threshold: Minimum cosine similarity to create edge (default: 0.7)
+        logger: Logger instance
+
+    Edge Attributes:
+        edge_type: "SIMILAR_CLAIM"
+        weight: cosine similarity score (0.7 to 1.0)
+
+    Example:
+        >>> add_claim_similarity_edges(graph, claims, model, threshold=0.7, logger=logger)
+        Added 142 SIMILAR_CLAIM edges (threshold >= 0.7)
+    """
+    if logger is None:
+        logger = logging.getLogger(__name__)
+
+    start_time = time.time()
+
+    # Filter valid claims with text
+    valid_claims = [(c['claim_id'], c.get('text', '')) for c in claims if c.get('text', '')]
+    if len(valid_claims) < 2:
+        logger.warning("Not enough claims to compute similarities (need at least 2)")
+        return
+
+    claim_ids, claim_texts = zip(*valid_claims)
+    logger.info(f"Computing claim similarities for {len(claim_texts)} claims...")
+
+    # Batch compute embeddings
+    logger.info("Computing claim embeddings (batch)...")
+    claim_embeddings = embedding_model.encode(
+        list(claim_texts),
+        show_progress_bar=True,
+        normalize_embeddings=True,
+        batch_size=64
+    )
+
+    # Compute pairwise similarities
+    logger.info("Computing pairwise similarities...")
+    similarity_matrix = np.matmul(claim_embeddings, claim_embeddings.T)
+
+    # Add edges for pairs exceeding threshold
+    edges_added = 0
+    for i in range(len(claim_ids)):
+        for j in range(i + 1, len(claim_ids)):
+            similarity = similarity_matrix[i, j]
+
+            if similarity >= similarity_threshold:
+                claim_node_i = f"claim::{claim_ids[i]}"
+                claim_node_j = f"claim::{claim_ids[j]}"
+
+                # Add edge (undirected graph, so only add once)
+                if graph.has_node(claim_node_i) and graph.has_node(claim_node_j):
+                    graph.add_edge(
+                        claim_node_i,
+                        claim_node_j,
+                        edge_type="SIMILAR_CLAIM",
+                        weight=float(similarity)
+                    )
+                    edges_added += 1
+
+    elapsed = time.time() - start_time
+    logger.info(f"Added {edges_added} SIMILAR_CLAIM edges (threshold >= {similarity_threshold}) in {elapsed:.2f}s")
+
+    # Log statistics
+    if edges_added > 0:
+        avg_degree = (2 * edges_added) / len(claim_ids)  # factor 2 because undirected
+        logger.info(f"Average claim similarity degree: {avg_degree:.2f}")
+
+    return edges_added

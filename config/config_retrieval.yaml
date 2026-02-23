@@ -40,6 +40,8 @@ retrieval:
   top_k: 10  # Number of results to return
   theme_threshold: 0.01  # Minimum confidence for theme detection (lowered for graphs with fewer topics)
   claim_top_k: 5  # Number of top similar claims to consider for Strategies 5, 6, 7
+  explore_similar_claims: true  # If true, explore claims connected via SIMILAR_CLAIM edges in Strategy 5
+  max_claim_expansion_depth: 1  # Maximum depth for exploring SIMILAR_CLAIM edges (1 = direct neighbors only)
   keyphrase_top_n: 5  # Number of keyphrases to extract from query for Strategy 7
 
   # Path scoring weights
@@ -75,6 +77,7 @@ visualization:
     chunk: "#ffd54f"  # Yellow
     theme: "#ab47bc"  # Purple
     entity: "#66bb6a"  # Green
+    claim: "#ff7043"  # Deep Orange
     central_entity: "#ff1744"  # Red (for focused views)
 
   # Edge colors by type
@@ -84,6 +87,8 @@ visualization:
     MENTIONS: "#66bb6a"  # Green
     CO_OCCURS: "#ef5350"  # Red
     SEMANTIC_SIM: "#42a5f5"  # Blue
+    REVIEWS: "#26c6da"  # Cyan
+    SIMILAR_CLAIM: "#ffa726"  # Orange
 
   # Physics simulation
   physics:

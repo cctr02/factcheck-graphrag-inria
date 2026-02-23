@@ -535,7 +535,12 @@ class RetrievalResultsManager:
             report.append("-" * 80)
             for i, claim in enumerate(formatted["metadata"]["matched_claims"], 1):
                 preview = claim["claim_text"][:120] + "..." if len(claim["claim_text"]) > 120 else claim["claim_text"]
-                report.append(f"  {i}. [sim={claim['similarity']:.4f}] [rating={claim.get('rating', 'N/A')}] {preview}")
+                # Check for expansion info
+                depth = claim.get('expansion_depth', 0)
+                source = claim.get('source_claim', 'direct')
+                depth_str = f" [depth={depth}]" if depth > 0 else ""
+                source_str = f" (via {source})" if source != 'direct' and source else ""
+                report.append(f"  {i}. [sim={claim['similarity']:.4f}] [rating={claim.get('rating', 'N/A')}]{depth_str}{source_str} {preview}")
             report.append("")
 
         # Statistics

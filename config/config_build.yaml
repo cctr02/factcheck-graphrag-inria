@@ -24,6 +24,9 @@ graph_construction:
   co_occurrence_threshold: 2  # Minimum co-occurrences to create edge
   semantic_similarity_threshold: 0.8  # Minimum similarity for entity edges
 
+  # Claim similarity edges
+  claim_similarity_threshold: 0.7  # Minimum cosine similarity for SIMILAR_CLAIM edges between claims
+
   # Temporal similarity (for DATE entities)
   temporal_max_year_gap: 10  # Maximum year difference to create TEMPORAL_DIST edges
   temporal_decay_rate: 0.15  # Exponential decay rate for temporal similarity (weight = exp(-rate * year_diff))
