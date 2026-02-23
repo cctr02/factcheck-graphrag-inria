@@ -81,7 +81,11 @@ class RetrievalResultsManager:
         config: dict = None,
         config_retrieval: dict = None,
         matched_claims: List[Dict] = None,
+        matched_claims_s5: List[Dict] = None,
+        matched_claims_s6: List[Dict] = None,
+        matched_claims_s7: List[Dict] = None,
         detected_themes: List[Dict] = None,
+        extracted_entities: Dict = None,
         random_samples: List[Dict] = None
     ) -> Dict:
         """
@@ -132,20 +136,28 @@ class RetrievalResultsManager:
         if config_retrieval is not None:
             formatted["metadata"]["config_retrieval"] = config_retrieval
 
-        # Add matched claims (query expansion) if provided
-        # Accepts both formats: from retrieve() (claim_node/query_similarity)
-        # and pre-formatted (claim_id/similarity)
-        if matched_claims:
-            formatted["metadata"]["matched_claims"] = [
+        # Add matched claims — prefer per-strategy lists (s5/s6/s7), fall back to legacy matched_claims
+        def _format_claims(claims):
+            return [
                 {
                     "claim_id": c.get("claim_id", c.get("claim_node", "")),
                     "claim_text": c.get("claim_text", ""),
                     "similarity": round(c.get("similarity", c.get("query_similarity", 0.0)), 4),
                     "rating": c.get("rating", ""),
-                    "num_chunks": len(c.get("retrieval_results", [])),
+                    "chunks_found": c.get("chunks_found", 0),
+                    "source": c.get("source", "direct"),
                 }
-                for c in matched_claims
+                for c in claims
             ]
+
+        effective_s5 = matched_claims_s5 or matched_claims  # backward-compat
+        if effective_s5:
+            formatted["metadata"]["matched_claims_s5"] = _format_claims(effective_s5)
+        if matched_claims_s6:
+            formatted["metadata"]["matched_claims_s6"] = _format_claims(matched_claims_s6)
+        if matched_claims_s7:
+            s7_list = matched_claims_s7.get('matched_claims', []) if isinstance(matched_claims_s7, dict) else matched_claims_s7
+            formatted["metadata"]["matched_claims_s7"] = _format_claims(s7_list)
 
         # Add detected themes (S3 query classification) if provided
         if detected_themes:
@@ -159,6 +171,17 @@ class RetrievalResultsManager:
                 }
                 for t in detected_themes
             ]
+
+        # Add extracted entities (S4 entity extraction) if provided
+        if extracted_entities:
+            formatted["metadata"]["extracted_entities"] = {
+                "extracted": [
+                    {"text": text, "type": etype}
+                    for text, etype in extracted_entities.get("extracted", [])
+                ],
+                "found_in_graph": extracted_entities.get("found_in_graph", []),
+                "not_in_graph": extracted_entities.get("not_in_graph", []),
+            }
 
         # Add random sample chunks for comparison if provided
         if random_samples:
@@ -422,10 +445,14 @@ class RetrievalResultsManager:
         config: dict = None,
         config_retrieval: dict = None,
         matched_claims: List[Dict] = None,
+        matched_claims_s5: List[Dict] = None,
+        matched_claims_s6: List[Dict] = None,
+        matched_claims_s7: List[Dict] = None,
         epsilon: float = 0.0,
         zeta: float = 0.0,
         eta: float = 0.0,
         detected_themes: List[Dict] = None,
+        extracted_entities: Dict = None,
         random_samples: List[Dict] = None
     ) -> Tuple[str, str]:
         """
@@ -471,7 +498,11 @@ class RetrievalResultsManager:
             epsilon=epsilon, zeta=zeta, eta=eta,
             config=config, config_retrieval=config_retrieval,
             matched_claims=matched_claims,
+            matched_claims_s5=matched_claims_s5,
+            matched_claims_s6=matched_claims_s6,
+            matched_claims_s7=matched_claims_s7,
             detected_themes=detected_themes,
+            extracted_entities=extracted_entities,
             random_samples=random_samples
         )
 
@@ -556,13 +587,46 @@ class RetrievalResultsManager:
                 report.append(f"      Keywords: {keywords_str}")
             report.append("")
 
-        # Matched claims (query expansion)
-        if "matched_claims" in formatted.get("metadata", {}):
-            report.append("MATCHED CLAIMS (Query Expansion)")
+        # Extracted entities (S4)
+        ent_meta = formatted.get("metadata", {}).get("extracted_entities")
+        if ent_meta:
+            report.append("EXTRACTED ENTITIES (S4 — Entity Graph Traversal)")
             report.append("-" * 80)
-            for i, claim in enumerate(formatted["metadata"]["matched_claims"], 1):
-                preview = claim["claim_text"][:120] + "..." if len(claim["claim_text"]) > 120 else claim["claim_text"]
-                report.append(f"  {i}. [sim={claim['similarity']:.4f}] [rating={claim.get('rating', 'N/A')}] {preview}")
+            extracted = ent_meta.get("extracted", [])
+            found = set(ent_meta.get("found_in_graph", []))
+            not_found = set(ent_meta.get("not_in_graph", []))
+            if extracted:
+                for ent in extracted:
+                    node_id = f"entity::{ent['type']}::{ent['text']}"
+                    status = "[in graph]" if node_id in found else "[missing] "
+                    report.append(f"  {status} {ent['type']}: {ent['text']}")
+            else:
+                report.append("  (no entities extracted from query)")
+            report.append(f"  → {len(found)} found in graph, {len(not_found)} missing")
+            report.append("")
+
+        # Matched claims — show S5 direct/graph (top 3 each), skip S6/S7 (same claim matching)
+        s5_claims = formatted.get("metadata", {}).get("matched_claims_s5", [])
+        if s5_claims:
+            direct = [c for c in s5_claims if c.get("source") == "direct"]
+            graph  = [c for c in s5_claims if c.get("source") != "direct"]
+            report.append("MATCHED CLAIMS (S5 — Direct semantic similarity)")
+            report.append("-" * 80)
+            if direct:
+                for c in direct[:3]:
+                    preview = c["claim_text"][:120] + "..." if len(c["claim_text"]) > 120 else c["claim_text"]
+                    report.append(f"  [direct] [sim={c['similarity']:.4f}] [rating={c.get('rating','N/A')}] {preview}")
+            else:
+                report.append("  (none)")
+            report.append("")
+            report.append("MATCHED CLAIMS (S5 — Embedding-expanded neighbors)")
+            report.append("-" * 80)
+            if graph:
+                for c in graph[:3]:
+                    preview = c["claim_text"][:120] + "..." if len(c["claim_text"]) > 120 else c["claim_text"]
+                    report.append(f"  [embed]  [sim={c['similarity']:.4f}] [rating={c.get('rating','N/A')}] {preview}")
+            else:
+                report.append("  (none — all below expansion_threshold)")
             report.append("")
 
         # Statistics

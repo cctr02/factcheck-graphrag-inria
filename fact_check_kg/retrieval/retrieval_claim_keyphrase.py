@@ -29,6 +29,8 @@ import numpy as np
 import networkx as nx
 from keybert import KeyBERT
 
+from fact_check_kg.retrieval.retrieval_claims import expand_claims_via_embeddings
+
 
 def retrieve_claim_keyphrase_similarity(
     query: str,
@@ -40,7 +42,7 @@ def retrieve_claim_keyphrase_similarity(
     claim_texts: List[str],
     claim_top_k: int,
     keyphrase_top_n: int,
-    logger: logging.Logger
+    logger: logging.Logger,
 ) -> Tuple[Dict[str, float], List[Dict]]:
     """
     Strategy 7: Claim-Based KeyBERT Phrase Similarity via REVIEWS graph edges.
@@ -71,7 +73,7 @@ def retrieve_claim_keyphrase_similarity(
         - scores: Dictionary mapping chunk_id to score ∈ [0, 1]
         - details: Details including extracted keyphrases and matched claims
     """
-    logger.info("\n--- Strategy 7: Claim-Based KeyBERT Phrase Similarity ---")
+    logger.info("\n--- Strategy 7: Claim-Based KeyBERT Phrase Similarity (+ CLAIM_SIM expansion) ---")
 
     details = {
         'query_keyphrases': [],
@@ -115,7 +117,7 @@ def retrieve_claim_keyphrase_similarity(
         normalize_embeddings=True
     )
 
-    # Step 3: Find similar claims
+    # Step 3: Find similar claims + expand via CLAIM_SIM edges
     query_embedding = embedding_model.encode(
         [query],
         normalize_embeddings=True
@@ -124,18 +126,26 @@ def retrieve_claim_keyphrase_similarity(
     claim_similarities = np.matmul(claim_embeddings, query_embedding)
     top_claim_indices = np.argsort(claim_similarities)[-claim_top_k:][::-1]
 
-    # Step 4: Process each matched claim
+    logger.info(f"Claim matching (direct top-{claim_top_k} + embedding expansion):")
+    direct_claims, expanded_claims = expand_claims_via_embeddings(
+        top_indices=list(top_claim_indices),
+        claim_nodes=claim_nodes,
+        similarities=claim_similarities,
+        claim_embeddings=claim_embeddings,
+        max_expanded=claim_top_k,
+        expansion_threshold=0.0,
+        graph=graph,
+        logger=logger,
+    )
+    all_claims_to_process = direct_claims + expanded_claims
+
+    # Step 4: Process each matched claim (direct + expanded)
     scores = {}
     chunk_embed_cache = {}  # Cache chunk embeddings to avoid recomputing
 
-    for claim_idx in top_claim_indices:
-        claim_node = claim_nodes[claim_idx]
-        claim_sim = max(0.0, float(claim_similarities[claim_idx]))  # Clip to [0, 1]
-        claim_text = claim_texts[claim_idx]
-
-        logger.info(f"Processing claim: {claim_node} (similarity: {claim_sim:.3f})")
-
+    for claim_node, claim_sim in all_claims_to_process:
         node_data = graph.nodes.get(claim_node, {})
+        claim_text = node_data.get('text', '')
         chunks_to_embed = []
         chunk_ids_batch = []
 
@@ -144,9 +154,7 @@ def retrieve_claim_keyphrase_similarity(
             edge_data = graph[claim_node][neighbor]
             if edge_data.get('edge_type') != 'REVIEWS':
                 continue
-
             doc_node = neighbor
-
             for doc_neighbor in graph.neighbors(doc_node):
                 doc_edge_data = graph[doc_node][doc_neighbor]
                 if (doc_edge_data.get('edge_type') == 'CONTAINS' and
@@ -168,7 +176,7 @@ def retrieve_claim_keyphrase_similarity(
             for cid, emb in zip(chunk_ids_batch, batch_embeddings):
                 chunk_embed_cache[cid] = emb
 
-        # Step 7: Score each chunk
+        # Step 7: Score each chunk within the claim-linked preselection
         chunks_scored = 0
         for neighbor in graph.neighbors(claim_node):
             edge_data = graph[claim_node][neighbor]
@@ -206,9 +214,12 @@ def retrieve_claim_keyphrase_similarity(
             'claim_text': claim_text,
             'query_similarity': claim_sim,
             'rating': node_data.get('rating', ''),
-            'chunks_found': chunks_scored
+            'chunks_found': chunks_scored,
+            'source': 'direct' if any(cn == claim_node for cn, _ in direct_claims) else 'graph'
         })
 
+    logger.info(f"Total matched claims: {len(all_claims_to_process)} "
+                f"({len(direct_claims)} direct + {len(expanded_claims)} via CLAIM_SIM)")
     logger.info(f"Found {len(scores)} chunks via claim-keyphrase similarity")
     if scores:
         logger.info(f"Top score: {max(scores.values()):.3f}")

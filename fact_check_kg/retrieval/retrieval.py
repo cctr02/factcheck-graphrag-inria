@@ -316,7 +316,7 @@ class HybridRetriever:
             logger=self.logger
         )
 
-    def retrieve_entity(self, claim: str) -> Dict[str, float]:
+    def retrieve_entity(self, claim: str) -> Tuple[Dict[str, float], Dict]:
         """Strategy 4: Entity Graph Traversal using graph traversal with relevance propagation."""
         return _retrieve_entity(
             claim=claim,
@@ -348,7 +348,7 @@ class HybridRetriever:
             claim_nodes=self.claim_nodes,
             claim_texts=self.claim_texts,
             claim_top_k=self.claim_top_k,
-            logger=self.logger
+            logger=self.logger,
         )
 
     def retrieve_claim_topic_traversal(self, query: str) -> Tuple[Dict[str, float], List[Dict]]:
@@ -364,7 +364,7 @@ class HybridRetriever:
             claim_nodes=self.claim_nodes,
             claim_texts=self.claim_texts,
             claim_top_k=self.claim_top_k,
-            logger=self.logger
+            logger=self.logger,
         )
 
     def retrieve_claim_keyphrase_similarity(self, query: str) -> Tuple[Dict[str, float], List[Dict]]:
@@ -385,7 +385,7 @@ class HybridRetriever:
             claim_texts=self.claim_texts,
             claim_top_k=self.claim_top_k,
             keyphrase_top_n=self.keyphrase_top_n,
-            logger=self.logger
+            logger=self.logger,
         )
 
     def retrieve(self, claim: str) -> List[Dict]:
@@ -437,7 +437,7 @@ class HybridRetriever:
 
         # Strategy 4: Entity Graph Traversal
         t0 = time.time()
-        S4 = self.retrieve_entity(claim)
+        S4, entity_info_s4 = self.retrieve_entity(claim)
         strategy_timings['S4_entity'] = time.time() - t0
 
         # Strategy 5: Claim-Based Retrieval (using pre-computed results)
@@ -511,7 +511,7 @@ class HybridRetriever:
         # Return top-K
         top_results = results[:self.top_k]
 
-        # Add claim, matched claims, and detected themes info to results
+        # Add claim, matched claims, detected themes, and entity info to results
         for i, result in enumerate(top_results):
             result['claim'] = claim
             if i == 0:
@@ -523,6 +523,8 @@ class HybridRetriever:
                     result['matched_claims_s7'] = matched_claims_s7
                 if detected_themes:
                     result['detected_themes'] = detected_themes
+                if entity_info_s4:
+                    result['entity_info_s4'] = entity_info_s4
                 if random_samples:
                     result['random_samples'] = random_samples
 
@@ -530,22 +532,35 @@ class HybridRetriever:
         if matched_claims:
             self.logger.info(f"\n--- Matched Claims (S5) ---")
             for mc in matched_claims:
-                self.logger.info(f"  Claim: {mc['claim_node']} (similarity: {mc['query_similarity']:.3f})")
-                self.logger.info(f"    Text: {mc['claim_text'][:80]}...")
-                self.logger.info(f"    Pre-computed chunks: {len(mc['retrieval_results'])}")
+                source_tag = f"[{mc.get('source', 'direct')}]"
+                self.logger.info(f"  {source_tag} Claim: {mc['claim_node']} (sim: {mc['query_similarity']:.3f})")
+                preview = mc['claim_text'][:80] + "..." if len(mc['claim_text']) > 80 else mc['claim_text']
+                self.logger.info(f"    Text: {preview}")
+                self.logger.info(f"    Chunks found via REVIEWS: {mc['chunks_found']}")
 
         if matched_claims_s6:
             self.logger.info(f"\n--- Matched Claims (S6 Topic) ---")
             for mc in matched_claims_s6:
-                self.logger.info(f"  Claim: {mc['claim_node']} (similarity: {mc['query_similarity']:.3f})")
+                source_tag = f"[{mc.get('source', 'direct')}]"
+                self.logger.info(f"  {source_tag} Claim: {mc['claim_node']} (sim: {mc['query_similarity']:.3f})")
+                preview = mc['claim_text'][:80] + "..." if len(mc['claim_text']) > 80 else mc['claim_text']
+                self.logger.info(f"    Text: {preview}")
                 self.logger.info(f"    Rating: {mc.get('rating', 'N/A')} | Chunks found: {mc['chunks_found']}")
 
         # S7 returns a dict with 'matched_claims' key
         s7_claims = matched_claims_s7.get('matched_claims', []) if isinstance(matched_claims_s7, dict) else matched_claims_s7
         if s7_claims:
+            s7_keyphrases = matched_claims_s7.get('query_keyphrases', []) if isinstance(matched_claims_s7, dict) else []
+            if s7_keyphrases:
+                self.logger.info(f"\n--- S7 Query Keyphrases ---")
+                for phrase, score in s7_keyphrases:
+                    self.logger.info(f"  '{phrase}': {score:.3f}")
             self.logger.info(f"\n--- Matched Claims (S7 KeyPhrase) ---")
             for mc in s7_claims:
-                self.logger.info(f"  Claim: {mc['claim_node']} (similarity: {mc['query_similarity']:.3f})")
+                source_tag = f"[{mc.get('source', 'direct')}]"
+                self.logger.info(f"  {source_tag} Claim: {mc['claim_node']} (sim: {mc['query_similarity']:.3f})")
+                preview = mc['claim_text'][:80] + "..." if len(mc['claim_text']) > 80 else mc['claim_text']
+                self.logger.info(f"    Text: {preview}")
                 self.logger.info(f"    Rating: {mc.get('rating', 'N/A')} | Chunks found: {mc['chunks_found']}")
 
         self.logger.info(f"\nTop {len(top_results)} results:")

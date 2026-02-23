@@ -485,18 +485,24 @@ def retrieve(claim, alpha, beta, gamma, delta, epsilon, zeta, eta, top_k, graph_
                 print("SAVING RESULTS")
                 print("=" * 80)
 
-                # Extract matched_claims, detected_themes, random_samples from first result (set by retrieve())
-                matched_claims = results[0].get('matched_claims') if results else None
+                # Extract matched_claims, detected_themes, entity_info, random_samples from first result
+                matched_claims_s5 = results[0].get('matched_claims_s5') if results else None
+                matched_claims_s6 = results[0].get('matched_claims_s6') if results else None
+                matched_claims_s7 = results[0].get('matched_claims_s7') if results else None
                 detected_themes = results[0].get('detected_themes') if results else None
+                entity_info_s4 = results[0].get('entity_info_s4') if results else None
                 random_samples = results[0].get('random_samples') if results else None
 
                 json_path, text_path = results_manager.save_results(
                     claim_text, results, alpha, beta, gamma, delta, rankings,
                     graph_id=graph_id, custom_name=name,
                     config=raw_config, config_retrieval=raw_config_retrieval,
-                    matched_claims=matched_claims,
+                    matched_claims_s5=matched_claims_s5,
+                    matched_claims_s6=matched_claims_s6,
+                    matched_claims_s7=matched_claims_s7,
                     epsilon=epsilon, zeta=zeta, eta=eta,
                     detected_themes=detected_themes,
+                    extracted_entities=entity_info_s4,
                     random_samples=random_samples
                 )
                 print(f"Results saved to:")

@@ -48,6 +48,7 @@ from fact_check_kg.build.graph_nodes_theme import (
 )
 from fact_check_kg.build.graph_nodes_claims import (
     add_claims_and_edges,
+    add_claim_semantic_similarity,
     precompute_claim_retrieval
 )
 from fact_check_kg.build.topic_visualization import generate_topic_html_report
@@ -84,6 +85,7 @@ class KnowledgeGraphBuilder:
         entity_types: List[str],
         co_occur_threshold: int,
         semantic_sim_threshold: float,
+        claim_sim_threshold: float,
         topic_prob_threshold: float,
         temporal_max_year_gap: int,
         temporal_decay_rate: float,
@@ -119,7 +121,8 @@ class KnowledgeGraphBuilder:
             ner_model: spaCy model name for NER
             entity_types: List of entity types to extract (PERSON, ORG, etc.)
             co_occur_threshold: Minimum co-occurrences to create edge
-            semantic_sim_threshold: Minimum similarity to create edge
+            semantic_sim_threshold: Minimum similarity to create entity/theme SEMANTIC_SIM edge
+            claim_sim_threshold: Minimum similarity to create CLAIM_SIM edge (typically lower)
             topic_prob_threshold: Minimum probability to create HAS_TOPIC edge
             temporal_max_year_gap: Maximum year difference for temporal similarity
             temporal_decay_rate: Decay rate for exponential temporal similarity
@@ -188,6 +191,7 @@ class KnowledgeGraphBuilder:
         self.entity_types = entity_types
         self.co_occur_threshold = co_occur_threshold
         self.semantic_sim_threshold = semantic_sim_threshold
+        self.claim_sim_threshold = claim_sim_threshold
         self.topic_prob_threshold = topic_prob_threshold
 
         # Temporal similarity configuration
@@ -660,6 +664,22 @@ class KnowledgeGraphBuilder:
                 add_claims_and_edges(self.graph, claims, claim_to_docs, self.logger, self._log_step_completion)
                 self.build_timings["Step 9: Claims & REVIEWS"] = time.time() - step_start
 
+                # Step 9b: Add CLAIM_SIM edges (semantic similarity between claims)
+                self.logger.info("\nStep 9b: Adding CLAIM_SIM edges (Claim ↔ Claim semantic similarity)...")
+                step_start = time.time()
+                add_claim_semantic_similarity(
+                    self.graph,
+                    self.embedding_model,
+                    sim_threshold=self.claim_sim_threshold,
+                    top_k_per_claim=10,
+                    logger=self.logger,
+                    log_step_fn=self._log_step_completion
+                )
+                self.build_timings["Step 9b: Claim SEMANTIC_SIM"] = time.time() - step_start
+
+                if cm:
+                    cm.save("step_06_graph_claims", {'graph': self.graph})
+
         # Note: S5/S6/S7 claim retrieval is computed on-the-fly at retrieval time (no precompute)
         claim_retrieval_results = {}
 
@@ -689,15 +709,15 @@ class KnowledgeGraphBuilder:
         for ntype, count in sorted(node_types.items()):
             self.logger.info(f"  {ntype}: {count}")
 
-        # Edge counts by type (with SEMANTIC_SIM breakdown)
+        # Edge counts by type (with SEMANTIC_SIM and CLAIM_SIM breakdowns)
         edge_types = defaultdict(int)
         semantic_sim_entity = 0
         semantic_sim_theme = 0
+        claim_sim_count = 0
 
         for u, v, data in self.graph.edges(data=True):
             edge_type = data.get('edge_type', 'unknown')
             if edge_type == 'SEMANTIC_SIM':
-                # Separate SEMANTIC_SIM by semantic_type attribute
                 sem_type = data.get('semantic_type', 'unknown')
                 if sem_type == 'entity':
                     semantic_sim_entity += 1
@@ -705,13 +725,13 @@ class KnowledgeGraphBuilder:
                     semantic_sim_theme += 1
                 else:
                     edge_types[edge_type] += 1
+            elif edge_type == 'CLAIM_SIM':
+                claim_sim_count += 1
             else:
                 edge_types[edge_type] += 1
 
         self.logger.info(f"\nTotal edges: {self.graph.number_of_edges()}")
         for etype, count in sorted(edge_types.items()):
-            if etype == 'SEMANTIC_SIM':
-                continue  # Skip, we'll show breakdown
             self.logger.info(f"  {etype}: {count}")
 
         # Show SEMANTIC_SIM breakdown
@@ -722,6 +742,16 @@ class KnowledgeGraphBuilder:
                 self.logger.info(f"    - Entity-Entity: {semantic_sim_entity}")
             if semantic_sim_theme > 0:
                 self.logger.info(f"    - Theme-Theme: {semantic_sim_theme}")
+
+        # Show CLAIM_SIM stats
+        n_claims = node_types.get('claim', 0)
+        self.logger.info(f"\nClaim statistics:")
+        self.logger.info(f"  Claim nodes: {n_claims}")
+        self.logger.info(f"  CLAIM_SIM edges (Claim↔Claim): {claim_sim_count}")
+        if n_claims > 1:
+            max_possible = n_claims * (n_claims - 1) // 2
+            density = claim_sim_count / max_possible if max_possible > 0 else 0
+            self.logger.info(f"  Claim graph density: {density:.4f} ({claim_sim_count}/{max_possible} max possible)")
 
         self.logger.info("=" * 60)
 
@@ -774,11 +804,10 @@ class KnowledgeGraphBuilder:
             node_type = data.get('type', 'unknown')
             general_stats["nodes_by_type"][node_type] = general_stats["nodes_by_type"].get(node_type, 0) + 1
 
-        # Count edges by type (with SEMANTIC_SIM breakdown)
+        # Count edges by type (with SEMANTIC_SIM and CLAIM_SIM breakdowns)
         for u, v, data in self.graph.edges(data=True):
             edge_type = data.get('edge_type', 'unknown')
             if edge_type == 'SEMANTIC_SIM':
-                # Separate SEMANTIC_SIM by semantic_type
                 sem_type = data.get('semantic_type', 'unknown')
                 if sem_type == 'entity':
                     general_stats["edges_by_type"]["SEMANTIC_SIM_ENTITY"] = general_stats["edges_by_type"].get("SEMANTIC_SIM_ENTITY", 0) + 1
@@ -788,6 +817,17 @@ class KnowledgeGraphBuilder:
                     general_stats["edges_by_type"][edge_type] = general_stats["edges_by_type"].get(edge_type, 0) + 1
             else:
                 general_stats["edges_by_type"][edge_type] = general_stats["edges_by_type"].get(edge_type, 0) + 1
+
+        # Claim-specific statistics
+        n_claims = general_stats["nodes_by_type"].get("claim", 0)
+        n_claim_sim = general_stats["edges_by_type"].get("CLAIM_SIM", 0)
+        max_possible = n_claims * (n_claims - 1) // 2 if n_claims > 1 else 0
+        general_stats["claim_statistics"] = {
+            "n_claim_nodes": n_claims,
+            "n_claim_sim_edges": n_claim_sim,
+            "max_possible_claim_pairs": max_possible,
+            "claim_graph_density": round(n_claim_sim / max_possible, 6) if max_possible > 0 else 0.0
+        }
 
         # Save general statistics
         with open(stats_dir / f"general_stats_{timestamp}.json", 'w') as f:
@@ -944,6 +984,14 @@ Nodes by Type:
         for edge_type, count in general_stats["edges_by_type"].items():
             summary += f"  - {edge_type}: {count}\n"
 
+        # Claim statistics section
+        claim_stats_dict = general_stats.get("claim_statistics", {})
+        summary += "\n\nCLAIM STATISTICS\n" + '-' * 17 + "\n"
+        summary += f"  Claim nodes: {claim_stats_dict.get('n_claim_nodes', 0)}\n"
+        summary += f"  CLAIM_SIM edges (Claim↔Claim): {claim_stats_dict.get('n_claim_sim_edges', 0)}\n"
+        summary += f"  Max possible claim pairs: {claim_stats_dict.get('max_possible_claim_pairs', 0)}\n"
+        summary += f"  Claim graph density: {claim_stats_dict.get('claim_graph_density', 0.0):.6f}\n"
+
         summary += f"\n\nTOPIC STATISTICS\n{'-' * 17}\n"
         summary += f"Total Topics: {topic_stats['total_topics']}\n\n"
 
@@ -967,7 +1015,7 @@ Nodes by Type:
             summary += f"  {i}. {entity['entity']} ({entity['type']}) - Weight: {entity['total_weight']}, Degree: {entity['degree']}\n"
 
         # Save summary
-        with open(stats_dir / f"summary_{timestamp}.txt", 'w') as f:
+        with open(stats_dir / f"summary_{timestamp}.txt", 'w', encoding='utf-8') as f:
             f.write(summary)
         self.logger.info(f"Summary report saved to: {stats_dir}/summary_{timestamp}.txt")
 

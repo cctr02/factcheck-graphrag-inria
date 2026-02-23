@@ -39,7 +39,7 @@ retrieval:
   # Retrieval parameters
   top_k: 10  # Number of results to return
   theme_threshold: 0.005  # Minimum confidence for theme detection (lowered for small corpora with sparse topic distributions)
-  claim_top_k: 5  # Number of top similar claims to consider for Strategies 5, 6, 7
+  claim_top_k: 10  # Number of top similar claims to consider for Strategies 5, 6, 7
   keyphrase_top_n: 5  # Number of keyphrases to extract from query for Strategy 7
 
   # Path scoring weights
@@ -48,8 +48,8 @@ retrieval:
   theme_path_weight: 0.6  # Entity -> Theme -> Chunk
 
   # Relevance propagation thresholds (for graph traversal)
-  entity_relevance_threshold: 0.1  # Minimum relevance to continue entity graph traversal
-  theme_relevance_threshold: 0.1  # Minimum relevance to continue theme graph traversal
+  entity_relevance_threshold: 0.1   # Minimum relevance to continue entity graph traversal
+  theme_relevance_threshold: 0.1    # Minimum relevance to continue theme graph traversal
 
 # ============================================================================
 # VISUALIZATION CONFIGURATION

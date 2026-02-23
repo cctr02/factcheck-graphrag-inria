@@ -28,6 +28,7 @@ import numpy as np
 import networkx as nx
 from scipy.spatial.distance import jensenshannon
 from bertopic import BERTopic
+import torch
 
 
 def add_claims_and_edges(
@@ -92,6 +93,100 @@ def add_claims_and_edges(
                 edges_added += 1
 
     log_step_fn("Adding claims and REVIEWS edges", start_time, edges_added)
+
+
+def add_claim_semantic_similarity(
+    graph: nx.Graph,
+    embedding_model,
+    sim_threshold: float,
+    top_k_per_claim: int = 10,
+    logger: logging.Logger = None,
+    log_step_fn = None
+):
+    """
+    Add CLAIM_SIM edges between semantically similar claims.
+
+    For each claim, finds its top-K most similar claims (by cosine similarity
+    of their text embeddings) and adds a CLAIM_SIM edge when similarity
+    exceeds the threshold.
+
+    Edge weight = cosine similarity ∈ [sim_threshold, 1].
+
+    Only the upper triangle of the similarity matrix is processed to avoid
+    duplicate edges (undirected graph).
+
+    Args:
+        graph: NetworkX graph containing claim nodes
+        embedding_model: SentenceTransformer model for text embeddings
+        sim_threshold: Minimum cosine similarity to create a CLAIM_SIM edge
+        top_k_per_claim: Maximum neighbours to consider per claim
+        logger: Logger instance
+        log_step_fn: Function to log step completion (step_name, start_time, count)
+    """
+    start_time = time.time()
+    log = logger or logging.getLogger(__name__)
+
+    claim_nodes = [n for n, d in graph.nodes(data=True) if d.get('type') == 'claim']
+    n_claims = len(claim_nodes)
+
+    if n_claims < 2:
+        log.info(f"Skipping CLAIM_SIM edges: only {n_claims} claim(s) in graph")
+        return
+
+    log.info(f"Computing CLAIM_SIM edges for {n_claims} claims (threshold={sim_threshold}, top_k={top_k_per_claim})...")
+
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    batch_size = 128 if device == 'cuda' else 32
+
+    claim_texts = [graph.nodes[n].get('text', '') for n in claim_nodes]
+
+    embeddings = embedding_model.encode(
+        claim_texts,
+        batch_size=batch_size,
+        show_progress_bar=True,
+        normalize_embeddings=True,
+        convert_to_numpy=True,
+        device=device
+    )
+
+    edge_count = 0
+    chunk_size = 512  # Process 512 rows at a time to bound memory usage
+
+    for i_start in tqdm(range(0, n_claims, chunk_size), desc="Adding CLAIM_SIM edges"):
+        i_end = min(i_start + chunk_size, n_claims)
+        batch = embeddings[i_start:i_end]  # (chunk_size, dim)
+
+        # Similarity of this batch against ALL claims: (chunk_size, n_claims)
+        sims = np.matmul(batch, embeddings.T)
+
+        for k in range(i_end - i_start):
+            global_i = i_start + k
+            row = sims[k].copy()
+
+            # Zero out lower triangle (including diagonal) to avoid duplicates
+            row[:global_i + 1] = 0.0
+
+            # Get top-K candidates among j > global_i
+            remaining = n_claims - global_i - 1
+            if remaining <= 0:
+                continue
+            top_k = min(top_k_per_claim, remaining)
+            top_j = np.argpartition(row, -top_k)[-top_k:]
+
+            for j in top_j:
+                sim = float(row[j])
+                if sim >= sim_threshold:
+                    graph.add_edge(
+                        claim_nodes[global_i],
+                        claim_nodes[j],
+                        edge_type="CLAIM_SIM",
+                        weight=sim
+                    )
+                    edge_count += 1
+
+    log.info(f"Created {edge_count} CLAIM_SIM edges between {n_claims} claims")
+    if log_step_fn:
+        log_step_fn("Adding CLAIM_SIM edges (Claim ↔ Claim)", start_time, edge_count)
 
 
 def compute_thematic_scores_for_claim(

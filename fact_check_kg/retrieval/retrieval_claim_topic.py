@@ -30,6 +30,8 @@ import networkx as nx
 from scipy.spatial.distance import jensenshannon
 from bertopic import BERTopic
 
+from fact_check_kg.retrieval.retrieval_claims import expand_claims_via_embeddings
+
 
 def retrieve_claim_topic_traversal(
     query: str,
@@ -42,7 +44,7 @@ def retrieve_claim_topic_traversal(
     claim_nodes: List[str],
     claim_texts: List[str],
     claim_top_k: int,
-    logger: logging.Logger
+    logger: logging.Logger,
 ) -> Tuple[Dict[str, float], List[Dict]]:
     """
     Strategy 6: Claim-Based Topic Distribution Traversal via REVIEWS graph edges.
@@ -74,7 +76,7 @@ def retrieve_claim_topic_traversal(
         - scores: Dictionary mapping chunk_id to score ∈ [0, 1]
         - matched_claims_details: Details about matched claims
     """
-    logger.info("\n--- Strategy 6: Claim-Based Topic Distribution Traversal ---")
+    logger.info("\n--- Strategy 6: Claim-Based Topic Distribution Traversal (+ CLAIM_SIM expansion) ---")
 
     matched_claims_details = []
 
@@ -91,31 +93,39 @@ def retrieve_claim_topic_traversal(
     claim_similarities = np.matmul(claim_embeddings, query_embedding)
     top_claim_indices = np.argsort(claim_similarities)[-claim_top_k:][::-1]
 
+    # Expand claims via embedding-based claim-to-claim similarity
+    logger.info(f"Claim matching (direct top-{claim_top_k} + embedding expansion):")
+    direct_claims, expanded_claims = expand_claims_via_embeddings(
+        top_indices=list(top_claim_indices),
+        claim_nodes=claim_nodes,
+        similarities=claim_similarities,
+        claim_embeddings=claim_embeddings,
+        max_expanded=claim_top_k,
+        expansion_threshold=0.0,
+        graph=graph,
+        logger=logger,
+    )
+    all_claims_to_process = direct_claims + expanded_claims
+
     # Step 2: Get query topic distribution
     _, query_topic_probs = topic_model.transform([query])
     query_distribution = query_topic_probs[0]
 
     logger.info(f"Query topic distribution computed (shape: {query_distribution.shape})")
 
-    # Step 3: Process each matched claim
+    # Step 3: Process each matched claim (direct + expanded)
     scores = {}
 
-    for claim_idx in top_claim_indices:
-        claim_node = claim_nodes[claim_idx]
-        claim_sim = max(0.0, float(claim_similarities[claim_idx]))  # Clip to [0, 1]
-        claim_text = claim_texts[claim_idx]
-
-        logger.info(f"Processing claim: {claim_node} (similarity: {claim_sim:.3f})")
-
+    for claim_node, claim_sim in all_claims_to_process:
         node_data = graph.nodes.get(claim_node, {})
+        claim_text = node_data.get('text', '')
         chunks_found = 0
 
-        # Step 4: Traverse REVIEWS → CONTAINS to find chunks
+        # Step 4: Traverse REVIEWS → CONTAINS to find chunks linked to this claim
         for neighbor in graph.neighbors(claim_node):
             edge_data = graph[claim_node][neighbor]
             if edge_data.get('edge_type') != 'REVIEWS':
                 continue
-
             doc_node = neighbor
 
             for doc_neighbor in graph.neighbors(doc_node):
@@ -155,9 +165,12 @@ def retrieve_claim_topic_traversal(
             'claim_text': claim_text,
             'query_similarity': claim_sim,
             'rating': node_data.get('rating', ''),
-            'chunks_found': chunks_found
+            'chunks_found': chunks_found,
+            'source': 'direct' if any(cn == claim_node for cn, _ in direct_claims) else 'graph'
         })
 
+    logger.info(f"Total matched claims: {len(all_claims_to_process)} "
+                f"({len(direct_claims)} direct + {len(expanded_claims)} via CLAIM_SIM)")
     logger.info(f"Found {len(scores)} chunks via claim-topic traversal")
     if scores:
         logger.info(f"Top score: {max(scores.values()):.3f}")
