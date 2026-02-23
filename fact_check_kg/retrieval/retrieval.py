@@ -68,6 +68,7 @@ class HybridRetriever:
         zeta: float = 0.0,
         eta: float = 0.0,
         top_k: int = 10,
+        top_docs: int = 50,
         theme_threshold: float = 0.01,
         entity_relevance_threshold: float = 0.1,
         theme_relevance_threshold: float = 0.1,
@@ -96,6 +97,7 @@ class HybridRetriever:
             zeta: Weight for claim-topic traversal score (S6)
             eta: Weight for claim-keyphrase score (S7)
             top_k: Number of chunks to return
+            top_docs: Number of top documents to return per strategy and overall
             theme_threshold: Minimum confidence for theme detection
             entity_relevance_threshold: Minimum relevance to continue entity traversal
             theme_relevance_threshold: Minimum relevance to continue theme traversal
@@ -124,6 +126,7 @@ class HybridRetriever:
 
         # Parameters
         self.top_k = top_k
+        self.top_docs = top_docs
         self.theme_threshold = theme_threshold
         self.entity_relevance_threshold = entity_relevance_threshold
         self.theme_relevance_threshold = theme_relevance_threshold
@@ -388,6 +391,76 @@ class HybridRetriever:
             logger=self.logger,
         )
 
+    def _aggregate_to_documents(
+        self,
+        chunk_results: List[Dict],
+    ) -> Tuple[List[Dict], Dict[str, List[Dict]]]:
+        """
+        Aggregate chunk-level scores to document-level scores using max pooling.
+
+        Max pooling: the document score on each dimension equals the maximum score
+        of any of its chunks on that dimension.  This prevents documents with more
+        chunks from being systematically favoured — only the single best piece of
+        evidence from each document contributes.
+
+        doc_score_total    = max(chunk.score_total)  over all chunks in the doc
+        doc_score_<strat>  = max(chunk.score_<strat>) over all chunks in the doc
+
+        Returns:
+            - doc_results: all documents with at least one scored chunk, sorted by
+              doc_score_total descending (no length limit — caller truncates)
+            - per_strategy_docs: dict mapping strategy key to list of docs (only those
+              with a non-zero strategy score), sorted by that strategy score descending,
+              each truncated to self.top_docs
+        """
+        from collections import defaultdict
+
+        # Group chunks by document
+        doc_chunks: Dict[str, List[Dict]] = defaultdict(list)
+        for chunk in chunk_results:
+            doc_chunks[chunk['doc_id']].append(chunk)
+
+        doc_results = []
+        for doc_id, chunks in doc_chunks.items():
+            best_chunk = max(chunks, key=lambda c: c['score_total'])
+            doc_results.append({
+                'doc_id': doc_id,
+                'doc_score_total': best_chunk['score_total'],
+                'doc_score_sem': max(c['score_sem'] for c in chunks),
+                'doc_score_topic_dist': max(c['score_topic_dist'] for c in chunks),
+                'doc_score_theme': max(c['score_theme'] for c in chunks),
+                'doc_score_entity': max(c['score_entity'] for c in chunks),
+                'doc_score_claim_doc': max(c.get('score_claim_doc', 0.0) for c in chunks),
+                'doc_score_claim_topic': max(c.get('score_claim_topic', 0.0) for c in chunks),
+                'doc_score_claim_keyphrase': max(c.get('score_claim_keyphrase', 0.0) for c in chunks),
+                'n_chunks_scored': len(chunks),
+                'best_chunk_id': best_chunk['chunk_id'],
+                'best_chunk_text': best_chunk['text'],
+            })
+
+        # Overall ranking by final score
+        doc_results.sort(key=lambda d: d['doc_score_total'], reverse=True)
+
+        # Per-strategy rankings (only docs with non-zero score for that strategy)
+        strategy_keys = [
+            ('S1_semantic',         'doc_score_sem'),
+            ('S2_topic_dist',       'doc_score_topic_dist'),
+            ('S3_thematic',         'doc_score_theme'),
+            ('S4_entity',           'doc_score_entity'),
+            ('S5_claim_doc',        'doc_score_claim_doc'),
+            ('S6_claim_topic',      'doc_score_claim_topic'),
+            ('S7_claim_keyphrase',  'doc_score_claim_keyphrase'),
+        ]
+        per_strategy_docs: Dict[str, List[Dict]] = {}
+        for strategy_name, score_key in strategy_keys:
+            per_strategy_docs[strategy_name] = sorted(
+                [d for d in doc_results if d[score_key] > 0.0],
+                key=lambda d: d[score_key],
+                reverse=True
+            )[:self.top_docs]
+
+        return doc_results, per_strategy_docs
+
     def retrieve(self, claim: str) -> List[Dict]:
         """
         Hybrid retrieval: combine all seven strategies.
@@ -504,6 +577,10 @@ class HybridRetriever:
         # Sort by total score
         results.sort(key=lambda x: x['score_total'], reverse=True)
 
+        # Document-level aggregation (uses ALL chunks, not just top-k)
+        doc_results, per_strategy_doc_results = self._aggregate_to_documents(results)
+        top_doc_results = doc_results[:self.top_docs]
+
         # Sample random chunks from outside top-K for comparison in reports
         remaining = results[self.top_k:]
         random_samples = random.sample(remaining, min(5, len(remaining))) if remaining else []
@@ -523,6 +600,8 @@ class HybridRetriever:
                     result['matched_claims_s7'] = matched_claims_s7
                 if detected_themes:
                     result['detected_themes'] = detected_themes
+                result['doc_results'] = top_doc_results
+                result['per_strategy_doc_results'] = per_strategy_doc_results
                 if entity_info_s4:
                     result['entity_info_s4'] = entity_info_s4
                 if random_samples:
@@ -584,6 +663,16 @@ class HybridRetriever:
             if len(result['text']) > 150:
                 text_preview += "..."
             self.logger.info(f"{i}. [{result['chunk_id']}] {text_preview}")
+
+        # Log document-level summary
+        self.logger.info(f"\n--- Document-level results (max-pooling) ---")
+        self.logger.info(f"  Total documents with at least one scored chunk: {len(doc_results)}")
+        self.logger.info(f"  Top {min(self.top_docs, len(top_doc_results))} documents (by final score):")
+        for i, doc in enumerate(top_doc_results[:5], 1):
+            self.logger.info(
+                f"  {i}. {doc['doc_id']} | total={doc['doc_score_total']:.3f} | "
+                f"n_chunks={doc['n_chunks_scored']} | best={doc['best_chunk_id']}"
+            )
 
         # Calculate and display retrieval time
         retrieval_time = time.time() - start_time

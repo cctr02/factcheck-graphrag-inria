@@ -29,7 +29,8 @@ def generate_topic_html_report(
     chunk_texts: List[str],
     output_dir: str = "outputs/statistics",
     max_sample_chunks: int = 100,
-    logger: Optional[logging.Logger] = None
+    logger: Optional[logging.Logger] = None,
+    graph_id: Optional[str] = None
 ) -> str:
     """
     Generate an HTML report visualizing the hierarchical topic structure.
@@ -50,6 +51,7 @@ def generate_topic_html_report(
         output_dir: Output directory for HTML file
         max_sample_chunks: Maximum number of chunks to show in report
         logger: Optional logger instance
+        graph_id: Graph identifier (timestamp) shared across all outputs for this build
 
     Returns:
         Path to the generated HTML file
@@ -64,7 +66,7 @@ def generate_topic_html_report(
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = graph_id if graph_id is not None else datetime.now().strftime("%Y%m%d_%H%M%S")
 
     # Collect theme nodes
     theme_nodes = {}

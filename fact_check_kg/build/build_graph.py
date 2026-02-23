@@ -194,6 +194,9 @@ def main():
     logger.info("\n### STEP 3: Building knowledge graph ###")
     logger.info("Using LLM for topic labeling (requires Ollama running)...")
 
+    # Generate timestamp once — used as the unique graph ID for ALL outputs
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
     graph, topic_probabilities, chunk_ids, claim_retrieval_results = builder.build_graph(
         chunks=chunks,
         min_topic_size=config.graph_construction.min_topic_size,
@@ -201,14 +204,12 @@ def main():
         claims=claims,
         claim_to_docs=claim_to_docs,
         doc_metadata=doc_metadata,
-        checkpoint_manager=checkpoint_manager
+        checkpoint_manager=checkpoint_manager,
+        graph_id=timestamp
     )
 
     # Step 4: Save graph and models
     logger.info("\n### STEP 4: Saving graph and models ###")
-
-    # Generate timestamp for unique graph identification
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     # Ensure output directories exist
     graphs_dir = Path(config.paths.graphs_dir)

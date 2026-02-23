@@ -428,7 +428,8 @@ class KnowledgeGraphBuilder:
         claims: Optional[List[Dict]] = None,
         claim_to_docs: Optional[Dict[str, List[str]]] = None,
         doc_metadata: Optional[Dict[str, Dict]] = None,
-        checkpoint_manager=None
+        checkpoint_manager=None,
+        graph_id: Optional[str] = None
     ) -> Tuple[nx.Graph, np.ndarray, List[str], Dict[str, Dict]]:
         """
         Build the complete knowledge graph through a 10-step pipeline.
@@ -688,8 +689,8 @@ class KnowledgeGraphBuilder:
 
         # Log statistics and save detailed reports
         self._log_graph_statistics()
-        self._save_statistics_reports(topic_model, topics, probabilities, chunks)
-        self._save_timing_report(total_build_time)
+        self._save_statistics_reports(topic_model, topics, probabilities, chunks, graph_id=graph_id)
+        self._save_timing_report(total_build_time, graph_id=graph_id)
 
         # Return graph, probabilities, chunk_ids, and claim_retrieval_results
         return self.graph, probabilities, chunk_ids, claim_retrieval_results
@@ -760,23 +761,25 @@ class KnowledgeGraphBuilder:
         topic_model: BERTopic,
         topics: List[int],
         probabilities: np.ndarray,
-        chunks: List[Dict]
+        chunks: List[Dict],
+        graph_id: Optional[str] = None
     ):
         """
         Save detailed statistics reports to outputs folder.
 
         Generates:
-        - general_stats_{timestamp}.json: Node/edge counts by type
-        - topic_stats_{timestamp}.json: Topic details with keywords
-        - entity_stats_{timestamp}.json: Entity statistics
-        - summary_{timestamp}.txt: Human-readable summary
-        - topic_visualization_{timestamp}.html: Interactive topic visualization
+        - general_stats_{graph_id}.json: Node/edge counts by type
+        - topic_stats_{graph_id}.json: Topic details with keywords
+        - entity_stats_{graph_id}.json: Entity statistics
+        - summary_{graph_id}.txt: Human-readable summary
+        - topic_visualization_{graph_id}.html: Interactive topic visualization
 
         Args:
             topic_model: Trained BERTopic model
             topics: List of topic assignments
             probabilities: Topic probability matrix (n_chunks, n_topics)
             chunks: Original chunks data
+            graph_id: Graph identifier (timestamp) shared across all outputs for this build
         """
         import json
         from pathlib import Path
@@ -786,7 +789,7 @@ class KnowledgeGraphBuilder:
         stats_dir = Path("outputs/statistics")
         stats_dir.mkdir(parents=True, exist_ok=True)
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = graph_id if graph_id is not None else datetime.now().strftime("%Y%m%d_%H%M%S")
 
         # 1. General graph statistics
         general_stats = {
@@ -1031,16 +1034,18 @@ Nodes by Type:
             chunk_texts=chunk_texts,
             output_dir=str(stats_dir),
             max_sample_chunks=100,
-            logger=self.logger
+            logger=self.logger,
+            graph_id=timestamp
         )
         self.logger.info(f"Topic visualization saved to: {html_path}")
 
-    def _save_timing_report(self, total_build_time: float):
+    def _save_timing_report(self, total_build_time: float, graph_id: Optional[str] = None):
         """
         Save build timing report showing time and percentage for each step.
 
         Args:
             total_build_time: Total time for the build process in seconds
+            graph_id: Graph identifier (timestamp) shared across all outputs for this build
         """
         import json
         from pathlib import Path
@@ -1049,7 +1054,7 @@ Nodes by Type:
         stats_dir = Path("outputs/statistics")
         stats_dir.mkdir(parents=True, exist_ok=True)
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = graph_id if graph_id is not None else datetime.now().strftime("%Y%m%d_%H%M%S")
 
         # Calculate percentages
         timing_report = {

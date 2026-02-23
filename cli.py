@@ -9,6 +9,7 @@ Usage:
     python cli.py stats --help
     python cli.py visualize --help
     python cli.py retrieve --help
+    python cli.py evaluate --help
     python cli.py relabel --help
     python cli.py config --help
     python cli.py init --help
@@ -492,6 +493,8 @@ def retrieve(claim, alpha, beta, gamma, delta, epsilon, zeta, eta, top_k, graph_
                 detected_themes = results[0].get('detected_themes') if results else None
                 entity_info_s4 = results[0].get('entity_info_s4') if results else None
                 random_samples = results[0].get('random_samples') if results else None
+                doc_results = results[0].get('doc_results') if results else None
+                per_strategy_doc_results = results[0].get('per_strategy_doc_results') if results else None
 
                 json_path, text_path = results_manager.save_results(
                     claim_text, results, alpha, beta, gamma, delta, rankings,
@@ -503,7 +506,9 @@ def retrieve(claim, alpha, beta, gamma, delta, epsilon, zeta, eta, top_k, graph_
                     epsilon=epsilon, zeta=zeta, eta=eta,
                     detected_themes=detected_themes,
                     extracted_entities=entity_info_s4,
-                    random_samples=random_samples
+                    random_samples=random_samples,
+                    doc_results=doc_results,
+                    per_strategy_doc_results=per_strategy_doc_results,
                 )
                 print(f"Results saved to:")
                 print(f"  JSON: {json_path}")
@@ -515,6 +520,125 @@ def retrieve(claim, alpha, beta, gamma, delta, epsilon, zeta, eta, top_k, graph_
 
     except Exception as e:
         logger.error(f"Error during retrieval: {e}", exc_info=True)
+        sys.exit(1)
+
+
+# ============================================================================
+# EVALUATE COMMAND
+# ============================================================================
+
+@cli.command()
+@click.option('--graph-id', type=str, required=True,
+              help='Graph ID (timestamp) of the graph to evaluate against.')
+@click.option('--queries', type=str, default='data/queries.csv', show_default=True,
+              help='Path to queries CSV (columns: 0=query_id, 1=query_text).')
+@click.option('--documents', type=str, default='data/documents.csv', show_default=True,
+              help='Path to documents CSV (columns: 0=doc_id, 1=doc_text).')
+@click.option('--relations', type=str, default='data/relations.csv', show_default=True,
+              help='Path to relations CSV (columns: 0=query_id, 1=doc_id).')
+@click.option('--max-queries', type=int, default=None,
+              help='Limit number of evaluated queries (default: all).')
+@click.option('--max-rank', type=int, default=500, show_default=True,
+              help='Maximum document rank to search for the target doc.')
+@click.option('--log-level', type=click.Choice(['DEBUG', 'INFO', 'WARNING', 'ERROR']),
+              default='INFO', show_default=True)
+def evaluate(graph_id, queries, documents, relations, max_queries, max_rank, log_level):
+    """
+    Evaluate retrieval performance on benchmark queries.
+
+    For each query whose ground-truth fact-checking article is in the graph,
+    runs retrieval and measures whether the correct document was retrieved.
+
+    Reports Hit@1/5/10/50, MRR, mean/median rank, per-strategy Hit@10,
+    and a rank distribution.  Results are saved to outputs/evaluation/.
+    """
+    import pickle
+    import spacy
+    from sentence_transformers import SentenceTransformer
+    from fact_check_kg.retrieval.retrieval import HybridRetriever
+    from fact_check_kg.evaluation.evaluate import run_evaluation
+
+    retrieval_config = get_retrieval_config()
+    logger = get_logger("evaluate", log_level)
+
+    logger.info("=" * 60)
+    logger.info("RETRIEVAL EVALUATION")
+    logger.info("=" * 60)
+    logger.info(f"Graph ID    : {graph_id}")
+    logger.info(f"Queries     : {queries}")
+    logger.info(f"Documents   : {documents}")
+    logger.info(f"Relations   : {relations}")
+    logger.info(f"Max queries : {max_queries or 'all'}")
+    logger.info(f"Max rank    : {max_rank}")
+
+    # --- Load graph ---
+    graphs_dir = Path(retrieval_config.paths.graphs_dir)
+    graph_path = graphs_dir / f"graph_{graph_id}.gpickle"
+    if not graph_path.exists():
+        logger.error(f"Graph not found: {graph_path}")
+        sys.exit(1)
+
+    with open(graph_path, 'rb') as fh:
+        graph = pickle.load(fh)
+    logger.info(f"Graph loaded: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
+
+    # --- Load topic model ---
+    topic_model_path = Path(retrieval_config.paths.models_dir) / f"topic_model_{graph_id}.pkl"
+    if not topic_model_path.exists():
+        logger.error(f"Topic model not found: {topic_model_path}")
+        sys.exit(1)
+
+    with open(topic_model_path, 'rb') as fh:
+        topic_model = pickle.load(fh)
+
+    # --- Load NLP models ---
+    logger.info("Loading embedding and NER models ...")
+    embedding_model = SentenceTransformer(retrieval_config.models.embedding_model)
+    nlp = spacy.load(retrieval_config.models.ner_model)
+
+    # --- Build retriever (uses default weights from retrieval config) ---
+    rc = retrieval_config.retrieval
+    retriever = HybridRetriever(
+        graph=graph,
+        topic_model=topic_model,
+        embedding_model=embedding_model,
+        nlp=nlp,
+        entity_types=rc.entity_types,
+        alpha=rc.alpha,
+        beta=rc.beta,
+        gamma=rc.gamma,
+        delta=rc.delta,
+        epsilon=rc.epsilon,
+        zeta=getattr(rc, 'zeta', 0.0),
+        eta=getattr(rc, 'eta', 0.0),
+        top_k=10,
+        top_docs=max_rank,    # used as working value; run_evaluation overrides anyway
+        theme_threshold=rc.theme_threshold,
+        entity_relevance_threshold=rc.entity_relevance_threshold,
+        theme_relevance_threshold=rc.theme_relevance_threshold,
+        claim_top_k=getattr(rc, 'claim_top_k', 5),
+        keyphrase_top_n=getattr(rc, 'keyphrase_top_n', 5),
+        graph_id=graph_id,
+        cache_dir=retrieval_config.paths.embeddings_dir,
+        models_dir=retrieval_config.paths.models_dir,
+        logger=logger,
+    )
+
+    # --- Run evaluation ---
+    try:
+        run_evaluation(
+            retriever=retriever,
+            queries_path=queries,
+            documents_path=documents,
+            relations_path=relations,
+            max_queries=max_queries,
+            max_rank=max_rank,
+            output_dir="outputs/evaluation",
+            graph_id=graph_id,
+            logger=logger,
+        )
+    except Exception as exc:
+        logger.error(f"Evaluation failed: {exc}", exc_info=True)
         sys.exit(1)
 
 

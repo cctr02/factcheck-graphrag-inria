@@ -11,6 +11,17 @@ from datetime import datetime
 from typing import List, Dict, Tuple
 import logging
 
+# Maps per_strategy_doc_results strategy keys to the doc-level score field
+_STRATEGY_SCORE_KEY: Dict[str, str] = {
+    'S1_semantic':        'doc_score_sem',
+    'S2_topic_dist':      'doc_score_topic_dist',
+    'S3_thematic':        'doc_score_theme',
+    'S4_entity':          'doc_score_entity',
+    'S5_claim_doc':       'doc_score_claim_doc',
+    'S6_claim_topic':     'doc_score_claim_topic',
+    'S7_claim_keyphrase': 'doc_score_claim_keyphrase',
+}
+
 
 class RetrievalResultsManager:
     """
@@ -86,7 +97,9 @@ class RetrievalResultsManager:
         matched_claims_s7: List[Dict] = None,
         detected_themes: List[Dict] = None,
         extracted_entities: Dict = None,
-        random_samples: List[Dict] = None
+        random_samples: List[Dict] = None,
+        doc_results: List[Dict] = None,
+        per_strategy_doc_results: Dict[str, List[Dict]] = None
     ) -> Dict:
         """
         Format results with detailed scoring breakdown.
@@ -203,6 +216,44 @@ class RetrievalResultsManager:
                 }
                 for r in random_samples
             ]
+
+        # Document-level results
+        if doc_results is not None:
+            formatted["doc_results"] = [
+                {
+                    "rank": i,
+                    "doc_id": d['doc_id'],
+                    "n_chunks_scored": d['n_chunks_scored'],
+                    "best_chunk_id": d['best_chunk_id'],
+                    "best_chunk_text_preview": d['best_chunk_text'][:200] + "..." if len(d['best_chunk_text']) > 200 else d['best_chunk_text'],
+                    "scores": {
+                        "total": round(d['doc_score_total'], 4),
+                        "semantic": round(d['doc_score_sem'], 4),
+                        "topic_dist": round(d['doc_score_topic_dist'], 4),
+                        "thematic": round(d['doc_score_theme'], 4),
+                        "entity": round(d['doc_score_entity'], 4),
+                        "claim_doc": round(d['doc_score_claim_doc'], 4),
+                        "claim_topic": round(d['doc_score_claim_topic'], 4),
+                        "claim_keyphrase": round(d['doc_score_claim_keyphrase'], 4),
+                    }
+                }
+                for i, d in enumerate(doc_results, 1)
+            ]
+
+        if per_strategy_doc_results is not None:
+            formatted["per_strategy_doc_results"] = {
+                strategy: [
+                    {
+                        "rank": i,
+                        "doc_id": d['doc_id'],
+                        "n_chunks_scored": d['n_chunks_scored'],
+                        "score": round(d[_STRATEGY_SCORE_KEY[strategy]], 4),
+                        "best_chunk_id": d['best_chunk_id'],
+                    }
+                    for i, d in enumerate(docs, 1)
+                ]
+                for strategy, docs in per_strategy_doc_results.items()
+            }
 
         for rank, result in enumerate(results, 1):
             formatted_result = {
@@ -453,7 +504,9 @@ class RetrievalResultsManager:
         eta: float = 0.0,
         detected_themes: List[Dict] = None,
         extracted_entities: Dict = None,
-        random_samples: List[Dict] = None
+        random_samples: List[Dict] = None,
+        doc_results: List[Dict] = None,
+        per_strategy_doc_results: Dict[str, List[Dict]] = None
     ) -> Tuple[str, str]:
         """
         Save results to JSON and text files.
@@ -503,7 +556,9 @@ class RetrievalResultsManager:
             matched_claims_s7=matched_claims_s7,
             detected_themes=detected_themes,
             extracted_entities=extracted_entities,
-            random_samples=random_samples
+            random_samples=random_samples,
+            doc_results=doc_results,
+            per_strategy_doc_results=per_strategy_doc_results,
         )
 
         # Create rankings if not provided
@@ -619,7 +674,7 @@ class RetrievalResultsManager:
             else:
                 report.append("  (none)")
             report.append("")
-            report.append("MATCHED CLAIMS (S5 — Embedding-expanded neighbors)")
+            report.append("MATCHED CLAIMS (S5 — Embedding-expanded neighbors) Direct similarity between claim and query")
             report.append("-" * 80)
             if graph:
                 for c in graph[:3]:
@@ -646,6 +701,50 @@ class RetrievalResultsManager:
             for component, count in stats["component_analysis"].items():
                 percentage = (count / stats["total_results"]) * 100
                 report.append(f"  {component.capitalize()}: {count} ({percentage:.1f}%)")
+            report.append("")
+
+        # Document-level results
+        if "doc_results" in formatted:
+            doc_res = formatted["doc_results"]
+            report.append(f"\nTOP DOCUMENTS — Final score (max-pooling over chunks)")
+            report.append("-" * 80)
+            report.append(f"  Scoring: doc_score = max(chunk_score) — unbiased by document length")
+            report.append(f"  Total documents retrieved: {len(doc_res)}")
+            report.append("")
+            for d in doc_res[:50]:
+                s = d['scores']
+                report.append(
+                    f"  {d['rank']:2}. {d['doc_id']} | total={s['total']:.4f} | "
+                    f"n_chunks={d['n_chunks_scored']} | best_chunk={d['best_chunk_id']}"
+                )
+                report.append(
+                    f"      sem={s['semantic']:.4f}  topicDist={s['topic_dist']:.4f}  "
+                    f"theme={s['thematic']:.4f}  entity={s['entity']:.4f}  "
+                    f"claimDoc={s['claim_doc']:.4f}  claimTopic={s['claim_topic']:.4f}  "
+                    f"claimKP={s['claim_keyphrase']:.4f}"
+                )
+                preview = d.get('best_chunk_text_preview', '')
+                if preview:
+                    report.append(f"      > {preview[:120]}{'...' if len(preview) > 120 else ''}")
+            report.append("")
+
+        if "per_strategy_doc_results" in formatted:
+            report.append(f"\nPER-STRATEGY DOCUMENT RANKINGS (max-pooling, top 10 shown)")
+            report.append("-" * 80)
+            strategy_labels = {
+                'S1_semantic':        'S1 Semantic',
+                'S2_topic_dist':      'S2 Topic Distribution',
+                'S3_thematic':        'S3 Thematic',
+                'S4_entity':          'S4 Entity',
+                'S5_claim_doc':       'S5 Claim-Document',
+                'S6_claim_topic':     'S6 Claim-Topic',
+                'S7_claim_keyphrase': 'S7 Claim-Keyphrase',
+            }
+            for strategy, docs in formatted["per_strategy_doc_results"].items():
+                label = strategy_labels.get(strategy, strategy)
+                report.append(f"\n  {label} ({len(docs)} docs):")
+                for d in docs[:10]:
+                    report.append(f"    {d['rank']:2}. {d['doc_id']} | score={d['score']:.4f} | n_chunks={d['n_chunks_scored']}")
             report.append("")
 
         # Top 10 results by total score
