@@ -47,7 +47,7 @@ class EmbeddingCache:
         embeddings: np.ndarray
     ):
         """
-        Build FAISS index from chunk embeddings.
+        Build FAISS index from chunk embeddings with GPU support.
 
         Args:
             chunk_ids: List of chunk IDs
@@ -57,7 +57,26 @@ class EmbeddingCache:
             raise ValueError(f"Expected dimension {self.dimension}, got {embeddings.shape[1]}")
 
         # Create FAISS index (IndexFlatIP for Inner Product = cosine similarity with normalized vectors)
-        self.index = faiss.IndexFlatIP(self.dimension)
+        cpu_index = faiss.IndexFlatIP(self.dimension)
+
+        # Try to use GPU if available
+        try:
+            import torch
+            if torch.cuda.is_available():
+                # Check if faiss-gpu is available
+                if hasattr(faiss, 'StandardGpuResources'):
+                    res = faiss.StandardGpuResources()
+                    gpu_index = faiss.index_cpu_to_gpu(res, 0, cpu_index)
+                    self.logger.info("✓ Using GPU-accelerated FAISS index")
+                    self.index = gpu_index
+                else:
+                    self.logger.warning("⚠ faiss-gpu not available, using CPU FAISS (install faiss-gpu for GPU acceleration)")
+                    self.index = cpu_index
+            else:
+                self.index = cpu_index
+        except Exception as e:
+            self.logger.warning(f"⚠ Failed to initialize FAISS GPU: {e}, using CPU")
+            self.index = cpu_index
 
         # Add embeddings to index
         self.index.add(embeddings.astype(np.float32))
@@ -65,7 +84,8 @@ class EmbeddingCache:
         # Store chunk IDs
         self.chunk_ids = chunk_ids
 
-        self.logger.info(f"Built FAISS index with {len(chunk_ids)} chunks")
+        device_str = "GPU" if hasattr(self.index, 'getDevice') else "CPU"
+        self.logger.info(f"Built FAISS index on {device_str} with {len(chunk_ids)} chunks")
 
     def save(self, output_dir: Path, graph_id: str):
         """
@@ -81,9 +101,16 @@ class EmbeddingCache:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
+        # Convert GPU index to CPU for saving
+        index_to_save = self.index
+        if hasattr(self.index, 'getDevice'):
+            # This is a GPU index, convert to CPU
+            index_to_save = faiss.index_gpu_to_cpu(self.index)
+            self.logger.info("Converting GPU index to CPU for saving...")
+
         # Save FAISS index
         index_path = output_dir / f"embeddings_{graph_id}.faiss"
-        faiss.write_index(self.index, str(index_path))
+        faiss.write_index(index_to_save, str(index_path))
 
         # Save chunk IDs mapping
         metadata_path = output_dir / f"embeddings_{graph_id}.pkl"

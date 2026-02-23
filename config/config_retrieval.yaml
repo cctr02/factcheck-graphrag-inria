@@ -21,10 +21,10 @@ retrieval:
   alpha: 0.20  # Weight for semantic similarity (S1: embedding-based)
   beta: 0.15   # Weight for topic distribution similarity (S2: Jensen-Shannon divergence)
   gamma: 0.20  # Weight for thematic graph traversal (S3: BFS over theme graph)
-  delta: 0.15  # Weight for entity graph traversal (S4: BFS over entity graph)
+  delta: 0.05  # Weight for entity graph traversal (S4: BFS over entity graph)
   epsilon: 0.10  # Weight for claim-document retrieval (S5: chunks from docs linked to similar claims)
-  zeta: 0.10  # Weight for claim-topic distribution traversal (S6)
-  eta: 0.10  # Weight for claim-keyphrase similarity (S7)
+  zeta: 0.15  # Weight for claim-topic distribution traversal (S6)
+  eta: 0.15  # Weight for claim-keyphrase similarity (S7)
 
   # Entity types for NER during query processing (must match build config)
   entity_types:
@@ -38,10 +38,8 @@ retrieval:
 
   # Retrieval parameters
   top_k: 10  # Number of results to return
-  theme_threshold: 0.01  # Minimum confidence for theme detection (lowered for graphs with fewer topics)
-  claim_top_k: 5  # Number of top similar claims to consider for Strategies 5, 6, 7
-  explore_similar_claims: true  # If true, explore claims connected via SIMILAR_CLAIM edges in Strategy 5
-  max_claim_expansion_depth: 1  # Maximum depth for exploring SIMILAR_CLAIM edges (1 = direct neighbors only)
+  theme_threshold: 0.005  # Minimum confidence for theme detection (lowered for small corpora with sparse topic distributions)
+  claim_top_k: 10  # Number of top similar claims to consider for Strategies 5, 6, 7
   keyphrase_top_n: 5  # Number of keyphrases to extract from query for Strategy 7
 
   # Path scoring weights
@@ -50,8 +48,8 @@ retrieval:
   theme_path_weight: 0.6  # Entity -> Theme -> Chunk
 
   # Relevance propagation thresholds (for graph traversal)
-  entity_relevance_threshold: 0.1  # Minimum relevance to continue entity graph traversal
-  theme_relevance_threshold: 0.1  # Minimum relevance to continue theme graph traversal
+  entity_relevance_threshold: 0.1   # Minimum relevance to continue entity graph traversal
+  theme_relevance_threshold: 0.1    # Minimum relevance to continue theme graph traversal
 
 # ============================================================================
 # VISUALIZATION CONFIGURATION

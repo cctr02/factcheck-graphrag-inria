@@ -9,30 +9,108 @@ Algorithm:
     1. Embed the query using SentenceTransformer
     2. Find top-k claims most similar to the query:
        similarity(q, c) = cos(embed(q), embed(c))
-    3. For each matched claim, explore connected claims via SIMILAR_CLAIM edges
-    4. Retrieve pre-computed chunk scores for all claims (direct + expanded)
-    5. Combine scores: final_score = claim_similarity × chunk_score × expansion_decay
+    3. Expand the claim set by computing claim-to-claim cosine similarity
+       from pre-computed embeddings (no graph edges needed):
+         eff_sim = direct_query_sim × cos(direct_claim_embed, other_claim_embed)
+       Keep top-k expansions above expansion_threshold.
+    4. For each matched claim, traverse REVIEWS edges to find linked documents,
+       then CONTAINS edges to find chunks in those documents
+    5. Score each chunk: S5(c) = max over matched claims of claim_similarity
 
-Score Calculation:
-    For each chunk c reached via claim clm:
-        S5(c) = max over matched claims of:
-            cos(query, claim) × precomputed_score(claim, chunk)
-
-    For expanded claims (reached via SIMILAR_CLAIM edges):
-        expansion_score = query_similarity × edge_weight × precomputed_score
-        (where edge_weight is the SIMILAR_CLAIM cosine similarity)
-
-This strategy is particularly useful when:
-- The query is semantically similar to a known false claim
-- The fact-check documents contain authoritative refutations
-- Cross-referencing multiple fact-checks strengthens evidence
-- Exploring semantically related claims provides broader context
+Score is naturally bounded to [0, 1] (cosine similarity, clipped at 0).
 """
 
 import logging
 from typing import Dict, List, Tuple, Optional
 import numpy as np
 import networkx as nx
+
+
+def expand_claims_via_embeddings(
+    top_indices: List[int],
+    claim_nodes: List[str],
+    similarities: np.ndarray,
+    claim_embeddings: np.ndarray,
+    max_expanded: int,
+    expansion_threshold: float,
+    graph: nx.Graph,
+    logger: logging.Logger,
+) -> Tuple[List[Tuple[str, float]], List[Tuple[str, float]]]:
+    """
+    Expand an initial set of matched claims by computing claim-to-claim similarity
+    from pre-computed embeddings (no CLAIM_SIM graph edges required).
+
+    For each direct claim c_i matched to the query, finds other claims c_j
+    whose effective similarity exceeds the threshold:
+
+        eff_sim(c_j) = query_sim(c_i) × cos(embed(c_i), embed(c_j))
+
+    The best eff_sim across all direct claims is kept for each candidate.
+    Up to `max_expanded` claims are added, selected by descending eff_sim.
+
+    Args:
+        top_indices: Indices into claim_nodes of the directly-matched claims
+        claim_nodes: Full list of claim node IDs
+        similarities: 1-D query-to-claim cosine similarity array (len = n_claims)
+        claim_embeddings: Normalised claim embeddings (n_claims, dim)
+        max_expanded: Maximum number of expansion claims to add
+        expansion_threshold: Minimum eff_sim to keep an expanded claim
+        graph: Knowledge graph (used only for logging claim text)
+        logger: Logger instance
+
+    Returns:
+        Tuple of:
+        - direct_claims: List of (claim_node, query_sim) for direct matches
+        - expanded_claims: List of (claim_node, eff_sim) for expanded matches
+    """
+    # Build direct claim set
+    direct_claims = []
+    direct_set = set()
+    for idx in top_indices:
+        sim = max(0.0, float(similarities[idx]))
+        direct_claims.append((claim_nodes[idx], sim))
+        direct_set.add(claim_nodes[idx])
+
+    logger.info(f"  Direct claims ({len(direct_claims)}, by query-claim similarity):")
+    for cn, sim in direct_claims:
+        text = graph.nodes.get(cn, {}).get('text', '')
+        preview = text[:100] + "..." if len(text) > 100 else text
+        logger.info(f"    [{sim:.3f}] {preview}")
+
+    # Expand via embedding-based claim-to-claim similarity
+    # For each direct claim, compute similarity with all other claims
+    expansion_candidates: Dict[str, float] = {}
+    for idx in top_indices:
+        direct_sim = max(0.0, float(similarities[idx]))
+        if direct_sim == 0.0:
+            continue
+        # Cosine similarity between this direct claim and all other claims
+        # (embeddings are already normalized)
+        claim_sims = np.matmul(claim_embeddings, claim_embeddings[idx])  # (n_claims,)
+
+        for j, csim in enumerate(claim_sims):
+            cn = claim_nodes[j]
+            if cn in direct_set:
+                continue
+            eff_sim = direct_sim * max(0.0, float(csim))
+            if eff_sim < expansion_threshold:
+                continue
+            if cn not in expansion_candidates or eff_sim > expansion_candidates[cn]:
+                expansion_candidates[cn] = eff_sim
+
+    sorted_expansions = sorted(expansion_candidates.items(), key=lambda x: x[1], reverse=True)[:max_expanded]
+    expanded_claims = list(sorted_expansions)
+
+    if expanded_claims:
+        logger.info(f"  Embedding-expanded claims ({len(expanded_claims)}, via claim-to-claim similarity):")
+        for cn, sim in expanded_claims:
+            text = graph.nodes.get(cn, {}).get('text', '')
+            preview = text[:100] + "..." if len(text) > 100 else text
+            logger.info(f"    [{sim:.3f}] {preview}")
+    else:
+        logger.info("  Embedding-expanded claims: none above threshold")
+
+    return direct_claims, expanded_claims
 
 
 def retrieve_claim_document(
@@ -42,52 +120,41 @@ def retrieve_claim_document(
     claim_embeddings: Optional[np.ndarray],
     claim_nodes: List[str],
     claim_texts: List[str],
-    claim_retrieval_results: Dict,
     claim_top_k: int,
     logger: logging.Logger,
-    explore_similar_claims: bool = True,
-    max_expansion_depth: int = 1
 ) -> Tuple[Dict[str, float], List[Dict]]:
     """
-    Strategy 5: Claim-Based Retrieval using pre-computed claim retrieval results.
+    Strategy 5: Claim-Based Retrieval via REVIEWS → CONTAINS graph traversal.
 
-    Finds claims semantically similar to the query, then returns:
-    1. Chunk scores from pre-computed retrieval results for those claims
-    2. If explore_similar_claims=True, expands to claims connected via SIMILAR_CLAIM edges
-    3. Details about which claims were matched and their similarity to the query
+    Finds claims semantically similar to the query, expands the set using
+    claim-to-claim embedding similarity (no CLAIM_SIM graph edges needed),
+    then traverses REVIEWS edges to linked documents and CONTAINS edges to chunks.
+
+    Score formula:
+        S5(chunk) = max over matched claims of: max(0, cos(embed(query), embed(claim)))
+
+    Scores are bounded to [0, 1] — no normalization applied.
 
     Args:
         query: Query text to match against claims
-        graph: Knowledge graph (for claim node data and SIMILAR_CLAIM edges)
+        graph: Knowledge graph (contains REVIEWS and CONTAINS edges)
         embedding_model: SentenceTransformer model
-        claim_embeddings: Pre-computed claim embeddings (n_claims, dim) or None
+        claim_embeddings: Pre-computed normalised claim embeddings (n_claims, dim)
         claim_nodes: List of claim node IDs
         claim_texts: List of claim texts corresponding to nodes
-        claim_retrieval_results: Dict mapping claim_node to pre-computed results
-        claim_top_k: Number of top claims to consider
+        claim_top_k: Number of top direct claims + expansion claims to consider
         logger: Logger instance
-        explore_similar_claims: If True, explores claims connected via SIMILAR_CLAIM edges (default: True)
-        max_expansion_depth: Maximum depth for exploring SIMILAR_CLAIM edges (default: 1)
+        claim_expansion_threshold: Minimum eff_sim to keep an expanded claim
 
     Returns:
         Tuple of:
-        - scores: Dictionary mapping chunk_id to score (normalized 0-1)
-        - matched_claims_details: List of matched claim info with retrieval results
-
-    Example:
-        >>> scores, claims = retrieve_claim_document(
-        ...     "Vaccines cause autism",
-        ...     graph, model, embeddings, nodes, texts, results, 5, logger,
-        ...     explore_similar_claims=True
-        ... )
-        >>> claims[0]['rating']
-        'False'
+        - scores: Dictionary mapping chunk_id to score ∈ [0, 1]
+        - matched_claims_details: List of matched claim info dicts
     """
-    logger.info("\n--- Strategy 5: Claim-Based Retrieval (Pre-computed) ---")
+    logger.info("\n--- Strategy 5: Claim-Based Retrieval (REVIEWS traversal + embedding expansion) ---")
 
     matched_claims_details = []
 
-    # Check if claims exist
     if claim_embeddings is None or len(claim_nodes) == 0:
         logger.warning("No claims in graph, skipping Strategy 5")
         return {}, matched_claims_details
@@ -101,105 +168,59 @@ def retrieve_claim_document(
     # Compute similarities with all claims
     similarities = np.matmul(claim_embeddings, query_embedding)
 
-    # Get top-k claims
+    # Get top-k claims by direct similarity
     top_indices = np.argsort(similarities)[-claim_top_k:][::-1]
 
-    logger.info(f"Top {claim_top_k} claims by similarity to query:")
+    logger.info(f"Claim matching (direct top-{claim_top_k} + embedding expansion):")
+    direct_claims, expanded_claims = expand_claims_via_embeddings(
+        top_indices=list(top_indices),
+        claim_nodes=claim_nodes,
+        similarities=similarities,
+        claim_embeddings=claim_embeddings,
+        max_expanded=claim_top_k,
+        expansion_threshold=0.0,
+        graph=graph,
+        logger=logger,
+    )
+
+    all_claims_to_process = direct_claims + expanded_claims
+
     scores = {}
 
-    # Track all claims to explore (initial + expanded)
-    claims_to_explore = []  # List of (claim_node, query_similarity, expansion_depth, source_claim)
+    for claim_node, claim_sim in all_claims_to_process:
+        node_data = graph.nodes.get(claim_node, {})
+        claim_text = node_data.get('text', '')
+        chunks_found = 0
 
-    # Add initial top-k claims
-    for idx in top_indices:
-        claim_node = claim_nodes[idx]
-        claim_similarity = float(similarities[idx])
-        claims_to_explore.append((claim_node, claim_similarity, 0, None))  # depth 0, no source
-
-    # Expand to similar claims if enabled
-    if explore_similar_claims and max_expansion_depth > 0:
-        logger.info(f"\n--- Claim Expansion: Exploring SIMILAR_CLAIM edges (max depth: {max_expansion_depth}) ---")
-        explored_claims = set()
-
-        for claim_node, query_sim, depth, source in list(claims_to_explore):
-            if depth >= max_expansion_depth:
+        # Traverse REVIEWS → CONTAINS to find chunks linked to this claim
+        for neighbor in graph.neighbors(claim_node):
+            edge_data = graph[claim_node][neighbor]
+            if edge_data.get('edge_type') != 'REVIEWS':
                 continue
+            doc_node = neighbor
+            for doc_neighbor in graph.neighbors(doc_node):
+                doc_edge_data = graph[doc_node][doc_neighbor]
+                if (doc_edge_data.get('edge_type') == 'CONTAINS' and
+                        graph.nodes[doc_neighbor].get('type') == 'chunk'):
+                    chunk_id = doc_neighbor
+                    if chunk_id not in scores:
+                        scores[chunk_id] = claim_sim
+                    else:
+                        scores[chunk_id] = max(scores[chunk_id], claim_sim)
+                    chunks_found += 1
 
-            explored_claims.add(claim_node)
+        matched_claims_details.append({
+            'claim_node': claim_node,
+            'claim_text': claim_text,
+            'query_similarity': claim_sim,
+            'rating': node_data.get('rating', ''),
+            'chunks_found': chunks_found,
+            'source': 'direct' if any(cn == claim_node for cn, _ in direct_claims) else 'embedding'
+        })
 
-            # Find neighbors via SIMILAR_CLAIM edges
-            if graph.has_node(claim_node):
-                for neighbor in graph.neighbors(claim_node):
-                    edge_data = graph[claim_node][neighbor]
-                    edge_type = edge_data.get('edge_type')
-
-                    if edge_type == 'SIMILAR_CLAIM' and neighbor not in explored_claims:
-                        edge_weight = edge_data.get('weight', 0)
-                        # Propagated similarity = query_sim × edge_weight
-                        propagated_sim = query_sim * edge_weight
-
-                        claims_to_explore.append((neighbor, propagated_sim, depth + 1, claim_node))
-                        explored_claims.add(neighbor)
-
-                        logger.info(f"  Expanded: {neighbor} (via {claim_node}, similarity={propagated_sim:.3f}, edge_weight={edge_weight:.3f})")
-
-        logger.info(f"Total claims after expansion: {len(claims_to_explore)} (initial={len(top_indices)}, expanded={len(claims_to_explore)-len(top_indices)})")
-
-    # Process all claims (initial + expanded)
-    for claim_node, claim_similarity, expansion_depth, source_claim in claims_to_explore:
-        # Get claim text from graph
-        claim_text = graph.nodes.get(claim_node, {}).get('text', '')
-
-        claim_text_preview = claim_text[:100] + "..." if len(claim_text) > 100 else claim_text
-        depth_str = f" [depth={expansion_depth}]" if expansion_depth > 0 else ""
-        source_str = f" (via {source_claim})" if source_claim else ""
-        logger.info(f"  {claim_node}{depth_str}: similarity={claim_similarity:.3f}{source_str}")
-        logger.info(f"    Claim: {claim_text_preview}")
-
-        # Get pre-computed retrieval results for this claim
-        if claim_node in claim_retrieval_results:
-            claim_data = claim_retrieval_results[claim_node]
-            retrieval_results = claim_data.get('retrieval_results', [])
-
-            logger.info(f"    Pre-computed results: {len(retrieval_results)} chunks")
-
-            # Store matched claim details (pull rating from graph node)
-            node_data = graph.nodes.get(claim_node, {})
-            matched_claims_details.append({
-                'claim_node': claim_node,
-                'claim_text': claim_text,
-                'query_similarity': claim_similarity,
-                'rating': node_data.get('rating', ''),
-                'expansion_depth': expansion_depth,
-                'source_claim': source_claim if source_claim else 'direct',
-                'retrieval_results': retrieval_results[:10]  # Top 10 chunks per claim
-            })
-
-            # Add chunk scores weighted by claim similarity
-            for result in retrieval_results:
-                chunk_id = result['chunk_id']
-                chunk_score = result['score_total']
-                # Final score = claim similarity × chunk retrieval score
-                combined_score = claim_similarity * chunk_score
-
-                if chunk_id not in scores:
-                    scores[chunk_id] = combined_score
-                else:
-                    scores[chunk_id] = max(scores[chunk_id], combined_score)
-        else:
-            logger.warning(f"    No pre-computed results for {claim_node}")
-
-    # Normalize scores (min-max)
-    if scores:
-        min_score = min(scores.values())
-        max_score = max(scores.values())
-        if max_score > min_score:
-            scores = {
-                k: (v - min_score) / (max_score - min_score)
-                for k, v in scores.items()
-            }
-
-    logger.info(f"Found {len(scores)} chunks via claim-based retrieval")
+    logger.info(f"Total matched claims: {len(all_claims_to_process)} "
+                f"({len(direct_claims)} direct + {len(expanded_claims)} embedding-expanded)")
+    logger.info(f"Found {len(scores)} unique chunks via claim-based retrieval")
     if scores:
         logger.info(f"Top score: {max(scores.values()):.3f}")
 

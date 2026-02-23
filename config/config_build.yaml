@@ -22,7 +22,8 @@ graph_construction:
 
   # Entity extraction thresholds
   co_occurrence_threshold: 2  # Minimum co-occurrences to create edge
-  semantic_similarity_threshold: 0.8  # Minimum similarity for entity edges
+  semantic_similarity_threshold: 0.8  # Minimum similarity for entity/theme SEMANTIC_SIM edges
+  claim_sim_threshold: 0.5  # Minimum similarity for CLAIM_SIM edges (lower than entity threshold)
 
   # Claim similarity edges
   claim_similarity_threshold: 0.7  # Minimum cosine similarity for SIMILAR_CLAIM edges between claims

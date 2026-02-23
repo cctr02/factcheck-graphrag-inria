@@ -21,6 +21,7 @@ from fact_check_kg.core.config_loader import get_build_config, load_raw_config
 from fact_check_kg.core.logger import get_logger
 from fact_check_kg.build.data_loader import load_and_chunk_documents, load_claims
 from fact_check_kg.build.graph_builder import KnowledgeGraphBuilder
+from fact_check_kg.build.checkpoint_manager import CheckpointManager
 
 
 def main():
@@ -39,6 +40,11 @@ def main():
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Logging level"
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from last checkpoint instead of starting fresh"
+    )
     args = parser.parse_args()
 
     # Load build configuration - ALL parameters come from config
@@ -52,6 +58,30 @@ def main():
     if args.max_docs is not None:
         logger.info(f"[CLI OVERRIDE] max_docs: {config.graph_construction.max_documents} -> {args.max_docs}")
         max_docs = args.max_docs
+
+    # Initialize checkpoint manager
+    checkpoint_dir = Path("outputs/checkpoints")
+    checkpoint_manager = CheckpointManager(checkpoint_dir, logger=logger)
+
+    if args.resume:
+        last = checkpoint_manager.get_last_completed()
+        if last:
+            logger.info(f"[CHECKPOINT] Resuming from: {last}")
+            summary = checkpoint_manager.get_summary()
+            logger.info(f"[CHECKPOINT] Completed steps: {summary.get('completed_steps', [])}")
+            logger.info(f"[CHECKPOINT] Total checkpoint size: {summary.get('total_size_mb', 0):.1f} MB")
+
+            # Validate config hasn't changed
+            if not checkpoint_manager.validate_config(config, max_docs):
+                logger.error("[CHECKPOINT] Config has changed since checkpoint was created!")
+                logger.error("Run without --resume to start fresh, or delete outputs/checkpoints/")
+                sys.exit(1)
+        else:
+            logger.info("[CHECKPOINT] No checkpoint found, starting fresh build")
+    else:
+        # Fresh build - clear old checkpoints
+        checkpoint_manager.clear()
+        checkpoint_manager.init_run(config, max_docs)
 
     # All parameters from config
     csv_path = config.paths.csv_file
@@ -116,7 +146,7 @@ def main():
         logger.info(f"After filtering: {len(claims)} claims linked to loaded documents")
     else:
         logger.warning(f"Claims CSV not found: {claims_csv_path}")
-        logger.warning("Skipping claim loading (Steps 9-10 will be skipped)")
+        logger.warning("Skipping claim loading (Step 9 will be skipped)")
 
     # Step 2: Initialize graph builder
     logger.info("\n### STEP 2: Initializing graph builder ###")
@@ -126,7 +156,7 @@ def main():
         entity_types=config.graph_construction.entity_types,
         co_occur_threshold=config.graph_construction.co_occurrence_threshold,
         semantic_sim_threshold=config.graph_construction.semantic_similarity_threshold,
-        claim_similarity_threshold=config.graph_construction.claim_similarity_threshold,
+        claim_sim_threshold=config.graph_construction.claim_sim_threshold,
         topic_prob_threshold=config.graph_construction.topic_probability_threshold,
         temporal_max_year_gap=config.graph_construction.temporal_max_year_gap,
         temporal_decay_rate=config.graph_construction.temporal_decay_rate,
@@ -164,20 +194,22 @@ def main():
     logger.info("\n### STEP 3: Building knowledge graph ###")
     logger.info("Using LLM for topic labeling (requires Ollama running)...")
 
+    # Generate timestamp once — used as the unique graph ID for ALL outputs
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
     graph, topic_probabilities, chunk_ids, claim_retrieval_results = builder.build_graph(
         chunks=chunks,
         min_topic_size=config.graph_construction.min_topic_size,
         nr_topics=config.graph_construction.nr_topics,
         claims=claims,
         claim_to_docs=claim_to_docs,
-        doc_metadata=doc_metadata
+        doc_metadata=doc_metadata,
+        checkpoint_manager=checkpoint_manager,
+        graph_id=timestamp
     )
 
     # Step 4: Save graph and models
     logger.info("\n### STEP 4: Saving graph and models ###")
-
-    # Generate timestamp for unique graph identification
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     # Ensure output directories exist
     graphs_dir = Path(config.paths.graphs_dir)
@@ -218,13 +250,7 @@ def main():
     )
     logger.info(f"Topic probabilities saved to: {topic_probs_path} (shape: {topic_probabilities.shape})")
 
-    # 2c. Save claim pre-retrieval results for Strategy 5
-    if claim_retrieval_results:
-        claim_retrieval_filename = f"claim_retrieval_{timestamp}.json"
-        claim_retrieval_path = models_dir / claim_retrieval_filename
-        with open(claim_retrieval_path, 'w', encoding='utf-8') as f:
-            json.dump(claim_retrieval_results, f, indent=2, ensure_ascii=False)
-        logger.info(f"Claim pre-retrieval results saved to: {claim_retrieval_path} ({len(claim_retrieval_results)} claims)")
+    # Note: Claim pre-retrieval results (S5/S6/S7) are computed on-the-fly at retrieval time
 
     # 3. Save chunk embeddings to FAISS index in outputs/embeddings
     logger.info("Computing and saving chunk embeddings to FAISS...")
@@ -234,11 +260,19 @@ def main():
     chunk_nodes = [n for n, d in graph.nodes(data=True) if d.get('type') == 'chunk']
     chunk_texts = [graph.nodes[n]['text'] for n in chunk_nodes]
 
-    # Compute embeddings
+    # Compute embeddings with optimal batch size for GPU
+    import torch
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    batch_size = 128 if device == 'cuda' else 32
+
+    logger.info(f"Computing embeddings on {device.upper()} with batch_size={batch_size}...")
     embeddings = builder.embedding_model.encode(
         chunk_texts,
+        batch_size=batch_size,
         show_progress_bar=True,
-        normalize_embeddings=True
+        normalize_embeddings=True,
+        convert_to_numpy=True,
+        device=device
     )
 
     # Build and save FAISS index
@@ -263,7 +297,7 @@ def main():
             "graph": str(pickle_path),
             "topic_model": str(topic_model_path),
             "topic_probs": str(topic_probs_path),
-            "claim_retrieval": str(models_dir / f"claim_retrieval_{timestamp}.json") if claim_retrieval_results else None,
+            "claim_retrieval": None,  # Computed on-the-fly at retrieval time
             "embeddings_faiss": str(embeddings_dir / f"embeddings_{timestamp}.faiss"),
             "embeddings_meta": str(embeddings_dir / f"embeddings_{timestamp}.pkl"),
         },

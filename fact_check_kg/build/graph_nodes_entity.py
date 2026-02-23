@@ -129,26 +129,59 @@ def add_entities_and_mentions(
     entity_mentions_in_chunks = defaultdict(lambda: defaultdict(int))
 
     # Step 1: Extract all entities and count term frequency (TF)
+    # Use batch processing with nlp.pipe() for GPU acceleration
     start_time_extract = time.time()
-    for chunk in tqdm(chunks, desc="Extracting entities", disable=logger.level > logging.INFO):
-        chunk_id = chunk['chunk_id']
-        text = chunk['text']
 
-        # Extract entities
-        entities = extract_entities(text, nlp, entity_types)
+    # Prepare texts for batch processing
+    chunk_texts = [chunk['text'] for chunk in chunks]
+    chunk_ids_list = [chunk['chunk_id'] for chunk in chunks]
 
-        # Count entity occurrences in this chunk (for TF)
+    # Determine batch size based on GPU availability
+    import torch
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    batch_size = nlp.batch_size if hasattr(nlp, 'batch_size') else (1000 if device == 'cuda' else 50)
+
+    logger.info(f"Extracting entities with {device.upper()} using batch_size={batch_size}...")
+
+    # Batch process all texts with nlp.pipe() for better GPU utilization
+    for chunk_id, doc in zip(
+        chunk_ids_list,
+        tqdm(
+            nlp.pipe(chunk_texts, batch_size=batch_size),
+            total=len(chunk_texts),
+            desc="Extracting entities (batched)",
+            disable=logger.level > logging.INFO
+        )
+    ):
+        # Extract entities from spaCy doc
         entity_counts = defaultdict(int)
-        for entity_text, entity_type in entities:
-            entity_node = f"entity::{entity_type}::{entity_text}"
-            entity_counts[entity_node] += 1
-            chunk_to_entities[chunk_id].add(entity_node)
+        for ent in doc.ents:
+            # Filter for relevant entity types
+            if ent.label_ in entity_types:
+                entity_text = ent.text.strip().lower()
+
+                # Special handling for DATE: extract only the year
+                if ent.label_ == "DATE":
+                    # Look for 4-digit year in the entity text
+                    year_match = re.search(r'\b(19|20)\d{2}\b', entity_text)
+                    if year_match:
+                        year = year_match.group(0)
+                        entity_node = f"entity::DATE::{year}"
+                        entity_counts[entity_node] += 1
+                        chunk_to_entities[chunk_id].add(entity_node)
+                    # Skip dates without a clear year
+                else:
+                    # For non-DATE entities, keep as is
+                    if len(entity_text) > 2:  # Filter very short entities
+                        entity_node = f"entity::{ent.label_}::{entity_text}"
+                        entity_counts[entity_node] += 1
+                        chunk_to_entities[chunk_id].add(entity_node)
 
         # Store counts
         for entity_node, count in entity_counts.items():
             entity_mentions_in_chunks[entity_node][chunk_id] = count
 
-    log_step_fn("Extracting entities", start_time_extract, len(chunks))
+    log_step_fn("Extracting entities (batched)", start_time_extract, len(chunks))
 
     # Step 2: Calculate IDF (Inverse Document Frequency)
     total_chunks = len(chunks)
@@ -359,10 +392,19 @@ def add_entity_semantic_similarity(
 
     # Embed entities (just the name, not context - Option B)
     logger.info(f"Embedding {len(entity_texts)} non-DATE entities...")
+
+    # Use optimal batch size based on device
+    import torch
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    batch_size = 128 if device == 'cuda' else 32
+
     embeddings = embedding_model.encode(
         entity_texts,
-        show_progress_bar=False,
-        normalize_embeddings=True
+        batch_size=batch_size,
+        show_progress_bar=True,
+        normalize_embeddings=True,
+        convert_to_numpy=True,
+        device=device
     )
 
     # Compute similarity matrix

@@ -68,6 +68,7 @@ class HybridRetriever:
         zeta: float = 0.0,
         eta: float = 0.0,
         top_k: int = 10,
+        top_docs: int = 50,
         theme_threshold: float = 0.01,
         entity_relevance_threshold: float = 0.1,
         theme_relevance_threshold: float = 0.1,
@@ -98,6 +99,7 @@ class HybridRetriever:
             zeta: Weight for claim-topic traversal score (S6)
             eta: Weight for claim-keyphrase score (S7)
             top_k: Number of chunks to return
+            top_docs: Number of top documents to return per strategy and overall
             theme_threshold: Minimum confidence for theme detection
             entity_relevance_threshold: Minimum relevance to continue entity traversal
             theme_relevance_threshold: Minimum relevance to continue theme traversal
@@ -128,6 +130,7 @@ class HybridRetriever:
 
         # Parameters
         self.top_k = top_k
+        self.top_docs = top_docs
         self.theme_threshold = theme_threshold
         self.entity_relevance_threshold = entity_relevance_threshold
         self.theme_relevance_threshold = theme_relevance_threshold
@@ -151,7 +154,8 @@ class HybridRetriever:
         self._precompute_chunk_embeddings(graph_id, cache_dir)
         self._precompute_chunk_topic_distributions(graph_id, models_dir)
         self._precompute_claim_embeddings()
-        self._load_claim_retrieval_results(graph_id, models_dir)
+        # Note: Claim retrieval results are no longer precomputed — S5/S6/S7 traverse
+        # REVIEWS → CONTAINS edges on-the-fly at retrieval time.
 
     def _precompute_chunk_embeddings(self, graph_id: Optional[str] = None, cache_dir: Optional[str] = None):
         """
@@ -300,39 +304,6 @@ class HybridRetriever:
 
         self.logger.info(f"Pre-computed embeddings for {len(self.claim_nodes)} claims")
 
-    def _load_claim_retrieval_results(self, graph_id: Optional[str] = None, models_dir: Optional[str] = None):
-        """
-        Load pre-computed claim retrieval results from build phase.
-
-        Args:
-            graph_id: Graph ID to load results for
-            models_dir: Directory containing claim retrieval results
-        """
-        import json
-        from pathlib import Path
-
-        self.claim_retrieval_results = {}
-
-        if not graph_id or not models_dir:
-            self.logger.warning("No graph_id or models_dir provided, claim pre-retrieval results not loaded")
-            return
-
-        try:
-            models_path = Path(models_dir)
-            claim_retrieval_file = models_path / f"claim_retrieval_{graph_id}.json"
-
-            if claim_retrieval_file.exists():
-                self.logger.info(f"Loading claim pre-retrieval results from: {claim_retrieval_file}")
-                with open(claim_retrieval_file, 'r', encoding='utf-8') as f:
-                    self.claim_retrieval_results = json.load(f)
-                self.logger.info(f"Loaded pre-retrieval results for {len(self.claim_retrieval_results)} claims")
-            else:
-                self.logger.warning(f"Claim retrieval file not found: {claim_retrieval_file}")
-                self.logger.warning("Strategy 5 will fall back to computing results at retrieval time")
-        except Exception as e:
-            self.logger.warning(f"Error loading claim retrieval results: {e}")
-            self.logger.warning("Strategy 5 will fall back to computing results at retrieval time")
-
     def retrieve_semantic(self, claim: str) -> Dict[str, float]:
         """Strategy 1: Semantic Similarity using embedding similarity."""
         return _retrieve_semantic(
@@ -354,7 +325,7 @@ class HybridRetriever:
             logger=self.logger
         )
 
-    def retrieve_entity(self, claim: str) -> Dict[str, float]:
+    def retrieve_entity(self, claim: str) -> Tuple[Dict[str, float], Dict]:
         """Strategy 4: Entity Graph Traversal using graph traversal with relevance propagation."""
         return _retrieve_entity(
             claim=claim,
@@ -377,7 +348,7 @@ class HybridRetriever:
         )
 
     def retrieve_claim_document(self, query: str) -> Tuple[Dict[str, float], List[Dict]]:
-        """Strategy 5: Claim-Based Retrieval using pre-computed claim retrieval results."""
+        """Strategy 5: Claim-Based Retrieval via REVIEWS → CONTAINS graph traversal."""
         return _retrieve_claim_document(
             query=query,
             graph=self.graph,
@@ -385,15 +356,12 @@ class HybridRetriever:
             claim_embeddings=self.claim_embeddings,
             claim_nodes=self.claim_nodes,
             claim_texts=self.claim_texts,
-            claim_retrieval_results=self.claim_retrieval_results,
             claim_top_k=self.claim_top_k,
             logger=self.logger,
-            explore_similar_claims=self.explore_similar_claims,
-            max_expansion_depth=self.max_claim_expansion_depth
         )
 
     def retrieve_claim_topic_traversal(self, query: str) -> Tuple[Dict[str, float], List[Dict]]:
-        """Strategy 6: Claim-Based Topic Distribution Traversal."""
+        """Strategy 6: Claim-Based Topic Distribution Traversal via REVIEWS → CONTAINS."""
         return _retrieve_claim_topic_traversal(
             query=query,
             graph=self.graph,
@@ -404,13 +372,12 @@ class HybridRetriever:
             claim_embeddings=self.claim_embeddings,
             claim_nodes=self.claim_nodes,
             claim_texts=self.claim_texts,
-            claim_retrieval_results=self.claim_retrieval_results,
             claim_top_k=self.claim_top_k,
-            logger=self.logger
+            logger=self.logger,
         )
 
     def retrieve_claim_keyphrase_similarity(self, query: str) -> Tuple[Dict[str, float], List[Dict]]:
-        """Strategy 7: Claim-Based KeyBERT Phrase Similarity."""
+        """Strategy 7: Claim-Based KeyBERT Phrase Similarity via REVIEWS → CONTAINS."""
         # Lazy-load KeyBERT model if not provided
         if self.keybert_model is None:
             from keybert import KeyBERT
@@ -425,11 +392,80 @@ class HybridRetriever:
             claim_embeddings=self.claim_embeddings,
             claim_nodes=self.claim_nodes,
             claim_texts=self.claim_texts,
-            claim_retrieval_results=self.claim_retrieval_results,
             claim_top_k=self.claim_top_k,
             keyphrase_top_n=self.keyphrase_top_n,
-            logger=self.logger
+            logger=self.logger,
         )
+
+    def _aggregate_to_documents(
+        self,
+        chunk_results: List[Dict],
+    ) -> Tuple[List[Dict], Dict[str, List[Dict]]]:
+        """
+        Aggregate chunk-level scores to document-level scores using max pooling.
+
+        Max pooling: the document score on each dimension equals the maximum score
+        of any of its chunks on that dimension.  This prevents documents with more
+        chunks from being systematically favoured — only the single best piece of
+        evidence from each document contributes.
+
+        doc_score_total    = max(chunk.score_total)  over all chunks in the doc
+        doc_score_<strat>  = max(chunk.score_<strat>) over all chunks in the doc
+
+        Returns:
+            - doc_results: all documents with at least one scored chunk, sorted by
+              doc_score_total descending (no length limit — caller truncates)
+            - per_strategy_docs: dict mapping strategy key to list of docs (only those
+              with a non-zero strategy score), sorted by that strategy score descending,
+              each truncated to self.top_docs
+        """
+        from collections import defaultdict
+
+        # Group chunks by document
+        doc_chunks: Dict[str, List[Dict]] = defaultdict(list)
+        for chunk in chunk_results:
+            doc_chunks[chunk['doc_id']].append(chunk)
+
+        doc_results = []
+        for doc_id, chunks in doc_chunks.items():
+            best_chunk = max(chunks, key=lambda c: c['score_total'])
+            doc_results.append({
+                'doc_id': doc_id,
+                'doc_score_total': best_chunk['score_total'],
+                'doc_score_sem': max(c['score_sem'] for c in chunks),
+                'doc_score_topic_dist': max(c['score_topic_dist'] for c in chunks),
+                'doc_score_theme': max(c['score_theme'] for c in chunks),
+                'doc_score_entity': max(c['score_entity'] for c in chunks),
+                'doc_score_claim_doc': max(c.get('score_claim_doc', 0.0) for c in chunks),
+                'doc_score_claim_topic': max(c.get('score_claim_topic', 0.0) for c in chunks),
+                'doc_score_claim_keyphrase': max(c.get('score_claim_keyphrase', 0.0) for c in chunks),
+                'n_chunks_scored': len(chunks),
+                'best_chunk_id': best_chunk['chunk_id'],
+                'best_chunk_text': best_chunk['text'],
+            })
+
+        # Overall ranking by final score
+        doc_results.sort(key=lambda d: d['doc_score_total'], reverse=True)
+
+        # Per-strategy rankings (only docs with non-zero score for that strategy)
+        strategy_keys = [
+            ('S1_semantic',         'doc_score_sem'),
+            ('S2_topic_dist',       'doc_score_topic_dist'),
+            ('S3_thematic',         'doc_score_theme'),
+            ('S4_entity',           'doc_score_entity'),
+            ('S5_claim_doc',        'doc_score_claim_doc'),
+            ('S6_claim_topic',      'doc_score_claim_topic'),
+            ('S7_claim_keyphrase',  'doc_score_claim_keyphrase'),
+        ]
+        per_strategy_docs: Dict[str, List[Dict]] = {}
+        for strategy_name, score_key in strategy_keys:
+            per_strategy_docs[strategy_name] = sorted(
+                [d for d in doc_results if d[score_key] > 0.0],
+                key=lambda d: d[score_key],
+                reverse=True
+            )[:self.top_docs]
+
+        return doc_results, per_strategy_docs
 
     def retrieve(self, claim: str) -> List[Dict]:
         """
@@ -480,7 +516,7 @@ class HybridRetriever:
 
         # Strategy 4: Entity Graph Traversal
         t0 = time.time()
-        S4 = self.retrieve_entity(claim)
+        S4, entity_info_s4 = self.retrieve_entity(claim)
         strategy_timings['S4_entity'] = time.time() - t0
 
         # Strategy 5: Claim-Based Retrieval (using pre-computed results)
@@ -547,6 +583,10 @@ class HybridRetriever:
         # Sort by total score
         results.sort(key=lambda x: x['score_total'], reverse=True)
 
+        # Document-level aggregation (uses ALL chunks, not just top-k)
+        doc_results, per_strategy_doc_results = self._aggregate_to_documents(results)
+        top_doc_results = doc_results[:self.top_docs]
+
         # Sample random chunks from outside top-K for comparison in reports
         remaining = results[self.top_k:]
         random_samples = random.sample(remaining, min(5, len(remaining))) if remaining else []
@@ -554,7 +594,7 @@ class HybridRetriever:
         # Return top-K
         top_results = results[:self.top_k]
 
-        # Add claim, matched claims, and detected themes info to results
+        # Add claim, matched claims, detected themes, and entity info to results
         for i, result in enumerate(top_results):
             result['claim'] = claim
             if i == 0:
@@ -566,6 +606,10 @@ class HybridRetriever:
                     result['matched_claims_s7'] = matched_claims_s7
                 if detected_themes:
                     result['detected_themes'] = detected_themes
+                result['doc_results'] = top_doc_results
+                result['per_strategy_doc_results'] = per_strategy_doc_results
+                if entity_info_s4:
+                    result['entity_info_s4'] = entity_info_s4
                 if random_samples:
                     result['random_samples'] = random_samples
 
@@ -573,22 +617,35 @@ class HybridRetriever:
         if matched_claims:
             self.logger.info(f"\n--- Matched Claims (S5) ---")
             for mc in matched_claims:
-                self.logger.info(f"  Claim: {mc['claim_node']} (similarity: {mc['query_similarity']:.3f})")
-                self.logger.info(f"    Text: {mc['claim_text'][:80]}...")
-                self.logger.info(f"    Pre-computed chunks: {len(mc['retrieval_results'])}")
+                source_tag = f"[{mc.get('source', 'direct')}]"
+                self.logger.info(f"  {source_tag} Claim: {mc['claim_node']} (sim: {mc['query_similarity']:.3f})")
+                preview = mc['claim_text'][:80] + "..." if len(mc['claim_text']) > 80 else mc['claim_text']
+                self.logger.info(f"    Text: {preview}")
+                self.logger.info(f"    Chunks found via REVIEWS: {mc['chunks_found']}")
 
         if matched_claims_s6:
             self.logger.info(f"\n--- Matched Claims (S6 Topic) ---")
             for mc in matched_claims_s6:
-                self.logger.info(f"  Claim: {mc['claim_node']} (similarity: {mc['query_similarity']:.3f})")
+                source_tag = f"[{mc.get('source', 'direct')}]"
+                self.logger.info(f"  {source_tag} Claim: {mc['claim_node']} (sim: {mc['query_similarity']:.3f})")
+                preview = mc['claim_text'][:80] + "..." if len(mc['claim_text']) > 80 else mc['claim_text']
+                self.logger.info(f"    Text: {preview}")
                 self.logger.info(f"    Rating: {mc.get('rating', 'N/A')} | Chunks found: {mc['chunks_found']}")
 
         # S7 returns a dict with 'matched_claims' key
         s7_claims = matched_claims_s7.get('matched_claims', []) if isinstance(matched_claims_s7, dict) else matched_claims_s7
         if s7_claims:
+            s7_keyphrases = matched_claims_s7.get('query_keyphrases', []) if isinstance(matched_claims_s7, dict) else []
+            if s7_keyphrases:
+                self.logger.info(f"\n--- S7 Query Keyphrases ---")
+                for phrase, score in s7_keyphrases:
+                    self.logger.info(f"  '{phrase}': {score:.3f}")
             self.logger.info(f"\n--- Matched Claims (S7 KeyPhrase) ---")
             for mc in s7_claims:
-                self.logger.info(f"  Claim: {mc['claim_node']} (similarity: {mc['query_similarity']:.3f})")
+                source_tag = f"[{mc.get('source', 'direct')}]"
+                self.logger.info(f"  {source_tag} Claim: {mc['claim_node']} (sim: {mc['query_similarity']:.3f})")
+                preview = mc['claim_text'][:80] + "..." if len(mc['claim_text']) > 80 else mc['claim_text']
+                self.logger.info(f"    Text: {preview}")
                 self.logger.info(f"    Rating: {mc.get('rating', 'N/A')} | Chunks found: {mc['chunks_found']}")
 
         self.logger.info(f"\nTop {len(top_results)} results:")
@@ -612,6 +669,16 @@ class HybridRetriever:
             if len(result['text']) > 150:
                 text_preview += "..."
             self.logger.info(f"{i}. [{result['chunk_id']}] {text_preview}")
+
+        # Log document-level summary
+        self.logger.info(f"\n--- Document-level results (max-pooling) ---")
+        self.logger.info(f"  Total documents with at least one scored chunk: {len(doc_results)}")
+        self.logger.info(f"  Top {min(self.top_docs, len(top_doc_results))} documents (by final score):")
+        for i, doc in enumerate(top_doc_results[:5], 1):
+            self.logger.info(
+                f"  {i}. {doc['doc_id']} | total={doc['doc_score_total']:.3f} | "
+                f"n_chunks={doc['n_chunks_scored']} | best={doc['best_chunk_id']}"
+            )
 
         # Calculate and display retrieval time
         retrieval_time = time.time() - start_time

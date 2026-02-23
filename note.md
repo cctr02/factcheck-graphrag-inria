@@ -54,3 +54,16 @@ From claim found close to the query, do a relevance propagation to find other cl
 
 - try to run this : https://aclanthology.org/2025.findings-emnlp.852.pdf
 
+
+pourquoi on a pas détecté covid-19 en entité et dans aucun chunk 
+
+pourquoi on a still thematic score qui peut être égal à un ? 
+
+faudrait log dans la création du graph des statistiques sur les aretes thematiques 
+
+lier la test_data qui est couplé query / doc
+et nous on veut lier ce doc avec les doc qu'on a 
+
+et réfléchir à une manière de scorer notre retrieval sur le test_data 
+
+faire gaffe quand on fait les test d'enlever les query où les ground docs sont pas dans les docs qu'on considère 
