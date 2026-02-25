@@ -587,7 +587,7 @@ class RetrievalResultsManager:
             json.dump(formatted, f, indent=2)
 
         # Generate text report
-        text_report = self._generate_text_report(formatted, rankings)
+        text_report = self._generate_text_report(formatted)
         text_path = self.results_dir / f"{filename_base}.txt"
         with open(text_path, 'w', encoding='utf-8') as f:
             f.write(text_report)
@@ -601,207 +601,278 @@ class RetrievalResultsManager:
     def _generate_text_report(
         self,
         formatted: Dict,
-        rankings: Dict[str, List[Dict]]
     ) -> str:
         """
         Generate human-readable text report.
 
-        Args:
-            formatted: Formatted results dictionary
-            rankings: Rankings dictionary
-
-        Returns:
-            Text report string
+        Structure:
+          1. Header (claim, weights, counts)
+          2. Query analysis (themes, entities, matched claims)
+          3. Statistics (chunk-level score distribution)
+          4. Per-strategy rankings: chunks + docs for each S1–S7
+          5. Final hybrid aggregation: chunks + docs ranked by total score
+          6. Random samples (if any)
+          7. All retrieved chunks (full text)
         """
-        report = []
+        H1 = "=" * 80   # major section separator
+        H2 = "-" * 80   # minor separator
 
-        # Header
-        report.append("=" * 80)
+        # Strategy definitions: (key, label, weight_key, chunk_score_key, symbol)
+        STRATEGIES = [
+            ('S1_semantic',        'S1 Semantic',        'alpha_semantic',      'semantic',        'α'),
+            ('S2_topic_dist',      'S2 Topic Dist',      'beta_topic_dist',     'topic_dist',      'β'),
+            ('S3_thematic',        'S3 Thematic',        'gamma_thematic',      'thematic',        'γ'),
+            ('S4_entity',          'S4 Entity',          'delta_entity',        'entity',          'δ'),
+            ('S5_claim_doc',       'S5 Claim-Doc',       'epsilon_claim_doc',   'claim_doc',       'ε'),
+            ('S6_claim_topic',     'S6 Claim-Topic',     'zeta_claim_topic',    'claim_topic',     'ζ'),
+            ('S7_claim_keyphrase', 'S7 Claim-KP',        'eta_claim_keyphrase', 'claim_keyphrase', 'η'),
+        ]
+        # Short labels for score columns
+        SCORE_COL = {
+            'semantic': 'S1', 'topic_dist': 'S2', 'thematic': 'S3',
+            'entity': 'S4', 'claim_doc': 'S5', 'claim_topic': 'S6', 'claim_keyphrase': 'S7',
+        }
+
+        report = []
+        meta = formatted['metadata']
+        weights = meta['weights']
+        all_chunks = formatted.get("results", [])
+        doc_res = formatted.get("doc_results", [])
+        per_strat_docs = formatted.get("per_strategy_doc_results", {})
+
+        # ── 1. HEADER ─────────────────────────────────────────────────────────
+        report.append(H1)
         report.append("RETRIEVAL RESULTS REPORT")
-        report.append("=" * 80)
-        report.append(f"Timestamp: {formatted['metadata']['timestamp']}")
-        report.append(f"Claim: {formatted['metadata']['claim']}")
-        report.append(f"\nWeights:")
-        report.append(f"  Alpha (Semantic): {formatted['metadata']['weights']['alpha_semantic']}")
-        report.append(f"  Beta (Topic Dist): {formatted['metadata']['weights']['beta_topic_dist']}")
-        report.append(f"  Gamma (Thematic): {formatted['metadata']['weights']['gamma_thematic']}")
-        report.append(f"  Delta (Entity): {formatted['metadata']['weights']['delta_entity']}")
-        report.append(f"  Epsilon (Claim Doc): {formatted['metadata']['weights']['epsilon_claim_doc']}")
-        report.append(f"  Zeta (Claim Topic): {formatted['metadata']['weights']['zeta_claim_topic']}")
-        report.append(f"  Eta (Claim KeyPhrase): {formatted['metadata']['weights']['eta_claim_keyphrase']}")
-        report.append(f"\nTotal Results: {formatted['metadata']['total_results']}")
+        report.append(H1)
+        report.append(f"Timestamp : {meta['timestamp']}")
+        report.append(f"Claim     : {meta['claim']}")
+        report.append("")
+        report.append("Weights:")
+        for _, label, wkey, _, sym in STRATEGIES:
+            report.append(f"  {sym} {label:<22} {weights[wkey]}")
+        report.append("")
+        n_chunks = meta['total_results']
+        n_docs = len(doc_res)
+        report.append(f"Chunks returned (top_k): {n_chunks}   Documents scored: {n_docs}")
         report.append("")
 
-        # Detected themes (S3 query classification)
-        if "detected_themes" in formatted.get("metadata", {}):
-            report.append("DETECTED THEMES (Query Classification)")
-            report.append("-" * 80)
-            for i, theme in enumerate(formatted["metadata"]["detected_themes"], 1):
-                keywords_str = ", ".join(theme.get("keywords", [])) if theme.get("keywords") else "—"
-                report.append(f"  {i}. [prob={theme['probability']:.4f}] {theme['label']}  ({theme['theme_node']})")
-                report.append(f"      Keywords: {keywords_str}")
+        # ── 2. QUERY ANALYSIS ─────────────────────────────────────────────────
+        report.append(H1)
+        report.append("QUERY ANALYSIS")
+        report.append(H1)
+
+        # Detected themes
+        themes = meta.get("detected_themes", [])
+        if themes:
+            report.append("DETECTED THEMES (S3)")
+            report.append(H2)
+            for i, t in enumerate(themes, 1):
+                kw = ", ".join(t.get("keywords", [])) or "—"
+                report.append(f"  #{i:2}  [p={t['probability']:.4f}]  {t['label']}  ({t['theme_node']})")
+                report.append(f"        kw: {kw}")
             report.append("")
 
-        # Extracted entities (S4)
-        ent_meta = formatted.get("metadata", {}).get("extracted_entities")
+        # Extracted entities
+        ent_meta = meta.get("extracted_entities")
         if ent_meta:
-            report.append("EXTRACTED ENTITIES (S4 — Entity Graph Traversal)")
-            report.append("-" * 80)
+            report.append("EXTRACTED ENTITIES (S4)")
+            report.append(H2)
             extracted = ent_meta.get("extracted", [])
             found = set(ent_meta.get("found_in_graph", []))
-            not_found = set(ent_meta.get("not_in_graph", []))
+            not_found_set = set(ent_meta.get("not_in_graph", []))
             if extracted:
                 for ent in extracted:
                     node_id = f"entity::{ent['type']}::{ent['text']}"
                     status = "[in graph]" if node_id in found else "[missing] "
-                    report.append(f"  {status} {ent['type']}: {ent['text']}")
+                    report.append(f"  {status}  {ent['type']:<8}  {ent['text']}")
             else:
                 report.append("  (no entities extracted from query)")
-            report.append(f"  → {len(found)} found in graph, {len(not_found)} missing")
+            report.append(f"  → {len(found)} found, {len(not_found_set)} missing")
             report.append("")
 
-        # Matched claims — show S5 direct/graph (top 3 each), skip S6/S7 (same claim matching)
-        s5_claims = formatted.get("metadata", {}).get("matched_claims_s5", [])
+        # Matched claims (S5)
+        s5_claims = meta.get("matched_claims_s5", [])
         if s5_claims:
-            direct = [c for c in s5_claims if c.get("source") == "direct"]
-            graph  = [c for c in s5_claims if c.get("source") != "direct"]
-            report.append("MATCHED CLAIMS (S5 — Direct semantic similarity)")
-            report.append("-" * 80)
+            direct   = [c for c in s5_claims if c.get("source") == "direct"]
+            expanded = [c for c in s5_claims if c.get("source") != "direct"]
+            report.append("MATCHED CLAIMS (S5)")
+            report.append(H2)
+            report.append("  Direct semantic similarity:")
             if direct:
-                for c in direct[:3]:
-                    preview = c["claim_text"][:120] + "..." if len(c["claim_text"]) > 120 else c["claim_text"]
-                    report.append(f"  [direct] [sim={c['similarity']:.4f}] [rating={c.get('rating','N/A')}] {preview}")
+                for c in direct[:5]:
+                    txt = c["claim_text"][:110] + "..." if len(c["claim_text"]) > 110 else c["claim_text"]
+                    report.append(f"    sim={c['similarity']:.4f}  [{c.get('rating','N/A')}]  {txt}")
             else:
-                report.append("  (none)")
-            report.append("")
-            report.append("MATCHED CLAIMS (S5 — Embedding-expanded neighbors) Direct similarity between claim and query")
-            report.append("-" * 80)
-            if graph:
-                for c in graph[:3]:
-                    preview = c["claim_text"][:120] + "..." if len(c["claim_text"]) > 120 else c["claim_text"]
-                    report.append(f"  [embed]  [sim={c['similarity']:.4f}] [rating={c.get('rating','N/A')}] {preview}")
+                report.append("    (none)")
+            report.append("  Embedding-expanded neighbors:")
+            if expanded:
+                for c in expanded[:5]:
+                    txt = c["claim_text"][:110] + "..." if len(c["claim_text"]) > 110 else c["claim_text"]
+                    report.append(f"    sim={c['similarity']:.4f}  [{c.get('rating','N/A')}]  {txt}")
             else:
-                report.append("  (none — all below expansion_threshold)")
+                report.append("    (none)")
             report.append("")
 
-        # Statistics
+        # ── 3. STATISTICS ─────────────────────────────────────────────────────
         if "statistics" in formatted:
             stats = formatted["statistics"]
-            report.append("STATISTICS")
-            report.append("-" * 80)
-            report.append(f"\nScore Statistics:")
-            for score_type, values in stats["score_statistics"].items():
-                report.append(f"\n  {score_type.capitalize()}:")
-                report.append(f"    Mean: {values['mean']:.4f}")
-                report.append(f"    Min: {values['min']:.4f}")
-                report.append(f"    Max: {values['max']:.4f}")
-                report.append(f"    Median: {values['median']:.4f}")
-
-            report.append(f"\n\nComponent Dominance:")
-            for component, count in stats["component_analysis"].items():
-                percentage = (count / stats["total_results"]) * 100
-                report.append(f"  {component.capitalize()}: {count} ({percentage:.1f}%)")
+            report.append(H1)
+            report.append(f"STATISTICS  (chunk-level, n={stats['total_results']})")
+            report.append(H1)
+            report.append(f"  {'Score':<16}  {'mean':>7}  {'max':>7}  {'min':>7}  {'median':>7}")
+            report.append(f"  {H2[:60]}")
+            for stype, v in stats["score_statistics"].items():
+                report.append(
+                    f"  {stype:<16}  {v['mean']:7.4f}  {v['max']:7.4f}  {v['min']:7.4f}  {v['median']:7.4f}"
+                )
+            dom = stats.get("component_analysis", {})
+            if dom:
+                n = stats["total_results"]
+                dom_str = "  ".join(f"{k}={cnt} ({cnt/n*100:.0f}%)" for k, cnt in dom.items())
+                report.append(f"\n  Dominant: {dom_str}")
             report.append("")
 
-        # Document-level results
-        if "doc_results" in formatted:
-            doc_res = formatted["doc_results"]
-            report.append(f"\nTOP DOCUMENTS — Final score (max-pooling over chunks)")
-            report.append("-" * 80)
-            report.append(f"  Scoring: doc_score = max(chunk_score) — unbiased by document length")
-            report.append(f"  Total documents retrieved: {len(doc_res)}")
-            report.append("")
-            for d in doc_res[:50]:
+        # ── 4. PER-STRATEGY RANKINGS ──────────────────────────────────────────
+        report.append(H1)
+        report.append("PER-STRATEGY RANKINGS  (top 10 chunks / top 10 docs)")
+        report.append(H1)
+
+        for strat_key, label, wkey, chunk_score_key, sym in STRATEGIES:
+            w = weights[wkey]
+            rule_fill = "─" * max(1, 60 - len(label))
+            report.append(f"\n── {label}  [{sym}={w}]  {rule_fill}")
+
+            # --- Chunks ranked by this strategy's score ---
+            sorted_chunks = sorted(
+                all_chunks,
+                key=lambda r: r['scores'].get(chunk_score_key, 0),
+                reverse=True
+            )
+            non_zero_chunks = [r for r in sorted_chunks if r['scores'].get(chunk_score_key, 0) > 0]
+            col = SCORE_COL[chunk_score_key]
+            report.append(
+                f"  Chunks by {col} score  ({len(non_zero_chunks)} non-zero / {len(all_chunks)} total):"
+            )
+            if non_zero_chunks:
+                for rank, r in enumerate(non_zero_chunks[:10], 1):
+                    sc = r['scores'].get(chunk_score_key, 0)
+                    report.append(
+                        f"    #{rank:<2}  {r['chunk_id']:<24}  doc={r['document_id']:<5}"
+                        f"  {col}={sc:.4f}   total={r['scores']['total']:.4f}"
+                    )
+            else:
+                report.append("    (no chunks scored by this strategy in top_k pool)")
+
+            # --- Docs ranked by this strategy's pooled score ---
+            strat_docs = per_strat_docs.get(strat_key, [])
+            non_zero_docs = [d for d in strat_docs if d['score'] > 0]
+            report.append(
+                f"  Documents by {col} score  ({len(non_zero_docs)} non-zero / {len(strat_docs)} total):"
+            )
+            if non_zero_docs:
+                for d in non_zero_docs[:10]:
+                    report.append(
+                        f"    #{d['rank']:<2}  doc={d['doc_id']:<5}  n={d['n_chunks_scored']:<3}"
+                        f"  {col}={d['score']:.4f}"
+                    )
+            else:
+                report.append("    (no documents scored by this strategy)")
+
+        report.append("")
+
+        # ── 5. FINAL HYBRID AGGREGATION ───────────────────────────────────────
+        report.append(H1)
+        report.append("FINAL HYBRID AGGREGATION")
+        report.append(H1)
+
+        # Chunk ranking by total score
+        sorted_final_chunks = sorted(
+            all_chunks, key=lambda r: r['scores']['total'], reverse=True
+        )
+        report.append(f"\nChunks  (top {len(sorted_final_chunks)}, ranked by total score):")
+        report.append(
+            f"  {'#':<3}  {'chunk_id':<24}  {'doc':<5}  {'total':>7}"
+            f"  {'S1':>7}  {'S2':>7}  {'S3':>7}  {'S4':>7}  {'S5':>7}  {'S6':>7}  {'S7':>7}"
+        )
+        report.append(f"  {H2}")
+        for rank, r in enumerate(sorted_final_chunks, 1):
+            s = r['scores']
+            report.append(
+                f"  #{rank:<2}  {r['chunk_id']:<24}  {r['document_id']:<5}  {s['total']:7.4f}"
+                f"  {s['semantic']:7.4f}  {s['topic_dist']:7.4f}  {s['thematic']:7.4f}"
+                f"  {s['entity']:7.4f}  {s.get('claim_doc',0):7.4f}  {s.get('claim_topic',0):7.4f}"
+                f"  {s.get('claim_keyphrase',0):7.4f}"
+            )
+            # Show a short text preview for the top 10
+            if rank <= 10:
+                preview = r.get('text_preview', '')
+                if preview:
+                    report.append(f"       > {preview[:120]}{'...' if len(preview) > 120 else ''}")
+
+        # Document ranking by total doc score
+        if doc_res:
+            report.append(f"\nDocuments  (top {len(doc_res)}, ranked by doc total score):")
+            report.append(
+                f"  {'#':<3}  {'doc':<5}  {'n':>3}  {'total':>7}"
+                f"  {'S1':>7}  {'S2':>7}  {'S3':>7}  {'S4':>7}  {'S5':>7}  {'S6':>7}  {'S7':>7}"
+            )
+            report.append(f"  {H2}")
+            for d in doc_res:
                 s = d['scores']
                 report.append(
-                    f"  {d['rank']:2}. {d['doc_id']} | total={s['total']:.4f} | "
-                    f"n_chunks={d['n_chunks_scored']} | best_chunk={d['best_chunk_id']}"
-                )
-                report.append(
-                    f"      sem={s['semantic']:.4f}  topicDist={s['topic_dist']:.4f}  "
-                    f"theme={s['thematic']:.4f}  entity={s['entity']:.4f}  "
-                    f"claimDoc={s['claim_doc']:.4f}  claimTopic={s['claim_topic']:.4f}  "
-                    f"claimKP={s['claim_keyphrase']:.4f}"
+                    f"  #{d['rank']:<2}  {d['doc_id']:<5}  {d['n_chunks_scored']:3}  {s['total']:7.4f}"
+                    f"  {s['semantic']:7.4f}  {s['topic_dist']:7.4f}  {s['thematic']:7.4f}"
+                    f"  {s['entity']:7.4f}  {s['claim_doc']:7.4f}  {s['claim_topic']:7.4f}"
+                    f"  {s['claim_keyphrase']:7.4f}"
                 )
                 preview = d.get('best_chunk_text_preview', '')
-                if preview:
-                    report.append(f"      > {preview[:120]}{'...' if len(preview) > 120 else ''}")
-            report.append("")
+                if preview and d['rank'] <= 10:
+                    report.append(f"       > {preview[:120]}{'...' if len(preview) > 120 else ''}")
 
-        if "per_strategy_doc_results" in formatted:
-            report.append(f"\nPER-STRATEGY DOCUMENT RANKINGS (max-pooling, top 10 shown)")
-            report.append("-" * 80)
-            strategy_labels = {
-                'S1_semantic':        'S1 Semantic',
-                'S2_topic_dist':      'S2 Topic Distribution',
-                'S3_thematic':        'S3 Thematic',
-                'S4_entity':          'S4 Entity',
-                'S5_claim_doc':       'S5 Claim-Document',
-                'S6_claim_topic':     'S6 Claim-Topic',
-                'S7_claim_keyphrase': 'S7 Claim-Keyphrase',
-            }
-            for strategy, docs in formatted["per_strategy_doc_results"].items():
-                label = strategy_labels.get(strategy, strategy)
-                report.append(f"\n  {label} ({len(docs)} docs):")
-                for d in docs[:10]:
-                    report.append(f"    {d['rank']:2}. {d['doc_id']} | score={d['score']:.4f} | n_chunks={d['n_chunks_scored']}")
-            report.append("")
+        report.append("")
 
-        # Top 10 results by total score
-        report.append("\nTOP 10 RESULTS (By Total Score)")
-        report.append("-" * 80)
-        for i, result in enumerate(formatted["results"][:10], 1):
-            report.append(f"\n{i}. Document: {result['document_id']} | Chunk: {result['chunk_id']}")
-            report.append(f"   Total Score: {result['scores']['total']:.4f}")
-            report.append(f"   Component Scores:")
-            report.append(f"     Semantic: {result['scores']['semantic']:.4f} (contrib: {result['score_contributions']['semantic_contribution']:.4f})")
-            report.append(f"     Thematic: {result['scores']['thematic']:.4f} (contrib: {result['score_contributions']['thematic_contribution']:.4f})")
-            report.append(f"     Entity: {result['scores']['entity']:.4f} (contrib: {result['score_contributions']['entity_contribution']:.4f})")
-            report.append(f"     Topic Dist: {result['scores']['topic_dist']:.4f} (contrib: {result['score_contributions']['topic_dist_contribution']:.4f})")
-            report.append(f"     Claim Doc:  {result['scores'].get('claim_doc', 0):.4f} (contrib: {result['score_contributions'].get('claim_doc_contribution', 0):.4f})")
-            report.append(f"     Claim Topic: {result['scores'].get('claim_topic', 0):.4f} (contrib: {result['score_contributions'].get('claim_topic_contribution', 0):.4f})")
-            report.append(f"     Claim KP:   {result['scores'].get('claim_keyphrase', 0):.4f} (contrib: {result['score_contributions'].get('claim_keyphrase_contribution', 0):.4f})")
-            report.append(f"   Source: {result.get('source_query', 'original_query')}")
-            report.append(f"   {result['score_explanation']}")
-            report.append(f"   Text: {result['text_preview']}")
-
-        # Random sample chunks for comparison
+        # ── 6. RANDOM SAMPLES ─────────────────────────────────────────────────
         if "random_samples" in formatted:
-            report.append("\n\nRANDOM SAMPLE CHUNKS (for comparison)")
-            report.append("-" * 80)
+            report.append(H1)
+            report.append("RANDOM SAMPLES  (out-of-top-k, for comparison)")
+            report.append(H1)
+            report.append(
+                f"  {'#':<3}  {'chunk_id':<24}  {'doc':<5}  {'total':>7}"
+                f"  {'S1':>7}  {'S2':>7}  {'S3':>7}  {'S4':>7}  {'S5':>7}  {'S6':>7}  {'S7':>7}"
+            )
+            report.append(f"  {H2}")
             for i, sample in enumerate(formatted["random_samples"], 1):
                 s = sample["scores"]
-                report.append(f"\n{i}. Document: {sample['document_id']} | Chunk: {sample['chunk_id']}")
-                report.append(f"   Total Score: {s['total']:.4f}")
-                report.append(f"   Scores: Sem={s['semantic']:.4f} | Theme={s['thematic']:.4f} | Entity={s['entity']:.4f} | TopicDist={s['topic_dist']:.4f} | ClaimDoc={s['claim_doc']:.4f} | ClaimTopic={s.get('claim_topic', 0):.4f} | ClaimKP={s.get('claim_keyphrase', 0):.4f}")
-                report.append(f"   Text: {sample['text_preview']}")
+                report.append(
+                    f"  #{i:<2}  {sample['chunk_id']:<24}  {sample['document_id']:<5}  {s['total']:7.4f}"
+                    f"  {s['semantic']:7.4f}  {s['topic_dist']:7.4f}  {s['thematic']:7.4f}"
+                    f"  {s['entity']:7.4f}  {s.get('claim_doc',0):7.4f}  {s.get('claim_topic',0):7.4f}"
+                    f"  {s.get('claim_keyphrase',0):7.4f}"
+                )
+                preview = sample.get('text_preview', '')
+                if preview:
+                    report.append(f"       > {preview[:120]}{'...' if len(preview) > 120 else ''}")
+            report.append("")
 
-        # Alternative rankings
-        report.append("\n\nALTERNATIVE RANKINGS")
-        report.append("-" * 80)
-
-        for ranking_name, ranking_results in rankings.items():
-            if ranking_name == "by_total_score":
-                continue  # Already shown above
-
-            report.append(f"\n{ranking_name.replace('_', ' ').title()} (Top 5):")
-            for i, result in enumerate(ranking_results[:5], 1):
-                report.append(f"  {i}. {result['chunk_id']} - Total: {result['score_total']:.4f}")
-
-        # All chunks with full text
-        report.append("\n\nALL RETRIEVED CHUNKS (Full Text)")
-        report.append("=" * 80)
-        for i, result in enumerate(formatted["results"], 1):
-            report.append(f"\n--- Chunk #{i}: {result['chunk_id']} ---")
-            report.append(f"Document ID: {result['document_id']}")
-            report.append(f"Total Score: {result['scores']['total']:.4f}")
-            report.append(f"\nFull Text:")
-            # Get full text from formatted results (we need to add it)
-            full_text = result.get('full_text', result['text_preview'])
+        # ── 7. ALL RETRIEVED CHUNKS (FULL TEXT) ───────────────────────────────
+        report.append(H1)
+        report.append("ALL RETRIEVED CHUNKS  (full text)")
+        report.append(H1)
+        for i, r in enumerate(sorted_final_chunks, 1):
+            s = r['scores']
+            report.append(
+                f"\n#{i:<2}  {r['chunk_id']}   doc={r['document_id']}   total={s['total']:.4f}"
+            )
+            report.append(
+                f"    S1={s['semantic']:.4f}  S2={s['topic_dist']:.4f}  S3={s['thematic']:.4f}"
+                f"  S4={s['entity']:.4f}  S5={s.get('claim_doc',0):.4f}"
+                f"  S6={s.get('claim_topic',0):.4f}  S7={s.get('claim_keyphrase',0):.4f}"
+            )
+            report.append(H2)
+            full_text = r.get('full_text', r['text_preview'])
             report.append(full_text)
-            report.append("-" * 80)
 
-        report.append("\n" + "=" * 80)
+        report.append("\n" + H1)
 
         return "\n".join(report)
 

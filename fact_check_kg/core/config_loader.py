@@ -50,6 +50,7 @@ class GraphConstructionConfig:
     keyphrase_ngram_min: int
     keyphrase_ngram_max: int
     entity_types: List[str]
+    claim_sim_threshold: float = 0.5
 
 
 @dataclass
@@ -143,6 +144,10 @@ class RetrievalConfig:
     theme_path_weight: float = 0.6
     claim_top_k: int = 5
     keyphrase_top_n: int = 5  # Number of keyphrases for Strategy 7
+    explore_similar_claims: bool = True
+    max_claim_expansion_depth: int = 1
+    top_docs: int = 50  # Number of top documents returned per strategy and overall
+    softmax_beta: float = 5.0  # Sharpness parameter for softmax document pooling
 
     def __post_init__(self):
         """Validate that weights sum to 1.0."""

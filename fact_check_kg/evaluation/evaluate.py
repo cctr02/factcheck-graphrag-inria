@@ -77,7 +77,7 @@ def get_graph_doc_ids(graph) -> set:
     return {
         str(data['doc_id'])
         for _, data in graph.nodes(data=True)
-        if data.get('type') == 'doc' and data.get('doc_id') is not None
+        if data.get('type') == 'document' and data.get('doc_id') is not None
     }
 
 
@@ -103,9 +103,9 @@ def run_evaluation(
     For each (query, ground-truth doc) pair whose doc is present in the graph,
     retrieval is run and the rank of the target document is recorded.
 
-    Document-level scoring uses max-pooling (already implemented in
-    HybridRetriever._aggregate_to_documents): the doc score equals the maximum
-    chunk score for any chunk of that document.  This is length-unbiased.
+    Document-level scoring uses softmax-pooling (implemented in
+    HybridRetriever._aggregate_to_documents): strongly-scoring chunks dominate
+    while multiple good chunks still contribute.
 
     Args:
         retriever:      Initialised HybridRetriever instance.
@@ -387,7 +387,7 @@ def _format_report(report: Dict, top_k_eval: List[int], max_rank: int) -> str:
         f"  Evaluated (no error)      : {c['evaluated']}",
         f"  Errors (skipped)          : {c['errors']}",
         "",
-        "OVERALL METRICS  (document-level, max-pooling over chunks)",
+        "OVERALL METRICS  (document-level, softmax-pooling over chunks)",
         "-" * 70,
     ]
 
@@ -404,7 +404,7 @@ def _format_report(report: Dict, top_k_eval: List[int], max_rank: int) -> str:
         f"  Found          :  {m['found_count']} / {c['evaluated']}",
         f"  Not found      :  {m['not_found_count']}  ({m['not_found_pct']:.1f}%)",
         "",
-        "PER-STRATEGY  Hit@10  (document-level, max-pooling)",
+        "PER-STRATEGY  Hit@10  (document-level, softmax-pooling)",
         "-" * 70,
     ]
 

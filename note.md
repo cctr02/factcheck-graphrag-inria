@@ -44,9 +44,6 @@ peut être essayer d'extract les entity au niveau document et les associer aux c
 relative date could be found via review date for entity node
 faire des scores négatifs dans le sens où l'absence d'information est moins punitive (par exemple un chunk retrouvé mais avec des dates éloignées devraient être plus pénalisé qu'un chunk où il n'y a pas de dates )
 
-
-- Construct graph for the entire corpus
-
 - Share all the topics that are emerging in the chunks
 
 - add edges between claim.
@@ -54,16 +51,3 @@ From claim found close to the query, do a relevance propagation to find other cl
 
 - try to run this : https://aclanthology.org/2025.findings-emnlp.852.pdf
 
-
-pourquoi on a pas détecté covid-19 en entité et dans aucun chunk 
-
-pourquoi on a still thematic score qui peut être égal à un ? 
-
-faudrait log dans la création du graph des statistiques sur les aretes thematiques 
-
-lier la test_data qui est couplé query / doc
-et nous on veut lier ce doc avec les doc qu'on a 
-
-et réfléchir à une manière de scorer notre retrieval sur le test_data 
-
-faire gaffe quand on fait les test d'enlever les query où les ground docs sont pas dans les docs qu'on considère 

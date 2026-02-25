@@ -76,6 +76,7 @@ class HybridRetriever:
         explore_similar_claims: bool = True,
         max_claim_expansion_depth: int = 1,
         keyphrase_top_n: int = 5,
+        softmax_beta: float = 5.0,
         keybert_model = None,
         graph_id: Optional[str] = None,
         cache_dir: Optional[str] = None,
@@ -107,6 +108,10 @@ class HybridRetriever:
             explore_similar_claims: If True, explore claims connected via SIMILAR_CLAIM edges in Strategy 5
             max_claim_expansion_depth: Maximum depth for exploring SIMILAR_CLAIM edges (default: 1)
             keyphrase_top_n: Number of keyphrases to extract for Strategy 7
+            softmax_beta: Sharpness of softmax pooling over chunks within a document.
+                Low β (≈1): close to mean — many average chunks contribute more.
+                High β (≈20): close to max — one strong chunk dominates.
+                Default 5.0 balances both effects.
             keybert_model: Optional KeyBERT model for Strategy 7 (lazy-loaded if None)
             graph_id: Optional graph ID for loading cached data
             cache_dir: Optional directory containing FAISS embeddings cache
@@ -138,6 +143,7 @@ class HybridRetriever:
         self.explore_similar_claims = explore_similar_claims
         self.max_claim_expansion_depth = max_claim_expansion_depth
         self.keyphrase_top_n = keyphrase_top_n
+        self.softmax_beta = softmax_beta
 
         # KeyBERT model for Strategy 7 (lazy-loaded if not provided)
         self.keybert_model = keybert_model
@@ -397,20 +403,46 @@ class HybridRetriever:
             logger=self.logger,
         )
 
+    def _softmax_pool(self, scores: List[float]) -> float:
+        """
+        Softmax-weighted average of scores (attention pooling).
+
+        Each chunk's contribution is weighted by softmax(beta * score):
+            w_c = exp(beta * s_c) / sum_{c'} exp(beta * s_c')
+            result = sum_c w_c * s_c
+
+        Properties:
+        - Bounded in [0, 1] — it is a weighted average of values in [0, 1].
+        - beta → 0  : uniform weights → simple mean (many chunks matter equally).
+        - beta → inf: all weight on the max chunk → approaches max pooling.
+        - Intermediate beta: a strong chunk leads, but several moderate chunks
+          collectively raise the score above what any single one would achieve.
+
+        Numerical stability: max is subtracted before exponentiation.
+        """
+        import numpy as np
+        arr = np.array(scores, dtype=float)
+        shifted = arr * self.softmax_beta
+        shifted -= shifted.max()          # numerical stability
+        weights = np.exp(shifted)
+        weights /= weights.sum()
+        return float(np.dot(weights, arr))
+
     def _aggregate_to_documents(
         self,
         chunk_results: List[Dict],
     ) -> Tuple[List[Dict], Dict[str, List[Dict]]]:
         """
-        Aggregate chunk-level scores to document-level scores using max pooling.
+        Aggregate chunk-level scores to document-level scores using softmax pooling.
 
-        Max pooling: the document score on each dimension equals the maximum score
-        of any of its chunks on that dimension.  This prevents documents with more
-        chunks from being systematically favoured — only the single best piece of
-        evidence from each document contributes.
+        Softmax pooling (attention-weighted average) balances two desirable effects:
+        - A document with one very strong chunk remains dominant (the exponential
+          weight concentrates attention on the highest scorer).
+        - A document with several moderate chunks rises naturally above one with
+          a single mediocre chunk (multiple moderate weights sum up).
 
-        doc_score_total    = max(chunk.score_total)  over all chunks in the doc
-        doc_score_<strat>  = max(chunk.score_<strat>) over all chunks in the doc
+        The sharpness is controlled by self.softmax_beta (from config softmax_beta):
+            doc_score_X = sum_c [ softmax(beta * s_X_c) * s_X_c ]
 
         Returns:
             - doc_results: all documents with at least one scored chunk, sorted by
@@ -431,14 +463,14 @@ class HybridRetriever:
             best_chunk = max(chunks, key=lambda c: c['score_total'])
             doc_results.append({
                 'doc_id': doc_id,
-                'doc_score_total': best_chunk['score_total'],
-                'doc_score_sem': max(c['score_sem'] for c in chunks),
-                'doc_score_topic_dist': max(c['score_topic_dist'] for c in chunks),
-                'doc_score_theme': max(c['score_theme'] for c in chunks),
-                'doc_score_entity': max(c['score_entity'] for c in chunks),
-                'doc_score_claim_doc': max(c.get('score_claim_doc', 0.0) for c in chunks),
-                'doc_score_claim_topic': max(c.get('score_claim_topic', 0.0) for c in chunks),
-                'doc_score_claim_keyphrase': max(c.get('score_claim_keyphrase', 0.0) for c in chunks),
+                'doc_score_total':          self._softmax_pool([c['score_total'] for c in chunks]),
+                'doc_score_sem':            self._softmax_pool([c['score_sem'] for c in chunks]),
+                'doc_score_topic_dist':     self._softmax_pool([c['score_topic_dist'] for c in chunks]),
+                'doc_score_theme':          self._softmax_pool([c['score_theme'] for c in chunks]),
+                'doc_score_entity':         self._softmax_pool([c['score_entity'] for c in chunks]),
+                'doc_score_claim_doc':      self._softmax_pool([c.get('score_claim_doc', 0.0) for c in chunks]),
+                'doc_score_claim_topic':    self._softmax_pool([c.get('score_claim_topic', 0.0) for c in chunks]),
+                'doc_score_claim_keyphrase':self._softmax_pool([c.get('score_claim_keyphrase', 0.0) for c in chunks]),
                 'n_chunks_scored': len(chunks),
                 'best_chunk_id': best_chunk['chunk_id'],
                 'best_chunk_text': best_chunk['text'],
@@ -671,7 +703,7 @@ class HybridRetriever:
             self.logger.info(f"{i}. [{result['chunk_id']}] {text_preview}")
 
         # Log document-level summary
-        self.logger.info(f"\n--- Document-level results (max-pooling) ---")
+        self.logger.info(f"\n--- Document-level results (softmax-pooling, beta={self.softmax_beta}) ---")
         self.logger.info(f"  Total documents with at least one scored chunk: {len(doc_results)}")
         self.logger.info(f"  Top {min(self.top_docs, len(top_doc_results))} documents (by final score):")
         for i, doc in enumerate(top_doc_results[:5], 1):

@@ -24,14 +24,16 @@ class EmbeddingCache:
 
     def __init__(
         self,
-        dimension: int,
+        dimension: Optional[int] = None,
         logger: Optional[logging.Logger] = None
     ):
         """
         Initialize the embedding cache.
 
         Args:
-            dimension: Dimension of embeddings (from config.models.embedding_dimension)
+            dimension: Dimension of embeddings (from config.models.embedding_dimension).
+                       Required when calling build_index(); may be omitted when only
+                       calling load() (dimension is read from the saved .pkl file).
             logger: Optional logger instance
         """
         self.dimension = dimension

@@ -8,13 +8,16 @@ This document provides a detailed technical description of the knowledge graph c
 2. [Node Types](#node-types)
 3. [Edge Types](#edge-types)
 4. [Retrieval Strategies](#retrieval-strategies)
-5. [Mathematical Formulas](#mathematical-formulas)
+5. [Document-Level Aggregation](#document-level-aggregation)
+6. [Mathematical Formulas](#mathematical-formulas)
+7. [Configuration Parameters](#configuration-parameters)
+8. [Evaluation](#evaluation)
 
 ---
 
 ## Graph Build Pipeline
 
-The knowledge graph is constructed through a 10-step pipeline:
+The knowledge graph is constructed through a **9-step pipeline**
 
 ### Step 1: Documents and Chunks
 
@@ -24,46 +27,45 @@ Creates the base hierarchical structure:
 - **Document nodes** (`doc::{doc_id}`): Source fact-check articles
 - **Chunk nodes** (`chunk::{doc_id}::{chunk_idx}`): Text segments using sliding window
 
-**CONTAINS edges**: Document → Chunk (structural, no weight)
+**CONTAINS edges**: Document → Chunk (structural, weight 1.0)
 
 ### Step 2: Topic Modeling
 
-**Module:** `graph_builder.py` → `build_topic_model()`
+**Module:** `graph_builder.py`
 
 Uses BERTopic with the following pipeline:
-1. **Embedding**: SentenceTransformer encodes all chunks
+1. **Embedding**: SentenceTransformer encodes all chunks (GPU-accelerated, normalized)
 2. **Dimensionality Reduction**: UMAP reduces to 5 dimensions
 3. **Clustering**: HDBSCAN finds topic clusters
 4. **Representation**: c-TF-IDF creates topic word distributions
 
 ```
-UMAP: n_neighbors=15, n_components=5, metric='cosine'
-HDBSCAN: min_cluster_size=10, metric='euclidean', method='eom'
+UMAP:    n_neighbors=15, n_components=5, metric='cosine'
+HDBSCAN: min_cluster_size=min_topic_size, metric='euclidean', method='eom'
 ```
 
 ### Step 3: Themes and HAS_TOPIC Edges
 
 **Module:** `graph_nodes_theme.py`
 
-Creates theme nodes with LLM-generated labels:
+Creates theme nodes with LLM-generated labels (Ollama/Llama):
 1. Extract top keywords per topic (c-TF-IDF)
-2. Process keywords: dedup, lemmatize, filter
-3. Generate label via LLM (Ollama/Llama)
-4. Create top-3 HAS_TOPIC edges per chunk
+2. Process keywords: dedup, lemmatize, filter stopwords
+3. Generate label via LLM
+4. Create **top-3 HAS_TOPIC edges** per chunk (highest probability topics)
 
-**HAS_TOPIC edge weight** = BERTopic probability ∈ [0, 1]
+**HAS_TOPIC edge weight** = BERTopic topic probability $\in [0, 1]$
+Only created if probability $\geq$ `topic_probability_threshold` (default 0.15).
 
 ### Step 3b: Hierarchical Topics (Supertopics)
 
 **Module:** `graph_nodes_theme.py` → `build_hierarchical_topics()`
 
-Creates supertopics by merging semantically similar topics:
+Creates supertopics by merging semantically similar topics via agglomerative clustering:
 
-```
-merge_distance(t_i, t_j) = 1 - cos(c-TF-IDF(t_i), c-TF-IDF(t_j))
-```
+$$d_\text{merge}(t_i, t_j) = 1 - \cos\!\bigl(\text{c-TF-IDF}(t_i),\ \text{c-TF-IDF}(t_j)\bigr)$$
 
-**CONTAINS_TOPIC edge weight** = 1 - merge_distance = c-TF-IDF similarity
+**CONTAINS_TOPIC edge weight** = $1 - d_\text{merge} = \cos(\text{c-TF-IDF}(t_i),\ \text{c-TF-IDF}(t_j))$
 
 ### Step 4: Entities and MENTIONS Edges
 
@@ -71,71 +73,53 @@ merge_distance(t_i, t_j) = 1 - cos(c-TF-IDF(t_i), c-TF-IDF(t_j))
 
 Extracts named entities using spaCy NER:
 - Types: PERSON, ORG, GPE, LOC, DATE, EVENT, NORP
-- DATE normalization: Extract 4-digit years only
+- DATE normalization: extract 4-digit years only
+- Filter: entities must be > 2 characters
 
 **MENTIONS edge weight (TF-IDF with Sigmoid):**
 
-```
-TF_normalized = tf / max_tf_in_chunk
-IDF = log(N / df)
-raw_weight = TF_normalized × IDF
-weight = σ(raw_weight / scale)
-```
+$$\text{TF}_\text{norm} = \frac{tf}{\max\_tf_\text{chunk}}, \qquad \text{IDF} = \log\!\left(\frac{N}{df}\right), \qquad w = \sigma\!\left(\frac{\text{TF}_\text{norm} \times \text{IDF}}{3.0}\right)$$
 
-Where:
-- `tf` = term frequency in chunk
-- `df` = document frequency (chunks containing entity)
-- `N` = total number of chunks
-- `σ(x) = 1 / (1 + exp(-x))` (sigmoid)
-- `scale = 3.0`
+where $\sigma(x) = \dfrac{1}{1 + e^{-x}}$ maps to $(0, 1)$.
 
-### Step 4b: Keyphrases
+### Step 4b: Keyphrases and HAS_KEYPHRASE Edges
 
 **Module:** `graph_nodes_chunk_docs.py` → `add_keyphrases()`
 
 Uses KeyBERT with Maximal Marginal Relevance (MMR):
 
-```
-MMR = λ × sim(d, q) - (1-λ) × max(sim(d, d_j))
-```
+$$\text{MMR} = \lambda \cdot \text{sim}(\text{candidate}, \text{doc}) - (1-\lambda) \cdot \max_{\text{sel}}\,\text{sim}(\text{candidate}, \text{selected})$$
 
-Where:
-- `sim(d, q)` = cosine similarity between candidate and document
-- `sim(d, d_j)` = similarity to already selected keyphrases
-- `λ = 0.5` (diversity parameter)
+where $\lambda = 0.5$ (diversity parameter). Top-`keyphrase_top_n` (default 5) keyphrases per chunk.
 
-**HAS_KEYPHRASE edge weight** = KeyBERT relevance score ∈ [0, 1]
+**HAS_KEYPHRASE edge weight** = KeyBERT relevance score $\in [0, 1]$
 
 ### Step 5: Entity CO_OCCURS Edges
 
 **Module:** `graph_nodes_entity.py` → `add_entity_co_occurrences()`
 
-Computes PMI-based co-occurrence weights at document level:
+Computes PMI-based co-occurrence weights at **document** level:
 
-```
-PMI = log((co_occur × N) / (freq_1 × freq_2))
-weight = σ(PMI / scale)
-```
+$$\text{PMI}(e_1, e_2) = \log\!\left(\frac{c_{12} \times N}{f_1 \times f_2}\right), \qquad w = \sigma\!\left(\frac{\text{PMI}}{2.0}\right)$$
 
-Where:
-- `co_occur` = number of documents where both entities appear
-- `freq_1, freq_2` = document frequency of each entity
-- `N` = total documents
-- `scale = 2.0`
+where:
+- $c_{12}$ = documents where both entities appear together
+- $f_1, f_2$ = document frequency of each entity
+- $N$ = total documents
+- Sigmoid scale = 2.0
 
-**Note:** DATE-DATE pairs are skipped (use TEMPORAL_DIST instead)
+**Note:** DATE–DATE pairs are skipped (use TEMPORAL_DIST instead).
+Only created if $c_{12} \geq$ `co_occurrence_threshold` (default 2).
 
 ### Step 6: Entity SEMANTIC_SIM Edges
 
 **Module:** `graph_nodes_entity.py` → `add_entity_semantic_similarity()`
 
-Computes embedding similarity between non-DATE entities:
+Embedding similarity between non-DATE entities:
 
-```
-weight = cos(embed(e_1), embed(e_2))
-```
+$$w = \cos\!\bigl(\text{embed}(e_1),\ \text{embed}(e_2)\bigr)$$
 
-Only created if `weight >= semantic_sim_threshold` (default 0.6)
+Only created if $w \geq$ `semantic_similarity_threshold` (default 0.8).
 
 ### Step 6b: DATE TEMPORAL_DIST Edges
 
@@ -143,70 +127,58 @@ Only created if `weight >= semantic_sim_threshold` (default 0.6)
 
 Exponential decay based on year difference:
 
-```
-weight = exp(-λ × |year_1 - year_2|)
-```
+$$w = \exp\!\bigl(-\lambda \cdot |y_1 - y_2|\bigr)$$
 
-Where:
-- `λ = 0.3` (decay_rate)
-- Only created if `|year_1 - year_2| <= max_year_gap` (default 10)
+where $\lambda = 0.15$ (default) and only created if $|y_1 - y_2| \leq$ `max_year_gap` (default 10).
 
-Examples with λ=0.3:
-| Year Difference | Weight |
-|-----------------|--------|
-| 0 | 1.000 |
-| 1 | 0.741 |
-| 2 | 0.549 |
-| 3 | 0.407 |
-| 5 | 0.223 |
-| 10 | 0.050 |
+| Year Difference | Weight ($\lambda=0.15$) |
+|-----------------|------------------------|
+| 0  | 1.000 |
+| 1  | 0.861 |
+| 2  | 0.741 |
+| 3  | 0.638 |
+| 5  | 0.472 |
+| 10 | 0.223 |
 
 ### Step 7: Theme SEMANTIC_SIM Edges
 
 **Module:** `graph_nodes_theme.py` → `add_theme_semantic_similarity()`
 
-Computes embedding similarity between themes using keyword representations:
+Embedding similarity between themes using keyword representations:
 
-```
-representation(theme) = concat(top_5_keywords)
-weight = cos(embed(rep_1), embed(rep_2))
-```
+$$\text{rep}(t) = \text{concat}(\text{top\_5\_keywords}), \qquad w = \cos\!\bigl(\text{embed}(\text{rep}_1),\ \text{embed}(\text{rep}_2)\bigr)$$
 
-Only created if `weight >= semantic_sim_threshold`
+Only created if $w \geq$ `semantic_similarity_threshold` (default 0.8).
 
 ### Step 8: Theme CO_PRESENCE Edges
 
 **Module:** `graph_nodes_theme.py` → `add_theme_co_presence()`
 
-Counts themes co-occurring in the same chunks:
+Counts themes co-occurring in the same chunks with inverse frequency weighting:
 
-```
-weight = co_presence_count × (1 / √(freq_1 × freq_2))
-```
+$$w = \frac{c_{12}}{\sqrt{f_1 \times f_2}}$$
 
-Where:
-- `co_presence_count` = number of chunks with both themes
-- `freq_1, freq_2` = number of chunks each theme appears in
+where:
+- $c_{12}$ = chunks where both themes appear
+- $f_1, f_2$ = number of chunks each theme appears in
 
-### Step 9: Claims and REVIEWS Edges
+**Proof of bounds**: $c_{12} \leq \min(f_1, f_2) \leq \sqrt{f_1 \cdot f_2}$ (AM-GM), so $w \in [0, 1]$.
+
+### Step 9: Claims, REVIEWS Edges, and CLAIM_SIM Edges
 
 **Module:** `graph_nodes_claims.py`
 
 Creates claim nodes and links them to fact-check documents:
-- **Claim nodes** (`claim::{claim_id}`): Fact-checked claims with ratings
-- **REVIEWS edges**: Claim → Document (links claim to its fact-check)
+- **Claim nodes** (`claim::{claim_id}`): Fact-checked claims with ratings and claimant info
+- **REVIEWS edges**: Claim → Document (structural, links claim to its reviewed document)
+- **CLAIM_SIM edges**: Claim ↔ Claim (semantic similarity between claims)
 
-### Step 10: Pre-compute Claim Retrieval
+**CLAIM_SIM edge weight:**
 
-**Module:** `graph_builder.py` → `_precompute_claim_retrieval()`
+$$w = \cos\!\bigl(\text{embed}(c_1),\ \text{embed}(c_2)\bigr) \in [0, 1]$$
 
-For each claim, pre-computes retrieval scores using strategies S1-S4:
-
-```
-precomputed_score = 0.25×S1 + 0.25×S2 + 0.25×S3 + 0.25×S4
-```
-
-Results are stored for efficient claim-based retrieval at query time.
+Only created if $w \geq$ `claim_sim_threshold` (default 0.5).
+Only the top-k most similar neighbors per claim are kept to bound edge count.
 
 ---
 
@@ -214,8 +186,8 @@ Results are stored for efficient claim-based retrieval at query time.
 
 | Type | ID Format | Key Attributes |
 |------|-----------|----------------|
-| document | `doc::{doc_id}` | text, review_date, language |
-| chunk | `chunk::{doc_id}::{idx}` | text, chunk_idx |
+| document | `doc::{doc_id}` | doc_id, text, review_date, language |
+| chunk | `chunk::{doc_id}::{idx}` | doc_id, text, chunk_idx, review_date, language |
 | theme | `theme::{topic_id}` | label, keywords, supertopic_id |
 | supertopic | `supertopic::{id}` | label, keywords, child_topics |
 | entity | `entity::{type}::{text}` | entity_type, entity_text |
@@ -226,35 +198,36 @@ Results are stored for efficient claim-based retrieval at query time.
 
 ## Edge Types
 
-| Edge Type | Source → Target | Weight Formula |
-|-----------|-----------------|----------------|
-| CONTAINS | Document → Chunk | 1.0 (structural) |
-| HAS_TOPIC | Chunk → Theme | BERTopic probability |
-| CONTAINS_TOPIC | Supertopic → Theme | 1 - merge_distance |
-| MENTIONS | Chunk → Entity | σ(TF×IDF / scale) |
-| HAS_KEYPHRASE | Chunk → Keyphrase | KeyBERT score |
-| CO_OCCURS | Entity ↔ Entity | σ(PMI / scale) |
-| SEMANTIC_SIM | Entity ↔ Entity | cos(embed_1, embed_2) |
-| SEMANTIC_SIM | Theme ↔ Theme | cos(embed_1, embed_2) |
-| TEMPORAL_DIST | DATE ↔ DATE | exp(-λ × year_diff) |
-| CO_PRESENCE | Theme ↔ Theme | count × inv_freq |
-| REVIEWS | Claim → Document | 1.0 (structural) |
+| Edge Type | Source → Target | Weight Formula | Bounds |
+|-----------|-----------------|----------------|--------|
+| CONTAINS | Document → Chunk | $1.0$ (structural) | $\{1\}$ |
+| HAS_TOPIC | Chunk → Theme | BERTopic probability | $[0, 1]$ |
+| CONTAINS_TOPIC | Supertopic → Theme | $1 - d_\text{merge}$ | $[0, 1]$ |
+| MENTIONS | Chunk ← Entity | $\sigma\!\left(\frac{\text{TF}_\text{norm} \cdot \text{IDF}}{3.0}\right)$ | $(0, 1)$ |
+| HAS_KEYPHRASE | Chunk → Keyphrase | KeyBERT MMR score | $[0, 1]$ |
+| CO_OCCURS | Entity ↔ Entity | $\sigma\!\left(\frac{\text{PMI}}{2.0}\right)$ | $(0, 1)$ |
+| SEMANTIC_SIM | Entity ↔ Entity | $\cos(\mathbf{e}_1, \mathbf{e}_2)$ | $[\theta, 1]$ |
+| SEMANTIC_SIM | Theme ↔ Theme | $\cos(\mathbf{e}_1, \mathbf{e}_2)$ | $[\theta, 1]$ |
+| TEMPORAL_DIST | DATE ↔ DATE | $e^{-\lambda \lvert\Delta t\rvert}$ | $(0, 1]$ |
+| CO_PRESENCE | Theme ↔ Theme | $c_{12} / \sqrt{f_1 f_2}$ | $[0, 1]$ |
+| REVIEWS | Claim → Document | $1.0$ (structural) | $\{1\}$ |
+| CLAIM_SIM | Claim ↔ Claim | $\cos(\mathbf{c}_1, \mathbf{c}_2)$ | $[0, 1]$ |
 
 ---
 
 ## Retrieval Strategies
 
+All 7 strategies return scores in $[0, 1]$ without min-max normalization (each score has an absolute, interpretable meaning).
+
 ### Strategy 1: Semantic Similarity (S1)
 
 **Module:** `retrieval_semantic.py`
 
-Direct embedding similarity between query and chunk embeddings:
+Direct embedding cosine similarity between query and chunk:
 
-```
-S1(chunk) = cos(embed(query), embed(chunk))
-```
+$$S_1(\text{chunk}) = \max\!\bigl(0,\ \cos(\text{embed}(\text{query}),\ \text{embed}(\text{chunk}))\bigr)$$
 
-**Normalization:** Min-max scaling to [0, 1]
+**Normalization:** Raw cosine of normalized embeddings is in $[-1, 1]$. Negative values (unrelated content) are clipped to 0. No min-max scaling — the score is an absolute cosine similarity.
 
 ### Strategy 2: Topic Distribution Similarity (S2)
 
@@ -262,211 +235,275 @@ S1(chunk) = cos(embed(query), embed(chunk))
 
 Jensen-Shannon divergence between topic distributions:
 
-```
-claim_dist = BERTopic.transform(query)
-JS_divergence = JSD(claim_dist, chunk_dist)
-S2(chunk) = 1 - JS_divergence
-```
+$$S_2(\text{chunk}) = 1 - \text{JSD}(P_\text{query},\ P_\text{chunk})$$
 
-Jensen-Shannon divergence is symmetric and bounded [0, 1]:
+where $P_\text{query} = \text{BERTopic.transform(query)}$ is a probability vector over topics.
 
-```
-JSD(P, Q) = 0.5 × KL(P || M) + 0.5 × KL(Q || M)
-M = 0.5 × (P + Q)
-```
+**Normalization:** JSD is symmetric and naturally bounded $[0, 1]$, so $1 - \text{JSD} \in [0, 1]$ directly. No additional scaling.
 
-**Normalization:** Min-max scaling to [0, 1]
+$$\text{JSD}(P, Q) = \frac{1}{2}\,D_{KL}(P \,\|\, M) + \frac{1}{2}\,D_{KL}(Q \,\|\, M), \qquad M = \frac{P + Q}{2}$$
 
 ### Strategy 3: Thematic Graph Traversal (S3)
 
 **Module:** `retrieval_thematic.py`
 
-Uses BFS propagation through theme graph:
+Detects themes in the query and propagates relevance through the theme graph.
 
-1. **Detect themes** in query using BERTopic (probability > threshold)
-2. **Propagate relevance** through CO_PRESENCE and SEMANTIC_SIM edges:
-   ```
-   propagated_relevance = current_relevance × edge_weight
-   ```
-3. **Score chunks** based on theme relevance:
-   ```
-   S3(chunk) = Σ(theme_relevance × HAS_TOPIC_weight)
-   ```
+**Algorithm:**
+1. **Detect seed themes**: BERTopic topics in query with probability $\geq$ `theme_threshold` (default 0.01).
+   Fallback: if no theme clears the threshold, use the top-1 theme (if probability > 0).
+2. **Propagate relevance** via BFS through CO_PRESENCE and SEMANTIC_SIM edges:
 
-### Strategy 4: Entity Graph Traversal (S4)
+$$\text{rel}_\text{neighbor} = \text{rel}_\text{parent} \times w_\text{edge}$$
+
+BFS stops when $\text{rel}_\text{neighbor} <$ `theme_relevance_threshold` (default 0.1).
+
+3. **Score chunks** using all reachable themes:
+
+$$S_3(\text{chunk}) = \frac{\displaystyle\sum_{t \in \mathcal{T}} \text{rel}_t \cdot w_{\text{HAS\_TOPIC}}(t \to \text{chunk})}{\displaystyle\sum_{t \in \mathcal{T}} \text{rel}_t}$$
+
+**Proof of bounds**: Each term $\text{rel}_t \cdot w_{\text{HAS\_TOPIC}} \leq \text{rel}_t$ since $w_{\text{HAS\_TOPIC}} \in [0,1]$, so numerator $\leq$ denominator $\Rightarrow S_3 \in [0, 1]$.
+
+### Strategy 4: Entity Mention Retrieval (S4)
 
 **Module:** `retrieval_entity.py`
 
-Uses BFS propagation through entity graph:
+Extracts entities from the query and scores chunks by their direct MENTIONS weights — **no BFS propagation**.
 
-1. **Extract entities** from query using spaCy NER
-2. **Propagate relevance** through CO_OCCURS and SEMANTIC_SIM edges
-3. **Score chunks** based on entity relevance:
-   ```
-   S4(chunk) = Σ(entity_relevance × MENTIONS_weight)
-   ```
+**Algorithm:**
+1. **Extract entities** from query using spaCy NER. DATE → 4-digit year only. Filter entities $\leq$ 2 characters.
+2. **Build seed list**: only entities present in the graph as nodes.
+3. **Score chunks**: sum of MENTIONS edge weights from each seed entity, averaged by seed count.
 
-### Strategy 5: Claim-Based Retrieval (S5)
+$$S_4(\text{chunk}) = \frac{\displaystyle\sum_{s \in \text{seeds}} w_{\text{MENTIONS}}(s \to \text{chunk})}{|\text{seeds}|}$$
+
+**Proof of bounds**: $w_{\text{MENTIONS}} \in (0, 1)$ (sigmoid), so each term $< 1$, and averaging keeps $S_4 \in (0, 1)$.
+
+### Strategy 5: Claim-Based Document Retrieval (S5)
 
 **Module:** `retrieval_claims.py`
 
-Leverages pre-existing fact-checked claims:
+Finds similar claims, then traverses $\text{REVIEWS} \to \text{CONTAINS}$ to reach chunks. No pre-computed data needed.
 
-1. **Find similar claims**: `similarity = cos(embed(query), embed(claim))`
-2. **Get pre-computed results** for matched claims
-3. **Combine scores**:
-   ```
-   S5(chunk) = max(claim_similarity × precomputed_score(claim, chunk))
-   ```
+**Algorithm:**
+1. **Find direct claims**: $\text{direct\_sim}(c_i) = \max(0,\ \cos(\text{embed}(\text{query}),\ \text{embed}(c_i)))$, keep top-k.
+2. **Expand claims** (embedding-based, no graph edges required):
+
+$$\text{eff\_sim}(c_j) = \text{direct\_sim}(c_i) \times \max\!\bigl(0,\ \cos(\text{embed}(c_i),\ \text{embed}(c_j))\bigr)$$
+
+Keep expansions above `expansion_threshold`.
+
+3. **Traverse graph**: Claim $\xrightarrow{\text{REVIEWS}}$ Document $\xrightarrow{\text{CONTAINS}}$ Chunk.
+4. **Score chunks**:
+
+$$S_5(\text{chunk}) = \max_{c \in \text{matched claims}} \text{direct\_sim}(c)$$
+
+**Normalization:** Score = max cosine similarity, clipped at 0. $S_5 \in [0, 1]$.
 
 ### Strategy 6: Claim-Based Topic Distribution Traversal (S6)
 
 **Module:** `retrieval_claim_topic.py`
 
-Combines claim-based retrieval with topic distribution analysis. Uses matched claims
-to traverse the graph and scores chunks based on topic distribution similarity
-weighted by traversal relevance.
+Combines claim matching with topic distribution similarity for retrieved chunks.
 
 **Algorithm:**
-1. **Find similar claims** using embedding cosine similarity (top K)
-2. **Get chunks** connected to claims via pre-computed graph traversal
-3. **Compute topic distribution similarity** between query and each chunk using Jensen-Shannon divergence
-4. **Weight by relevance propagation** from claim to chunk (from pre-computed S5)
-5. **Boost chunks with high HAS_TOPIC confidence** (TF-IDF-like weighting)
+1. Find and expand similar claims (same as S5).
+2. Traverse $\text{REVIEWS} \to \text{CONTAINS}$ to reach chunks.
+3. For each (claim, chunk) pair:
 
-**Score Formula:**
-```
-S6(chunk) = claim_sim × traversal_rel × topic_sim × topic_conf
-```
+$$S_6(\text{chunk}) = \max_{c \in \text{claims}} \Bigl[\text{sim}(c) \times \bigl(1 - \text{JSD}(P_\text{query}, P_\text{chunk})\bigr) \times \text{conf}(\text{chunk})\Bigr]$$
 
-Where:
-- `claim_sim` = cos(embed(query), embed(claim))
-- `traversal_rel` = pre-computed relevance score from claim to chunk (from S5)
-- `topic_sim` = 1 - JSD(query_distribution, chunk_distribution)
-- `topic_conf` = max(HAS_TOPIC_weight) for chunk's topics
+where $\text{conf}(\text{chunk}) = \max w_{\text{HAS\_TOPIC}}$ over the chunk's connected themes (default 0.5 if no topics).
 
-### Strategy 7: Claim-Based KeyBERT Phrase Similarity (S7)
+**Bounds:** Product of three values each $\in [0, 1]$ $\Rightarrow$ $S_6 \in [0, 1]$.
+
+### Strategy 7: Claim-Based Keyphrase Similarity (S7)
 
 **Module:** `retrieval_claim_keyphrase.py`
 
-Extracts keyphrases from the query using KeyBERT and computes semantic similarity
-with chunk keyphrases found through claim-based retrieval.
+Combines claim matching with keyphrase embedding similarity.
 
 **Algorithm:**
-1. **Find similar claims** using embedding cosine similarity (top K)
-2. **Extract query keyphrases** using KeyBERT with MMR diversity
-3. **Get chunks** connected to claims via pre-computed graph traversal
-4. **Compute keyphrase similarity** between query keyphrases and chunk keyphrases
-5. **Weight by keyphrase importance** (HAS_KEYPHRASE edge weight)
-6. **Weight by traversal relevance** from claim to chunk
+1. **Extract keyphrases** from query using KeyBERT (MMR, diversity=0.5, ngram_range=(1,3)).
+2. Find and expand similar claims (same as S5).
+3. Traverse $\text{REVIEWS} \to \text{CONTAINS}$ to reach chunks.
+4. For each (claim, chunk) pair:
 
-**Score Formula:**
-```
-S7(chunk) = claim_sim × traversal_rel × keyphrase_sim × keyphrase_importance
-```
+$$S_7(\text{chunk}) = \max_{c \in \text{claims}} \Bigl[\text{sim}(c) \times \max_{kp \in \text{keyphrases}} \cos(\text{embed}(kp),\ \text{embed}(\text{chunk})) \times \text{imp}(kp)\Bigr]$$
 
-Where:
-- `claim_sim` = cos(embed(query), embed(claim))
-- `traversal_rel` = pre-computed relevance score from claim to chunk (from S5)
-- `keyphrase_sim` = max(cos(embed(query_kp), embed(chunk_kp))) for all keyphrase pairs
-- `keyphrase_importance` = max(HAS_KEYPHRASE_weight) for matched keyphrases
+where $\text{imp}(kp)$ is the KeyBERT score of the best-matching keyphrase.
+
+**Bounds:** Product of three values each $\in [0, 1]$ $\Rightarrow$ $S_7 \in [0, 1]$.
+
+---
+
+## Document-Level Aggregation
+
+**Module:** `retrieval.py` → `_aggregate_to_documents()`
+
+After chunk-level scoring, scores are aggregated to document level using **softmax pooling** (attention-weighted average). Each chunk's weight is proportional to $e^{\beta \cdot s_c}$, so strong chunks attract exponentially more attention while multiple moderate chunks still collectively contribute.
+
+**Softmax weights and pooled score:**
+
+$$w_c = \frac{e^{\beta \cdot S_X(c)}}{\displaystyle\sum_{c' \in d} e^{\beta \cdot S_X(c')}}, \qquad \text{doc\_score}_X(d) = \sum_{c \in d} w_c \cdot S_X(c)$$
+
+**Properties:**
+
+| $\beta$ value | Behaviour |
+|---------------|-----------|
+| $\beta \to 0$ | Uniform weights → simple mean (many chunks contribute equally) |
+| $\beta = 5$ *(default)* | Balanced: strong chunk leads, several moderate ones also raise the score |
+| $\beta \to \infty$ | All weight on the max chunk → approaches max pooling |
+
+- **Bounded in $[0, 1]$** — it is a weighted average of values already in $[0, 1]$.
+- **Length-fair** — the weight normalisation prevents longer documents from dominating just because they have more chunks.
+- **Evidence-accumulating** — unlike max pooling, a document with several chunks at 0.7 outscores one with a single chunk at 0.7, while a document with one chunk at 0.9 still dominates both.
+
+**Per-strategy document rankings:** For each of the 7 strategies, documents are ranked by their strategy-specific softmax-pooled score. Only documents with a non-zero strategy score are included.
+
+**Output per document:**
+- `doc_score_total`, `doc_score_sem`, `doc_score_topic_dist`, `doc_score_theme`, `doc_score_entity`, `doc_score_claim_doc`, `doc_score_claim_topic`, `doc_score_claim_keyphrase`
+- `n_chunks_scored`: number of chunks scored for this document
+- `best_chunk_id`: chunk with the highest `score_total` (for display purposes)
+
+The top `top_docs` (default 50) documents are returned per retrieval call.
 
 ---
 
 ## Mathematical Formulas
 
-### TF-IDF with Sigmoid Normalization
+### Final Hybrid Score (Chunk Level)
 
-```
-TF = count(entity, chunk)
-TF_norm = TF / max(TF in chunk)
-IDF = log(N / DF)
-raw = TF_norm × IDF
-weight = 1 / (1 + exp(-raw / scale))
-```
+$$\text{score} = \alpha\,S_1 + \beta\,S_2 + \gamma\,S_3 + \delta\,S_4 + \varepsilon\,S_5 + \zeta\,S_6 + \eta\,S_7$$
 
-### Pointwise Mutual Information (PMI)
-
-```
-PMI(e1, e2) = log(P(e1, e2) / (P(e1) × P(e2)))
-            = log((co_occur × N) / (freq1 × freq2))
-```
-
-### Jensen-Shannon Divergence
-
-```
-JSD(P, Q) = 0.5 × D_KL(P || M) + 0.5 × D_KL(Q || M)
-M = (P + Q) / 2
-D_KL(P || Q) = Σ P(x) × log(P(x) / Q(x))
-```
-
-### Exponential Decay (Temporal)
-
-```
-weight = exp(-λ × Δt)
-```
-
-### BFS Relevance Propagation
-
-```
-relevance(n) = max over paths p: ∏(w_e for e in p)
-```
-
-Where `w_e` is the edge weight and the product is over all edges in path `p`.
-
-### Combined Retrieval Score
-
-```
-final_score = α×S1 + β×S2 + γ×S3 + δ×S4 + ε×S5 + ζ×S6 + η×S7
-```
-
-Where:
-- `α (alpha)` = weight for semantic similarity (S1)
-- `β (beta)` = weight for topic distribution similarity (S2)
-- `γ (gamma)` = weight for thematic graph traversal (S3)
-- `δ (delta)` = weight for entity graph traversal (S4)
-- `ε (epsilon)` = weight for claim-document retrieval (S5)
-- `ζ (zeta)` = weight for claim-topic distribution traversal (S6)
-- `η (eta)` = weight for claim-keyphrase similarity (S7)
+| Symbol | Weight | Default | Strategy |
+|--------|--------|---------|----------|
+| $\alpha$ | alpha | 0.20 | Semantic Similarity (S1) |
+| $\beta$ | beta | 0.20 | Topic Distribution (S2) |
+| $\gamma$ | gamma | 0.20 | Thematic Traversal (S3) |
+| $\delta$ | delta | 0.20 | Entity Mention (S4) |
+| $\varepsilon$ | epsilon | 0.20 | Claim-Document (S5) |
+| $\zeta$ | zeta | 0.00 | Claim-Topic (S6) |
+| $\eta$ | eta | 0.00 | Claim-Keyphrase (S7) |
 
 All weights should sum to 1.0.
 
-Default weights (5-strategy): `α = β = γ = δ = ε = 0.20`, `ζ = η = 0.0`
+### TF-IDF with Sigmoid (MENTIONS edges)
 
-Example 7-strategy weights: `α = β = γ = δ = ε = 0.15`, `ζ = η = 0.125`
+$$\text{TF}_\text{norm} = \frac{tf}{\max\_tf}, \qquad \text{IDF} = \log\!\left(\frac{N}{df}\right), \qquad w = \sigma\!\left(\frac{\text{TF}_\text{norm} \times \text{IDF}}{3.0}\right), \qquad \sigma(x) = \frac{1}{1+e^{-x}}$$
+
+### PMI with Sigmoid (CO_OCCURS edges)
+
+$$\text{PMI}(e_1, e_2) = \log\!\left(\frac{c_{12} \times N}{f_1 \times f_2}\right), \qquad w = \sigma\!\left(\frac{\text{PMI}}{2.0}\right)$$
+
+### Jensen-Shannon Divergence (S2, S6)
+
+$$\text{JSD}(P, Q) = \frac{1}{2}\,D_{KL}(P \,\|\, M) + \frac{1}{2}\,D_{KL}(Q \,\|\, M), \qquad M = \frac{P + Q}{2}$$
+
+$$D_{KL}(P \,\|\, Q) = \sum_x P(x)\,\log\frac{P(x)}{Q(x)}, \qquad \text{similarity} = 1 - \text{JSD} \in [0, 1]$$
+
+### Exponential Decay (TEMPORAL_DIST edges)
+
+$$w = e^{-\lambda\,\Delta t}, \qquad \lambda = \text{decay\_rate} = 0.15$$
+
+### Thematic BFS Propagation (S3)
+
+$$\text{rel}_\text{seed} = P_\text{BERTopic}(\text{query},\,t), \qquad \text{rel}_\text{child} = \text{rel}_\text{parent} \times w_\text{edge}$$
+
+$$S_3(\text{chunk}) = \frac{\displaystyle\sum_{t} \text{rel}_t \cdot w_{\text{HAS\_TOPIC}}(t,\,\text{chunk})}{\displaystyle\sum_{t} \text{rel}_t} \in [0, 1]$$
+
+### Claim Embedding Expansion (S5, S6, S7)
+
+$$\text{direct\_sim}(c_i) = \max\!\bigl(0,\ \cos(\text{embed}(\text{query}),\ \text{embed}(c_i))\bigr)$$
+
+$$\text{eff\_sim}(c_j \mid c_i) = \text{direct\_sim}(c_i) \times \max\!\bigl(0,\ \cos(\text{embed}(c_i),\ \text{embed}(c_j))\bigr)$$
+
+The effective similarity of an expanded claim $c_j$ via anchor $c_i$ is bounded by $\text{direct\_sim}(c_i)$.
+
+### Softmax Document Pooling
+
+$$w_c = \frac{e^{\beta \cdot s_c}}{\displaystyle\sum_{c' \in d} e^{\beta \cdot s_{c'}}}, \qquad \text{doc\_score}_X(d) = \sum_{c \in d} w_c \cdot S_X(c), \qquad \beta = \texttt{softmax\_beta}$$
+
+**Bounds proof**: $\text{doc\_score}_X$ is a convex combination of values $S_X(c) \in [0,1]$, so $\text{doc\_score}_X \in [0,1]$.
+
+**Limiting cases**: $\beta \to 0 \Rightarrow$ uniform weights $\Rightarrow$ mean; $\beta \to \infty \Rightarrow$ all weight on $\arg\max S_X \Rightarrow$ max pooling.
+
+### CO_PRESENCE Bounds Proof
+
+$$w = \frac{c_{12}}{\sqrt{f_1 \times f_2}}$$
+
+$$c_{12} \leq \min(f_1, f_2) \leq \sqrt{f_1 \times f_2} \quad(\text{AM-GM}) \qquad \Rightarrow \qquad w \in [0, 1]$$
 
 ---
 
 ## Configuration Parameters
 
-### Build Parameters
+### Build Parameters (`config_build.yaml`)
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `semantic_sim_threshold` | 0.6 | Min similarity for SEMANTIC_SIM edges |
-| `co_occur_threshold` | 2 | Min co-occurrences for CO_OCCURS edges |
-| `temporal_decay_rate` | 0.3 | λ in exponential decay |
-| `temporal_max_year_gap` | 10 | Max years for TEMPORAL_DIST |
+| `semantic_similarity_threshold` | 0.8 | Min similarity for SEMANTIC_SIM edges (entity & theme) |
+| `co_occurrence_threshold` | 2 | Min co-occurrences for CO_OCCURS edges |
+| `claim_sim_threshold` | 0.5 | Min similarity for CLAIM_SIM edges |
+| `temporal_decay_rate` | 0.15 | $\lambda$ in exponential decay |
+| `temporal_max_year_gap` | 10 | Max year gap for TEMPORAL_DIST edges |
+| `topic_probability_threshold` | 0.15 | Min probability to create HAS_TOPIC edge |
+| `keyphrase_top_n` | 5 | Number of keyphrases per chunk (S7) |
+| `max_documents` | −1 (all) | Maximum documents to process |
 
-### Retrieval Parameters
+### Retrieval Parameters (`config_retrieval.yaml`)
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `theme_threshold` | 0.01 | Min probability for theme detection |
-| `entity_relevance_threshold` | 0.1 | Min relevance for entity BFS propagation |
-| `theme_relevance_threshold` | 0.1 | Min relevance for theme BFS propagation |
-| `claim_top_k` | 5 | Number of top claims for S5, S6, S7 |
+| `theme_threshold` | 0.01 | Min BERTopic probability to detect seed themes (S3) |
+| `theme_relevance_threshold` | 0.1 | Min propagated relevance to continue BFS (S3) |
+| `entity_relevance_threshold` | 0.1 | Reserved (S4 no longer uses BFS) |
+| `claim_top_k` | 5 | Number of top claims for S5/S6/S7 |
 | `keyphrase_top_n` | 5 | Number of keyphrases to extract for S7 |
-| `top_k` | 10 | Number of chunks to return |
+| `top_k` | 10 | Number of top chunks returned |
+| `top_docs` | 50 | Number of top documents returned (per strategy and overall) |
+| `softmax_beta` | 5.0 | Sharpness $\beta$ of softmax document pooling ($\beta \to 0$: mean; $\beta \to \infty$: max) |
 
 ### Strategy Weights
 
-| Weight | Parameter | Default | Strategy |
-|--------|-----------|---------|----------|
-| α | `alpha` | 0.20 | Semantic Similarity (S1) |
-| β | `beta` | 0.20 | Topic Distribution (S2) |
-| γ | `gamma` | 0.20 | Thematic Traversal (S3) |
-| δ | `delta` | 0.20 | Entity Traversal (S4) |
-| ε | `epsilon` | 0.20 | Claim-Document (S5) |
-| ζ | `zeta` | 0.00 | Claim-Topic (S6) |
-| η | `eta` | 0.00 | Claim-KeyPhrase (S7) |
+| Weight | Symbol | Default | Strategy |
+|--------|--------|---------|----------|
+| alpha  | $\alpha$ | 0.20 | Semantic Similarity (S1) |
+| beta   | $\beta$ | 0.20 | Topic Distribution (S2) |
+| gamma  | $\gamma$ | 0.20 | Thematic Traversal (S3) |
+| delta  | $\delta$ | 0.20 | Entity Mention (S4) |
+| epsilon | $\varepsilon$ | 0.20 | Claim-Document (S5) |
+| zeta   | $\zeta$ | 0.00 | Claim-Topic (S6) |
+| eta    | $\eta$ | 0.00 | Claim-Keyphrase (S7) |
+
+---
+
+## Evaluation
+
+**Module:** `fact_check_kg/evaluation/evaluate.py`
+
+Benchmarks retrieval performance against ground-truth (query, document) pairs.
+
+**Input CSVs** (columns named `0` and `1`):
+- `queries.csv`: `0`=query_id, `1`=query_text (social-media posts)
+- `documents.csv`: `0`=doc_id, `1`=doc_text (fact-check articles)
+- `relations.csv`: `0`=query_id, `1`=doc_id (ground-truth alignments)
+
+**Filtering**: Only queries whose ground-truth document is present in the graph are evaluated. The graph contains the first `max_documents` documents from the source CSV.
+
+**Metrics:**
+- **Hit@K** ($K=1,5,10,50$): fraction of queries where the target document is in the top-$K$ retrieved documents
+- **MRR**: Mean Reciprocal Rank — $\displaystyle\text{MRR} = \frac{1}{|Q|}\sum_{q \in Q} \frac{1}{\text{rank}_q}$ (contribution = 0 if not found)
+- **Mean Rank / Median Rank**: average position of the relevant document (found cases only)
+- **Per-strategy Hit@10**: individual strategy effectiveness using max-pooled document scores
+
+**CLI:**
+```bash
+python cli.py evaluate --graph-id <ID> \
+  --queries data/queries.csv \
+  --documents data/documents.csv \
+  --relations data/relations.csv \
+  --max-rank 500
+```
+
+Reports are saved to `outputs/evaluation/eval_{graph_id}_{timestamp}.{json,txt}`.

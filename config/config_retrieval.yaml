@@ -37,10 +37,19 @@ retrieval:
     - "NORP"
 
   # Retrieval parameters
-  top_k: 10  # Number of results to return
+  top_k: 10  # Number of top chunks returned per query
+  top_docs: 50  # Number of top documents returned per strategy and overall
   theme_threshold: 0.005  # Minimum confidence for theme detection (lowered for small corpora with sparse topic distributions)
   claim_top_k: 10  # Number of top similar claims to consider for Strategies 5, 6, 7
   keyphrase_top_n: 5  # Number of keyphrases to extract from query for Strategy 7
+  explore_similar_claims: true  # Whether to expand via CLAIM_SIM edges (S5/S6/S7)
+  max_claim_expansion_depth: 1  # Maximum depth for claim expansion
+
+  # Document-level aggregation (softmax pooling)
+  softmax_beta: 5.0  # Sharpness of softmax pooling over chunks within a document
+                     # Low β (≈1): close to mean — many average chunks help more
+                     # High β (≈20): close to max — one strong chunk dominates
+                     # Default 5.0: balanced — strong chunks lead, moderate ones still contribute
 
   # Path scoring weights
   direct_path_weight: 1.0  # Entity -> Chunk (direct mention)
