@@ -839,6 +839,22 @@ def analyze_graph_stats(graph_path: str = None, use_postgres: bool = False, db_c
     stats_dir = Path("outputs/statistics")
     summary_file = stats_dir / f"summary_{timestamp}.txt"
 
+    # If exact match not found, find the closest summary file by timestamp
+    # (stats are written during build, a few seconds before the graph pickle is saved)
+    if not summary_file.exists():
+        candidates = sorted(stats_dir.glob("summary_????????_??????.txt"))
+        if candidates:
+            def _ts_distance(p):
+                ts_str = p.stem[len("summary_"):]          # "YYYYMMDD_HHMMSS"
+                ts_int = int(ts_str.replace("_", ""))       # sortable integer
+                ref    = int(timestamp.replace("_", ""))
+                return abs(ts_int - ref)
+
+            closest = min(candidates, key=_ts_distance)
+            if _ts_distance(closest) < 100:                 # within ~100 seconds
+                summary_file = closest
+                print(f"(Using closest stats file: {closest.name})")
+
     if summary_file.exists():
         print("\n" + "="*60)
         print("READING PRE-COMPUTED STATISTICS")
@@ -849,7 +865,10 @@ def analyze_graph_stats(graph_path: str = None, use_postgres: bool = False, db_c
         with open(summary_file, 'r', encoding='utf-8') as f:
             summary_content = f.read()
 
-        print(summary_content)
+        # Write directly to stdout buffer in UTF-8 to avoid Windows cp1252 issues
+        sys.stdout.buffer.write(summary_content.encode('utf-8', errors='replace'))
+        sys.stdout.buffer.write(b'\n')
+        sys.stdout.flush()
 
         print("\n" + "="*60)
         print("STATISTICS FILES AVAILABLE:")

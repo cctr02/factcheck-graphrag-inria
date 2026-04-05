@@ -534,19 +534,31 @@ def retrieve(claim, alpha, beta, gamma, delta, epsilon, zeta, eta, top_k, graph_
 @cli.command()
 @click.option('--graph-id', type=str, required=True,
               help='Graph ID (timestamp) of the graph to evaluate against.')
-@click.option('--queries', type=str, default='data/queries.csv', show_default=True,
+@click.option('--queries', type=str, default='data/eval_queries_top10000.csv', show_default=True,
               help='Path to queries CSV (columns: 0=query_id, 1=query_text).')
 @click.option('--documents', type=str, default='data/documents.csv', show_default=True,
               help='Path to documents CSV (columns: 0=doc_id, 1=doc_text).')
-@click.option('--relations', type=str, default='data/relations.csv', show_default=True,
+@click.option('--relations', type=str, default='data/eval_relations_top10000.csv', show_default=True,
               help='Path to relations CSV (columns: 0=query_id, 1=doc_id).')
 @click.option('--max-queries', type=int, default=None,
               help='Limit number of evaluated queries (default: all).')
-@click.option('--max-rank', type=int, default=500, show_default=True,
+@click.option('--max-rank', type=int, default=10, show_default=True,
               help='Maximum document rank to search for the target doc.')
 @click.option('--log-level', type=click.Choice(['DEBUG', 'INFO', 'WARNING', 'ERROR']),
               default='INFO', show_default=True)
-def evaluate(graph_id, queries, documents, relations, max_queries, max_rank, log_level):
+@click.option('--num-workers', type=int, default=1, show_default=True,
+              help='Number of parallel evaluation threads. 1 = sequential (safe). '
+                   '4–8 recommended for CPU-bound graphs.')
+@click.option('--query-cache', type=str, default='data/eval_queries_formatted_cache.csv', show_default=True,
+              help='Path to CSV cache for Ollama-formatted queries (query_id, formatted_query).')
+@click.option('--ollama-model', type=str, default='llama3.1:latest', show_default=True,
+              help='Ollama model used for query formatting.')
+@click.option('--ollama-endpoint', type=str, default='http://localhost:11434/api/generate', show_default=True,
+              help='Ollama API endpoint for query formatting.')
+@click.option('--skip-llm', is_flag=True,
+              help='Skip Ollama query formatting (use raw query text as-is).')
+def evaluate(graph_id, queries, documents, relations, max_queries, max_rank, log_level, num_workers,
+             query_cache, ollama_model, ollama_endpoint, skip_llm):
     """
     Evaluate retrieval performance on benchmark queries.
 
@@ -574,6 +586,7 @@ def evaluate(graph_id, queries, documents, relations, max_queries, max_rank, log
     logger.info(f"Relations   : {relations}")
     logger.info(f"Max queries : {max_queries or 'all'}")
     logger.info(f"Max rank    : {max_rank}")
+    logger.info(f"Num workers : {num_workers}")
 
     # --- Load graph ---
     graphs_dir = Path(retrieval_config.paths.graphs_dir)
@@ -641,6 +654,11 @@ def evaluate(graph_id, queries, documents, relations, max_queries, max_rank, log
             output_dir="outputs/evaluation",
             graph_id=graph_id,
             logger=logger,
+            num_workers=num_workers,
+            query_cache_path=query_cache,
+            ollama_model=ollama_model,
+            ollama_endpoint=ollama_endpoint,
+            skip_llm=skip_llm,
         )
     except Exception as exc:
         logger.error(f"Evaluation failed: {exc}", exc_info=True)

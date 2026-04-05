@@ -22,6 +22,7 @@ from scipy.spatial.distance import jensenshannon
 import logging
 import time
 import random
+import threading
 
 # Import strategy modules
 from fact_check_kg.retrieval.retrieval_propagation import (
@@ -154,6 +155,9 @@ class HybridRetriever:
         self.models_dir = models_dir
 
         self.logger = logger or logging.getLogger(__name__)
+
+        # spaCy is not thread-safe: serialise calls from parallel evaluation threads
+        self._nlp_lock = threading.Lock()
 
         # Pre-compute chunk embeddings and topic distributions for efficiency
         self.logger.info("Pre-computing chunk embeddings and topic distributions...")
@@ -333,14 +337,15 @@ class HybridRetriever:
 
     def retrieve_entity(self, claim: str) -> Tuple[Dict[str, float], Dict]:
         """Strategy 4: Entity Graph Traversal using graph traversal with relevance propagation."""
-        return _retrieve_entity(
-            claim=claim,
-            graph=self.graph,
-            nlp=self.nlp,
-            entity_types=set(self.entity_types),
-            entity_relevance_threshold=self.entity_relevance_threshold,
-            logger=self.logger
-        )
+        with self._nlp_lock:
+            return _retrieve_entity(
+                claim=claim,
+                graph=self.graph,
+                nlp=self.nlp,
+                entity_types=set(self.entity_types),
+                entity_relevance_threshold=self.entity_relevance_threshold,
+                logger=self.logger
+            )
 
     def retrieve_topic_distribution(self, claim: str) -> Dict[str, float]:
         """Strategy 2: Topic Distribution Similarity using Jensen-Shannon divergence."""
