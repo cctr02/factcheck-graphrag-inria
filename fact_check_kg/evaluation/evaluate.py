@@ -647,6 +647,54 @@ def run_evaluation(
     with open(txt_path, 'w', encoding='utf-8') as fh:
         fh.write(_format_report(report, top_k_eval, max_rank))
 
+    # ------------------------------------------------------------------
+    # Step 8b – save "pipeline top-1 not in S1 top-10" report
+    # Lists every query where our hybrid pipeline's top-1 doc is NOT
+    # among the top-10 results of plain semantic (S1) retrieval.
+    # For each such case: query text, top-1 doc, its rank in S1.
+    # ------------------------------------------------------------------
+    pipeline_only_top1: List[Dict] = []
+    for r in results_per_query:
+        if r.get('error'):
+            continue
+        top1_full = r.get('top1_full_doc_id')
+        if not top1_full:
+            continue
+        s1_ids = r.get('top50_s1_doc_ids', [])
+        if top1_full in s1_ids[:10]:
+            continue
+        try:
+            s1_rank = s1_ids.index(top1_full) + 1  # 1-based, within top-50
+        except ValueError:
+            s1_rank = None  # not found in top-50 of S1
+        pipeline_only_top1.append({
+            'query_id':        r['query_id'],
+            'query_text':      r['query_text'],
+            'top1_full_doc_id': top1_full,
+            'top1_full_text':  r.get('top1_full_text', ''),
+            's1_rank':         s1_rank,
+        })
+
+    pipeline_only_path = out / f"{stem}_pipeline_only_top1.txt"
+    with open(pipeline_only_path, 'w', encoding='utf-8') as fh:
+        fh.write("=" * 70 + "\n")
+        fh.write("PIPELINE TOP-1 NOT IN S1 SEMANTIC TOP-10\n")
+        fh.write(f"Queries where the hybrid pipeline's top-1 doc is absent from\n")
+        fh.write(f"the top-10 of plain semantic (S1) retrieval.\n")
+        fh.write(f"Total cases: {len(pipeline_only_top1)}\n")
+        fh.write("=" * 70 + "\n\n")
+        for i, entry in enumerate(pipeline_only_top1, 1):
+            s1_rank_str = str(entry['s1_rank']) if entry['s1_rank'] is not None else f">50"
+            fh.write(f"--- Case {i} / {len(pipeline_only_top1)}  (query_id={entry['query_id']}) ---\n")
+            fh.write(f"QUERY      : {entry['query_text']}\n")
+            fh.write(f"TOP-1 DOC  : [doc_id={entry['top1_full_doc_id']}]\n")
+            doc_preview = entry['top1_full_text'][:400].replace('\n', ' ')
+            fh.write(f"             {doc_preview}\n")
+            fh.write(f"S1 RANK    : {s1_rank_str}\n")
+            fh.write("\n")
+
+    logger.info(f"  Pipeline-only top-1 : {pipeline_only_path}  ({len(pipeline_only_top1)} cases)")
+
     logger.info(f"\nEvaluation complete in {total_eval_time:.1f}s.")
     logger.info(f"  JSON : {json_path}")
     logger.info(f"  Text : {txt_path}")

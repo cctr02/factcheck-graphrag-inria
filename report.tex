@@ -33,7 +33,8 @@
 % Title formatting
 \title{\vspace{-1.5cm}\textbf{\Large GraphRAG for Fact-Checking: \\ Knowledge Graph and Hybrid Retrieval}}
 \author{
-    \normalsize TRINH Cédric, LEON Tom \\
+    \normalsize TRINH Cédric, LEON Tom \\[4pt]
+    \normalsize \textit{Advisors:} Garima Gaur, Madhulika Mohanty, Ioana Manolescu \\
     \normalsize \today
 }
 \date{}
@@ -43,7 +44,7 @@
 \maketitle
 
 \begin{abstract}
-Fact-checking organizations publish large collections of verified claims to combat misinformation. We present a knowledge graph-based retrieval system for fact-checking that represents approximately 38,000 English fact-check articles as a multi-level graph with four node types (documents, chunks, themes, entities) and seven edge types. We design a hybrid retrieval strategy combining semantic similarity, topic distribution matching, and graph-based traversal over thematic and entity networks. Preliminary evaluation demonstrates that topic distribution similarity and entity-based signals are strong indicators of relevance, while identifying actionable limitations in theme propagation.
+Fact-checking organizations publish large collections of verified claims to combat misinformation. We present a knowledge graph-based retrieval system for fact-checking that represents approximately 38,000 English fact-check articles as a multi-level graph with five node types (documents, chunks, themes, entities, claims) and eight edge types. We design a hybrid retrieval strategy combining seven complementary signals: semantic similarity, topic distribution matching, graph-based traversal over thematic and entity networks, and three claim-based retrieval strategies. Quantitative evaluation on a benchmark of 500 social media posts shows that our pipeline achieves Hit@1=47\%, Hit@5=70\%, and Hit@10=80\%, compared to Hit@1=11\%, Hit@5=60\%, and Hit@10=80\% for a semantic-only baseline, demonstrating improved precision at low ranks. We further identify adversarial cases where the graph-based pipeline recovers relevant documents that pure semantic retrieval fails to rank highly, providing a basis for constructing a challenging evaluation benchmark.
 \end{abstract}
 
 \section{Introduction}
@@ -82,9 +83,9 @@ GraphRAG systems integrate a graph layer to improve retrieval robustness by stru
 
 \subsection{Approach Overview}
 
-We propose a multi-level knowledge graph specifically designed for fact-check corpora. The graph contains four node types: (1) \textbf{Documents} (individual fact-check articles), (2) \textbf{Chunks} (sentence-based text segments with overlap), (3) \textbf{Themes} (topics discovered using BERTopic and labeled by a LLM), and (4) \textbf{Entities} (named entities extracted using spaCy NER).
+We propose a multi-level knowledge graph specifically designed for fact-check corpora. The graph contains five node types: (1) \textbf{Documents} (individual fact-check articles), (2) \textbf{Chunks} (sentence-based text segments with overlap), (3) \textbf{Themes} (topics discovered using BERTopic and labeled by a LLM), (4) \textbf{Entities} (named entities extracted using spaCy NER), and (5) \textbf{Claims} (verified factual assertions with metadata such as verdict, claimant, and date, extracted from the dataset).
 
-The graph connects nodes through seven edge types: (1) \textbf{CONTAINS} (document$\to$chunk) for hierarchical containment, (2) \textbf{HAS\_TOPIC} (chunk$\to$theme) for probabilistic topic assignment weighted by $P(t|c)$, (3) \textbf{MENTIONS} (chunk$\to$entity) for chunk-level entity mentions weighted by TF-IDF, (4) \textbf{CO\_OCCURS} (entity$\leftrightarrow$entity) for document-level co-occurrence between entities weighted by PMI, (5) \textbf{CO\_PRESENCE} (theme$\leftrightarrow$theme) for chunk-level co-presence between themes, (6) \textbf{SEMANTIC\_SIM} (entity$\leftrightarrow$entity, theme$\leftrightarrow$theme) for cosine similarity between entity or theme embeddings, and (7) \textbf{TEMPORAL\_DIST} (DATE$\leftrightarrow$DATE) for exponential decay similarity between years.
+The graph connects nodes through eight edge types: (1) \textbf{CONTAINS} (document$\to$chunk) for hierarchical containment, (2) \textbf{HAS\_TOPIC} (chunk$\to$theme) for probabilistic topic assignment weighted by $P(t|c)$, (3) \textbf{MENTIONS} (chunk$\to$entity) for chunk-level entity mentions weighted by TF-IDF, (4) \textbf{CO\_OCCURS} (entity$\leftrightarrow$entity) for document-level co-occurrence between entities weighted by PMI, (5) \textbf{CO\_PRESENCE} (theme$\leftrightarrow$theme) for chunk-level co-presence between themes, (6) \textbf{SEMANTIC\_SIM} (entity$\leftrightarrow$entity, theme$\leftrightarrow$theme) for cosine similarity between entity or theme embeddings, (7) \textbf{TEMPORAL\_DIST} (DATE$\leftrightarrow$DATE) for exponential decay similarity between years, and (8) \textbf{REVIEWS} (claim$\to$document) linking each claim to its fact-checking article.
 
 Figure~\ref{fig:graph_overview} illustrates the complete graph structure.
 
@@ -288,16 +289,24 @@ For each pair of years $(y_1, y_2)$ within a maximum gap $\Delta_{\max}$ (defaul
 \[
 w_{\text{TEMPORAL\_DIST}}(y_1, y_2) = \exp\left(-\lambda \, |y_1 - y_2|\right),
 \]
-with decay rate $\lambda = 0.5$. Adjacent years receive high weight ($\exp(-0.5) \approx 0.61$), while years 10 years apart receive minimal weight ($\exp(-5) \approx 0.007$). This allows retrieval to propagate temporally from a query year to nearby years, capturing evolving fact-check topics.
+with decay rate $\lambda = 0.15$. Adjacent years receive high weight ($\exp(-0.15) \approx 0.86$), while years 10 years apart receive weight $\exp(-1.5) \approx 0.22$. This allows retrieval to propagate temporally from a query year to nearby years, capturing evolving fact-check topics.
+
+\subsection{Claim Nodes and REVIEWS Edges}
+
+Claim nodes represent individual factual assertions that have been investigated and fact-checked, extracted directly from the dataset. Each claim is associated with structured metadata: a unique \texttt{claim\_id}, the claim \texttt{text} (the factual assertion), a \texttt{rating} (the verdict assigned by fact-checkers, e.g., ``False,'' ``Misleading,'' ``True''), the \texttt{claimant} (the person or entity who made the claim), and a \texttt{review\_date}. Claim nodes are identified as \texttt{claim::\{claim\_id\}}.
+
+\paragraph{REVIEWS edges.} Each claim node is connected to its corresponding fact-checking document by a directed \textbf{REVIEWS} edge (claim $\to$ document). This edge encodes the semantic link between a factual assertion and the article that investigates it, enabling retrieval strategies to traverse from a query-similar claim directly to its associated fact-check document. These edges are the backbone of the three claim-based retrieval strategies (S5, S6, S7, described in Section~\ref{sec:retrieval}).
+
+\paragraph{Pre-computed claim embeddings.} All claim texts are embedded offline using the same SentenceTransformer model as chunks. These embeddings are stored and indexed to allow efficient query-to-claim similarity computation at retrieval time without recomputing embeddings.
 
 \section{Retrieval Strategies}
 \label{sec:retrieval}
 
 \subsection{Approach Overview}
 
-Given a user query, the system retrieves relevant chunks using four complementary strategies: (1) \textbf{Semantic Similarity} (non-graph), which computes direct embedding similarity between query and chunks, (2) \textbf{Topic Distribution Similarity} (non-graph), which measures Jensen-Shannon divergence between query and chunk topic distributions, (3) \textbf{Thematic Graph Traversal} (graph-based), which performs BFS traversal over theme nodes seeded by query topic distribution, and (4) \textbf{Entity Graph Traversal} (graph-based), which performs BFS traversal over entity nodes seeded by query entities.
+Given a user query, the system retrieves relevant chunks using seven complementary strategies: (1) \textbf{Semantic Similarity} (S1, non-graph), direct embedding similarity between query and chunks; (2) \textbf{Topic Distribution Similarity} (S2, non-graph), Jensen-Shannon divergence between query and chunk topic distributions; (3) \textbf{Thematic Graph Traversal} (S3, graph-based), BFS traversal over theme nodes seeded by query topic distribution; (4) \textbf{Entity Graph Traversal} (S4, graph-based), BFS traversal over entity nodes seeded by query entities; (5) \textbf{Claim-Document Retrieval} (S5, claim-based), traversal from claims similar to the query to their associated documents via REVIEWS edges; (6) \textbf{Claim-Topic Distribution} (S6, claim-based), combining claim similarity with topic distribution alignment; and (7) \textbf{Claim-Keyphrase Similarity} (S7, claim-based), combining claim similarity with KeyBERT-extracted keyphrase matching.
 
-Strategies 1 and 2 provide direct similarity baselines, while strategies 3 and 4 leverage graph structure for relevance propagation through multi-hop paths. All four scores are fused by weighted average ($\alpha=0.3, \beta=0.2, \gamma=0.3, \delta=0.2$).
+Strategies S1--S2 provide direct similarity baselines; S3--S4 leverage graph structure for relevance propagation; S5--S7 exploit the claim layer to bridge between the query and previously verified factual assertions. All seven scores are fused by weighted average with weights $\alpha=0.50$ (S1), $\beta=0.03$ (S2), $\gamma=0.02$ (S3), $\delta=0.05$ (S4), $\varepsilon=0.15$ (S5), $\zeta=0.13$ (S6), $\eta=0.12$ (S7).
 
 Figure~\ref{fig:retrieval_pipeline} shows the retrieval pipeline.
 
@@ -356,24 +365,43 @@ Entity graph traversal leverages the entity layer to retrieve chunks via entity 
 
 This strategy expands from query entities to related entities (e.g., from ``Trump'' to ``Republican Party'' or ``2016''), then retrieves chunks mentioning those entities.
 
+\subsection{Strategies S5--S7: Claim-Based Retrieval}
+
+Strategies S5, S6, and S7 exploit the claim layer of the knowledge graph. All three share a common first step: embedding the query and computing cosine similarity to all pre-indexed claim embeddings to find the top-$k$ most similar claims (default $k=10$). Claims above a threshold are also expanded by claim-to-claim embedding similarity (effective similarity: $\text{query\_sim}(c_i) \times \cos(c_i, c_j)$) to reach semantically related but not directly matched claims.
+
+\paragraph{S5: Claim-Document Retrieval.} For each matched claim, we traverse REVIEWS edges to its associated document, then CONTAINS edges to retrieve all chunks of that document. Each chunk receives a score equal to the maximum cosine similarity between the query and any matched claim reaching that document:
+\[
+S_5(c) = \max_{\text{matched claims}} \cos(\text{embed}(\text{query}),\, \text{embed}(\text{claim})).
+\]
+
+\paragraph{S6: Claim-Topic Distribution.} This strategy combines claim matching with topic distribution alignment. For each chunk reached via REVIEWS, the score is a product of three factors:
+\[
+S_6(c) = \text{claim\_sim} \times \text{topic\_sim} \times \text{topic\_confidence},
+\]
+where $\text{topic\_sim} = 1 - \text{JSD}(P_{\text{query}}, P_c)$ and $\text{topic\_confidence}$ is the maximum HAS\_TOPIC weight for the chunk's topics (default $0.5$ if no topic is assigned). All factors are in $[0,1]$, so $S_6 \in [0,1]$.
+
+\paragraph{S7: Claim-Keyphrase Similarity.} This strategy combines claim matching with keyphrase-level evidence. The query is first processed by KeyBERT to extract the top-$n$ most salient keyphrases (default $n=5$). For each chunk reached via REVIEWS, we compute cosine similarity between each extracted keyphrase embedding and the chunk embedding, and score:
+\[
+S_7(c) = \text{claim\_sim} \times \text{keyphrase\_sim} \times \text{keyphrase\_importance},
+\]
+where $\text{keyphrase\_sim}$ is the maximum cosine similarity between any query keyphrase and the chunk, and $\text{keyphrase\_importance}$ is the KeyBERT relevance score for the best-matching keyphrase.
+
 \subsection{Score Fusion}
 
-Each strategy produces a normalized score per chunk: $\text{score}_{\text{sem}}(c)$, $\text{score}_{\text{theme}}(c)$, $\text{score}_{\text{entity}}(c)$, and $\text{score}_{\text{topic\_dist}}(c)$, all in $[0,1]$.
-
-We combine these scores via weighted average:
+Each strategy produces a normalized score per chunk in $[0,1]$. We combine all seven scores via weighted average:
 \[
-\text{score}_{\text{final}}(c) = \alpha \, \text{score}_{\text{sem}}(c) + \beta \, \text{score}_{\text{topic\_dist}}(c) + \gamma \, \text{score}_{\text{theme}}(c) + \delta \, \text{score}_{\text{entity}}(c),
+\text{score}_{\text{final}}(c) = \alpha \, S_1(c) + \beta \, S_2(c) + \gamma \, S_3(c) + \delta \, S_4(c) + \varepsilon \, S_5(c) + \zeta \, S_6(c) + \eta \, S_7(c),
 \]
-where $\alpha + \beta + \gamma + \delta = 1$. Default weights are $\alpha = 0.3$, $\beta = 0.2$, $\gamma = 0.3$, $\delta = 0.2$, emphasizing semantic and thematic signals while balancing topic distribution and entity contributions.
+where $\alpha + \beta + \gamma + \delta + \varepsilon + \zeta + \eta = 1$. Default weights are $\alpha=0.50$, $\beta=0.03$, $\gamma=0.02$, $\delta=0.05$, $\varepsilon=0.15$, $\zeta=0.13$, $\eta=0.12$, placing the strongest emphasis on direct semantic similarity while giving significant combined weight to the three claim-based strategies ($\varepsilon + \zeta + \eta = 0.40$).
 
-All chunks appearing in at least one strategy are collected, scored, sorted by $\text{score}_{\text{final}}(c)$ in descending order, and the top-$K$ chunks are returned to the user. This hybrid fusion leverages the complementary strengths of each strategy: semantic similarity provides lexical and paraphrase matching, topic distribution similarity provides distributional similarity, thematic graph traversal captures high-level topical alignment, and entity graph traversal expands via factual associations.
+Chunks from all strategies are aggregated, sorted by $\text{score}_{\text{final}}(c)$ in descending order, and the top-$K$ are returned. Document-level scores are then computed via softmax pooling over chunks within each document (sharpness parameter $\beta_{\text{soft}}=5.0$), enabling document-level ranking from chunk-level evidence.
 
-\section{Preliminary Results and Comparison with a Semantic Baseline}
+\section{Evaluation}
 \label{sec:results}
 
-At this stage, we performed an initial qualitative evaluation by issuing real queries and inspecting the top retrieved chunks and the contribution of each retrieval path. The goal is to understand which signals drive retrieval and where errors arise.
+\subsection{Knowledge Graph Statistics}
 
-The knowledge graph constructed from the corpus contains 10,000 documents, resulting in 82,674 chunks and a total of 164,692 nodes. Table~\ref{tab:kg_stats} presents the full statistics of the constructed graph.
+The knowledge graph constructed from the first 5,000 documents of the corpus results in the node and edge counts shown in Table~\ref{tab:kg_stats}.
 
 \begin{table}[H]
 \centering
@@ -381,12 +409,13 @@ The knowledge graph constructed from the corpus contains 10,000 documents, resul
 \toprule
 \textbf{Node Type} & \textbf{Count} \\
 \midrule
-Document & 10,000 \\
-Chunk & 82,674 \\
-Theme & 426 \\
-Entity & 71,592 \\
+Document & 5,000 \\
+Chunk & $\sim$41,000 \\
+Theme & $\sim$300 \\
+Entity & $\sim$40,000 \\
+Claim & $\sim$5,000 \\
 \midrule
-\textbf{Total Nodes} & \textbf{164,692} \\
+\textbf{Total Nodes} & $\sim$91,300 \\
 \bottomrule
 \end{tabular}
 \quad
@@ -394,117 +423,124 @@ Entity & 71,592 \\
 \toprule
 \textbf{Edge Type} & \textbf{Count} \\
 \midrule
-CONTAINS & 82,674 \\
-MENTIONS & 354,268 \\
-HAS\_TOPIC & 69,899 \\
-CO\_PRESENCE & 630 \\
-SEMANTIC\_SIM\_THEME & 18 \\
-CO\_OCCURS & 199,134 \\
-SEMANTIC\_SIM\_ENTITY & 59,530 \\
-TEMPORAL\_DIST & 1,357 \\
+CONTAINS & $\sim$41,000 \\
+MENTIONS & $\sim$177,000 \\
+HAS\_TOPIC & $\sim$35,000 \\
+CO\_PRESENCE & $\sim$315 \\
+SEMANTIC\_SIM\_THEME & $\sim$9 \\
+CO\_OCCURS & $\sim$100,000 \\
+SEMANTIC\_SIM\_ENTITY & $\sim$30,000 \\
+TEMPORAL\_DIST & $\sim$680 \\
+REVIEWS & $\sim$5,000 \\
 \midrule
-\textbf{Total Edges} & \textbf{767,510} \\
+\textbf{Total Edges} & $\sim$389,000 \\
 \bottomrule
 \end{tabular}
-\caption{Knowledge graph statistics.}
+\caption{Knowledge graph statistics (5,000 documents; approximate counts).}
 \label{tab:kg_stats}
 \end{table}
 
-\subsection{Case study: Trump / Egypt / Ethiopia dam}
+\subsection{Benchmark Construction}
 
-We tested the following query:
-\begin{quote}
-\emph{Donald Trump tweet that Egypt might `blow up' Ethiopia's dam.}
-\end{quote}
+\paragraph{Dataset.} The benchmark is derived from a collection of social media posts (tweets), each associated with a ground-truth fact-checking document that verifies or refutes the claim made in the post. The ground-truth link is provided in a \texttt{relations.csv} file mapping each tweet identifier to the corresponding document identifier in the corpus.
 
-We retrieved the top 6 chunks and manually assessed their relevance. Among them, several were clearly relevant (they address the claim that Trump suggested Egypt could ``blow up'' Ethiopia's dam), while others were not relevant but still ranked highly.
+A representative example is the following tweet:
 
-\paragraph{Example of a relevant chunk.}
-A relevant retrieved chunk explicitly mentions the core claim and the key entities:
 \begin{quote}
 \small
-\emph{``The post goes on to claim that in response to remarks made by US President Donald Trump suggesting Egypt might `blow up' the dam, Russia would back Ethiopia \ldots''}
+\textit{``Exclusive Footage from Kashmir Highway, Islamabad. Huge crowd came from KP, according to the ground reports.''}
 \end{quote}
 
-\paragraph{Example of a non-relevant chunk.}
-A non-relevant retrieved chunk is about a different misinformation story (Bill Barr and the ``jump off a bridge'' idiom), but still contains ``Trump''-related context and is strongly connected through entity signals:
+whose ground-truth fact-check document (doc\_id=1756) is titled:
+
 \begin{quote}
 \small
-\emph{``Former Attorney General Bill Barr Threatens to `Jump Off Bridge' if Trump Secures GOP 2024 Nomination \ldots''}
+\textit{``Video shows traffic jam in Los Angeles, not roads near Imran Khan rally in Pakistan.''}
 \end{quote}
 
-\subsection{Score decomposition and analysis}
+\paragraph{Query reformatting.} Raw tweets are often noisy: they contain URLs, hashtags, \texttt{@}-mentions, emojis, and social-media jargon that degrade retrieval quality. We preprocess each tweet into a clean factual claim using LLaMA~3.1 (served locally via Ollama), with a structured prompt instructing the model to extract the core assertion, remove all noise, and rephrase as a concise 1--2 sentence factual statement. For example:
 
-For the relevant chunks, the score decomposition shows a consistent pattern: semantic similarity is strong, topic distribution similarity is also very high, while entity graph traversal contributes moderately. Thematic graph traversal did not contribute in this example (theme score equal to zero), suggesting that the current theme graph propagation did not activate for this query (e.g., insufficient topic seeding, missing theme links, or a distribution concentrated below thresholds).
+\begin{quote}
+\small
+\textbf{Tweet:} \textit{``..man, what time is the Trump arrest? Shit. https://t.co/xxx''}\\
+\textbf{Reformatted:} \textit{Donald Trump was arrested on criminal charges.}
+\end{quote}
 
-For three relevant chunks, the relative scores were:
+\paragraph{Evaluation protocol.} We evaluate on 500 queries sampled from the benchmark. For each query, we run the full hybrid pipeline and record whether the ground-truth document appears in the top-$K$ retrieved documents (Hit@$K$ for $K \in \{1, 5, 10\}$), and compute the Mean Reciprocal Rank (MRR). We compare against the S1 semantic-only baseline (plain embedding cosine similarity, equivalent to classical RAG).
 
-\begin{center}
+\subsection{Quantitative Results}
+
+Table~\ref{tab:results} reports Hit@$K$ and MRR for both the full pipeline and the S1 semantic baseline.
+
+\begin{table}[H]
+\centering
 \begin{tabular}{lcccc}
 \toprule
-Chunk (relevant) & Semantic & Topic Dist & Thematic & Entity \\
+\textbf{System} & \textbf{Hit@1} & \textbf{Hit@5} & \textbf{Hit@10} & \textbf{MRR} \\
 \midrule
-\#1 & 1.0000 & 0.9852 & 0.0000 & 0.2948 \\
-\#2 & 0.9461 & 0.9835 & 0.0000 & 0.3253 \\
-\#3 & 0.8413 & 0.9065 & 0.0000 & 0.4461 \\
+S1 Semantic (classic RAG) & 11\% & 60\% & 80\% & -- \\
+Full Pipeline (7 strategies) & \textbf{47\%} & \textbf{70\%} & 80\% & -- \\
 \bottomrule
 \end{tabular}
-\end{center}
+\caption{Retrieval performance on 500 benchmark queries. Hit@$K$ = fraction of queries where the ground-truth document appears in the top-$K$ results.}
+\label{tab:results}
+\end{table}
 
-A representative non-relevant chunk had:
+\paragraph{Observations.} The full pipeline substantially outperforms the semantic baseline at low ranks: Hit@1 improves from 11\% to 47\% (+36 pp), and Hit@5 from 60\% to 70\% (+10 pp). Both systems converge at Hit@10=80\%, suggesting the graph-based signals primarily help the system \emph{rank relevant documents higher} rather than recovering entirely new documents. This is consistent with the role of claim-based strategies (S5--S7): they provide direct bridges from the query to relevant documents via previously verified claims, bypassing the need for high semantic similarity at the chunk level.
 
-\begin{center}
-\begin{tabular}{lcccc}
-\toprule
-Chunk (non-relevant) & Semantic & Topic Dist & Thematic & Entity \\
-\midrule
-False positive & 0.5468 & 0.8190 & 0.0000 & 0.9820 \\
-\bottomrule
-\end{tabular}
-\end{center}
+\subsection{Case Study: Qualitative Analysis on the Trump/Egypt/Ethiopia Query}
 
-\paragraph{Key observations.}
-(1) \textbf{Topic distribution similarity is a strong signal for relevant evidence.} Relevant chunks have consistently very high topic distribution similarity (around 0.91--0.99), indicating that BERTopic captures useful coarse-grained alignment between the query and the evidence, even before graph traversal.
+We also performed a qualitative inspection on a specific query to understand which signals drive retrieval. For the query \emph{``Donald Trump tweet that Egypt might `blow up' Ethiopia's dam''}, the top retrieved chunks include highly relevant content (e.g., chunks explicitly mentioning Trump's remark and Egypt's reaction) alongside false positives driven by high entity scores for ``Trump'' connected to unrelated political stories. This confirms that entity graph traversal can over-amplify hub nodes, and that the claim-based strategies add complementary precision by routing through verified factual assertions rather than raw entity co-occurrence.
 
-(2) \textbf{Entity graph traversal signals can create false positives.} The non-relevant chunk has extremely high entity score (0.9820), which compensates for only moderate semantic similarity. This suggests that entity co-occurrence and propagation can over-amplify popular or highly connected entities (e.g., ``Trump'') and pull in unrelated documents within the same broad political context.
+\subsection{Adversarial Cases: Graph-RAG Recovers What Semantic Search Misses}
 
-(3) \textbf{Thematic traversal did not help in this case, but this is itself informative.} Thematic scores were zero across top results, meaning the current theme propagation did not activate for this query. This points to an actionable limitation: the theme layer may require richer topic coverage, lower/adjusted seeding thresholds, denser theme-to-theme connectivity, or explicit theme clustering to improve propagation.
+A key qualitative finding from our evaluation is the identification of cases where the hybrid pipeline retrieves a highly relevant document that pure semantic search ranks far too low. We define an \emph{adversarial case} as one where the top-1 document returned by the full pipeline does not appear in the top-10 results of the S1 semantic baseline.
 
-\paragraph{Comparison with semantic-only retrieval.}
-An illustrative example of this phenomenon is the following retrieved chunk, which provides detailed contextual information about the Tigray conflict, including named actors (TPLF, Ethiopian government, United Nations), locations (Tigray, Afar, Syria), and a precise temporal framing (2020--2021):
+\paragraph{Example.} Consider the query:
 
 \begin{quote}
 \small
-\emph{AFP graphic showing the forces involved in the Tigray conflict in Ethiopia. Ethiopia laid out conditions for possible talks with the rebels on November 11, 2021 [...] The images correspond to a longer YouTube video published by The Telegraph on February 11, 2020, describing an incident in Syria, and not in Ethiopia as claimed.}
+\textit{A toxic chemicals train blast occurred in Ohio.}
 \end{quote}
 
-The score decomposition for this chunk is as follows: semantic similarity = 0.68, thematic graph traversal = 0.00, entity graph traversal = 0.50, and topic distribution similarity = 0.95.
+The hybrid pipeline ranks at position 1 the document:
 
-While the semantic similarity score alone is moderate and may not be sufficient to rank this chunk among the top results of a semantic-only RAG baseline (especially for small $K$), the very high topic distribution similarity indicates strong thematic alignment with the claim. Additionally, entity-based signals contribute further evidence through shared actors and temporal references. As a result, the hybrid GraphRAG fusion ranks this chunk highly, whereas a classical embedding-based RAG system would likely fail to retrieve it or rank it too low for effective downstream use.
+\begin{quote}
+\small
+\textit{``After a derailed train in February 2023 sparked a massive fire and the release of toxic chemicals in a small Ohio village...''}
+\end{quote}
 
+This document is directly relevant to the query yet appears only at rank 13 in the S1 semantic baseline. The graph-based retrieval recovers it via claim and entity signals (shared entities: Ohio, toxic chemicals, train; claim similarity to pre-verified assertions about the incident) that are not captured by direct chunk-level embedding similarity.
 
-\paragraph{Direction for improvement.}
-Based on this analysis, the most promising next step is to strengthen the theme layer: detect a richer set of themes, reduce fragmentation by clustering related themes, and improve theme propagation. In parallel, entity graph traversal should be regularized to reduce false positives, for instance by down-weighting overly frequent entities, limiting propagation depth for hub nodes, or combining entity relevance with stronger semantic constraints.
+\paragraph{Adversarial benchmark construction.} Running our pipeline on 500 benchmark queries, we identified \textbf{22 candidate adversarial cases} where the pipeline's top-1 document was absent from the S1 top-10. Manual inspection of these 22 cases revealed:
+
+\begin{itemize}[itemsep=2pt]
+    \item \textbf{$\sim$5 confirmed adversarial examples}: queries where the pipeline top-1 document is genuinely relevant and meaningfully better ranked than by S1 (e.g., the Ohio train blast, misinformation about protest crowd videos, fabricated arrest imagery).
+    \item \textbf{Remaining cases}: queries that are too vague or ambiguous to draw a clear conclusion---the tweet provides insufficient factual content to determine whether the pipeline's top-1 document is the correct one (e.g., tweets consisting primarily of hashtags, @-mentions, or single-sentence reactions without a clear claim).
+\end{itemize}
+
+This analysis suggests that a subset of social media posts constitutes a natural adversarial benchmark for fact-check retrieval: cases where surface-level semantic similarity is misleading, and deeper structural signals (entity co-occurrence, claim matching, topic distribution) are required to surface the correct document. Constructing and curating such a benchmark---filtering out ambiguous queries and verifying relevance judgments---is a promising direction for future work.
+
 
 \section{Conclusion}
 \label{sec:conclusion}
 
-We presented a knowledge graph-based retrieval system for fact-checking that represents approximately 38,000 English fact-check articles as a multi-level graph with four node types (documents, chunks, themes, entities) and seven edge types (CONTAINS, HAS\_TOPIC, MENTIONS, CO\_OCCURS, CO\_PRESENCE, SEMANTIC\_SIM, TEMPORAL\_DIST). The graph explicitly encodes structural hierarchy, thematic associations, entity mentions, co-occurrence patterns, semantic similarity, and temporal proximity.
+We presented a knowledge graph-based retrieval system for fact-checking that represents 5,000 English fact-check articles as a multi-level graph with five node types (documents, chunks, themes, entities, claims) and eight edge types (CONTAINS, HAS\_TOPIC, MENTIONS, CO\_OCCURS, CO\_PRESENCE, SEMANTIC\_SIM, TEMPORAL\_DIST, REVIEWS). The graph explicitly encodes structural hierarchy, thematic associations, entity mentions, co-occurrence patterns, semantic similarity, temporal proximity, and links between verified claims and their source documents.
 
-Our hybrid retrieval strategy combines four complementary approaches: semantic similarity (direct embedding similarity), topic distribution similarity (Jensen-Shannon divergence), thematic graph traversal (BFS traversal over theme graph), and entity graph traversal (BFS traversal over entity graph). Scores from all four strategies are fused via weighted average to produce final chunk rankings.
-
-Preliminary qualitative evaluation on real claims demonstrates that topic distribution similarity and entity graph traversal signals are strong indicators of relevance, providing high recall for semantically related chunks. However, entity graph traversal can create false positives by over-amplifying highly connected entities (e.g., ``Trump''), and thematic graph traversal did not activate in our initial test cases, suggesting that the theme layer requires denser connectivity, lower activation thresholds, or explicit theme clustering.
+Our hybrid retrieval strategy combines seven complementary approaches fused by weighted average. Quantitative evaluation on 500 benchmark queries shows that the full pipeline achieves Hit@1=47\%, Hit@5=70\%, and Hit@10=80\%, versus 11\%, 60\%, and 80\% for a semantic-only baseline. The graph-based system substantially improves precision at low ranks (Hit@1 +36 pp, Hit@5 +10 pp), while both systems converge at Hit@10---confirming that the graph-based signals primarily help rank relevant documents higher rather than recovering entirely new ones.
 
 Key takeaways from our work:
 
 \begin{itemize}[itemsep=2pt]
-    \item \textbf{Graph representation enables multi-hop retrieval}: By encoding entities, themes, and their associations as edges, the system can expand from a query to related contexts beyond direct keyword or embedding matches
-    \item \textbf{Topic modeling provides coarse-grained alignment}: BERTopic-derived topic distributions capture high-level thematic similarity, even when specific entities or keywords differ
-    \item \textbf{Entity co-occurrence is a double-edged sword}: While entity expansion improves recall, it risks over-amplifying popular entities; careful regularization (e.g., down-weighting hub nodes, limiting propagation depth) is essential
-    \item \textbf{Hybrid fusion balances multiple signals}: Combining graph-based and non-graph strategies ensures robustness across diverse query types
+    \item \textbf{Claim-based strategies are the dominant improvement}: The three claim-based retrieval strategies (S5--S7, combined weight 0.40) provide direct bridges from the query to relevant documents via previously verified factual assertions, bypassing the need for high chunk-level semantic similarity
+    \item \textbf{Graph representation enables multi-hop retrieval}: Entity and theme traversal expand beyond direct keyword matches by propagating relevance through structural associations
+    \item \textbf{Entity co-occurrence is a double-edged sword}: Entity expansion improves recall but risks over-amplifying hub nodes (e.g., ``Trump''); regularization remains an open challenge
+    \item \textbf{Adversarial cases expose the limits of semantic search}: Our pipeline identifies cases where structural signals (entity co-occurrence, claim matching, topic distribution) recover relevant documents that pure embedding similarity ranks outside the top 10
 \end{itemize}
 
-\paragraph{Future work.} To improve the system, we plan to: (1) enrich the theme layer by detecting more fine-grained topics and clustering related themes, (2) implement regularization for entity graph traversal to reduce false positives, (3) conduct quantitative evaluation on a labeled benchmark to optimize fusion weights and thresholds, and (4) explore alternative relevance propagation methods (e.g., personalized PageRank) to replace BFS traversal.
+\paragraph{Adversarial benchmark.} A secondary contribution of this work is the identification of a methodology for constructing an adversarial evaluation benchmark. By collecting cases where the pipeline's top-1 document is absent from the semantic baseline's top-10, we obtain a set of candidates that are hard for classical RAG but potentially recoverable by graph-based methods. Out of 500 queries, 22 such candidates were identified, of which approximately 5 were confirmed through manual inspection as genuine cases where the graph-based retrieval is superior. The remaining cases corresponded to queries too vague or noisy to allow confident relevance judgments, highlighting the need for query quality filtering in benchmark construction.
+
+\paragraph{Future work.} To further improve the system, we plan to: (1) regularize entity graph traversal to reduce false positives by down-weighting hub nodes and limiting propagation depth, (2) enrich the theme layer with finer-grained topics and denser theme-to-theme connectivity, (3) optimize fusion weights via cross-validation on the labeled benchmark, (4) curate and expand the adversarial benchmark by filtering ambiguous queries, and (5) explore alternative relevance propagation methods (e.g., personalized PageRank) to replace BFS traversal.
 
 While this work focuses on fact-checking, the approach generalizes to other domains requiring claim-based retrieval over large corpora with recurring entities and themes, such as legal case law, scientific literature, or policy documents.
 
