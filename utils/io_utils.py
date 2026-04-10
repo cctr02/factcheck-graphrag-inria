@@ -1,3 +1,20 @@
+"""
+I/O utilities for loading document corpora and claims from CSV files.
+
+Functions
+---------
+load_corpus_from_csv
+    Load documents (title + body) from a CSV file, filter by language,
+    and optionally return per-document metadata (review_date, language).
+
+load_claims_from_csv
+    Load fact-checking claims from a CSV file, deduplicate by claim_id,
+    and build a mapping from claim_id to the list of associated document IDs.
+
+These functions are called by ``fact_check_kg/build/data_loader.py`` during
+graph construction.  They can also be used standalone for data inspection.
+"""
+
 from typing import List, Optional, Tuple, Dict, Any
 import logging
 import pandas as pd

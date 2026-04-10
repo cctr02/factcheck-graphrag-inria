@@ -743,10 +743,10 @@ def stats(graph_id, use_postgres, detailed):
         for node_type, count in sorted(node_types.items()):
             print(f"  {node_type}: {count}")
 
-        # Edges by type
+        # Edges by type (graph uses 'edge_type' or 'type')
         edge_types = {}
         for _, _, data in graph.edges(data=True):
-            edge_type = data.get('type', 'unknown')
+            edge_type = data.get('edge_type') or data.get('type', 'unknown')
             edge_types[edge_type] = edge_types.get(edge_type, 0) + 1
 
         print("\nEdges by type:")

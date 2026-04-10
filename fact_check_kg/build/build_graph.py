@@ -1,8 +1,36 @@
 """
-Main script to build the knowledge graph from CSV data.
+Knowledge graph build orchestrator.
 
-This script loads documents, chunks them, and builds the complete
-multi-level knowledge graph with documents, chunks, themes, and entities.
+This script is called as a subprocess by ``cli.py build``.  It reads
+documents from CSV, chunks them, builds the multi-level graph, and saves
+all outputs with a shared timestamp used as the unique graph ID.
+
+Build pipeline (sequential):
+    1. Load and chunk documents   (data_loader.load_and_chunk_documents)
+    2. Load and filter claims     (data_loader.load_claims)
+    3. Run KnowledgeGraphBuilder  (graph_builder.KnowledgeGraphBuilder.build_graph)
+       a. Create document + chunk nodes
+       b. Train BERTopic → create theme nodes + HAS_TOPIC edges
+       c. Label topics with LLM (llm_labeling.TopicLabeler)
+       d. Extract named entities (spaCy) → MENTIONS edges (TF-IDF weighted)
+       e. Build entity-entity edges: CO_OCCURS, SEMANTIC_SIM, TEMPORAL_DIST
+       f. Extract keyphrases (KeyBERT) → HAS_KEYPHRASE edges
+       g. Build theme-theme edges: CO_PRESENCE, SEMANTIC_SIM
+       h. Create claim nodes → REVIEWS edges; build SIMILAR_CLAIM edges
+    4. Save outputs to disk:
+       - outputs/graphs/graph_{ID}.gpickle
+       - outputs/graphs/metadata_{ID}.json
+       - outputs/models/topic_model_{ID}.pkl
+       - outputs/models/topic_probs_{ID}.npz
+       - outputs/embeddings/embeddings_{ID}.faiss + .pkl
+    5. Optionally save to PostgreSQL (falls back to pickle-only on failure)
+
+Usage (via cli.py):
+    uv run python cli.py build --max-docs 1000
+
+Direct usage (for debugging):
+    uv run python fact_check_kg/build/build_graph.py --max-docs 100 --log-level DEBUG
+    uv run python fact_check_kg/build/build_graph.py --resume
 """
 
 import os

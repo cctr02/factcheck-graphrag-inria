@@ -1,17 +1,28 @@
 """
-Fact-Checking Knowledge Graph Module
+Fact-Checking Knowledge Graph Package
 
-A multi-level knowledge graph for fact-checking that combines:
-- Strategy 1: Semantic Similarity (embedding-based)
-- Strategy 2: Topic Distribution Similarity (Jensen-Shannon divergence)
-- Strategy 3: Thematic Graph Traversal (BFS over theme graph)
-- Strategy 4: Entity Graph Traversal (BFS over entity graph)
+A multi-level knowledge graph for fact-checking that retrieves relevant
+documents given a textual claim. The graph combines documents, text chunks,
+BERTopic themes, spaCy named entities, KeyBERT keyphrases, and claim nodes.
 
-Module structure:
-- core: Configuration, database connector, embedding cache, logging
-- build: Graph building components (data loading, graph construction)
-- analysis: Graph analysis and visualization
-- retrieval: Hybrid retrieval system
+Retrieval uses seven complementary strategies fused by weighted sum:
+    S1 (alpha)   - Semantic Similarity: FAISS embedding cosine similarity
+    S2 (beta)    - Topic Distribution: Jensen-Shannon divergence
+    S3 (gamma)   - Thematic Graph Traversal: BFS over theme graph
+    S4 (delta)   - Entity Graph Traversal: BFS over entity graph
+    S5 (epsilon) - Claim-Document: chunks from documents linked to similar claims
+    S6 (zeta)    - Claim-Topic Traversal: claim-based topic distribution BFS
+    S7 (eta)     - Claim-KeyPhrase: claim-based keyphrase matching
+
+Package structure:
+    core/       - Configuration (config_loader), database connector, FAISS
+                  embedding cache, and logging utilities
+    build/      - Graph construction: data loading, chunking, BERTopic,
+                  NER, KeyBERT, LLM topic labeling, checkpoint management
+    retrieval/  - HybridRetriever (7 strategies) and result formatting
+    analysis/   - Graph management, Pyvis visualization, topic relabeling
+
+Entry point: all operations are exposed through ``cli.py``.
 """
 
 __version__ = "0.1.0"

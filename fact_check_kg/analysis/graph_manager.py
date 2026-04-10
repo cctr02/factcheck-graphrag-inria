@@ -78,21 +78,39 @@ def load_graph_by_id(graph_id: str) -> Tuple[object, object, Dict]:
     with open(metadata_path, 'r') as f:
         metadata = json.load(f)
 
-    # Load based on storage type
+    # Resolve graph file path: metadata stores paths under metadata["paths"]["graph"]
+    # (top-level "graph_path" / "pickle_path" keys no longer exist as of current build)
+    def _resolve_graph_path(meta: dict) -> Optional[str]:
+        """Return the pickle file path from metadata, regardless of schema version."""
+        # Current schema: paths.graph
+        if isinstance(meta.get("paths"), dict):
+            p = meta["paths"].get("graph")
+            if p:
+                return p
+        # Legacy top-level keys
+        return meta.get("graph_path") or meta.get("pickle_path")
+
+    def _resolve_topic_model_path(meta: dict) -> Optional[str]:
+        """Return the topic model path from metadata."""
+        if isinstance(meta.get("paths"), dict):
+            p = meta["paths"].get("topic_model")
+            if p:
+                return p
+        return meta.get("topic_model_path")
+
     storage_type = metadata["storage_type"]
 
     if storage_type == "dual":
         # Dual storage: prefer pickle for faster loading, fallback to PostgreSQL
         try:
-            # Try loading from pickle first (faster)
-            pickle_path = Path(metadata["pickle_path"])
-            with open(pickle_path, 'rb') as f:
+            graph_file = _resolve_graph_path(metadata)
+            if not graph_file:
+                raise FileNotFoundError("Graph path not found in metadata")
+            with open(Path(graph_file), 'rb') as f:
                 graph = pickle.load(f)
         except Exception as e:
             logging.warning(f"Could not load from pickle, trying PostgreSQL: {e}")
-            # Fallback to PostgreSQL
             from fact_check_kg.core.db_connector import GraphDatabaseConnector
-
             db = GraphDatabaseConnector(
                 host=metadata["postgres_host"],
                 port=config.database.port,
@@ -107,9 +125,7 @@ def load_graph_by_id(graph_id: str) -> Tuple[object, object, Dict]:
                 db.disconnect()
 
     elif storage_type == "postgresql":
-        # Load from PostgreSQL only
         from fact_check_kg.core.db_connector import GraphDatabaseConnector
-
         db = GraphDatabaseConnector(
             host=metadata.get("database_host", metadata.get("postgres_host")),
             port=config.database.port,
@@ -117,7 +133,6 @@ def load_graph_by_id(graph_id: str) -> Tuple[object, object, Dict]:
             user=config.database.user,
             password=config.database.password
         )
-
         try:
             db.connect()
             graph = db.load_graph()
@@ -125,14 +140,17 @@ def load_graph_by_id(graph_id: str) -> Tuple[object, object, Dict]:
             db.disconnect()
 
     else:  # pickle
-        # Load graph from pickle only
-        graph_path = Path(metadata.get("graph_path", metadata.get("pickle_path")))
-        with open(graph_path, 'rb') as f:
+        graph_file = _resolve_graph_path(metadata)
+        if not graph_file:
+            raise FileNotFoundError(f"Cannot resolve graph file path from metadata for ID: {graph_id}")
+        with open(Path(graph_file), 'rb') as f:
             graph = pickle.load(f)
 
     # Load topic model (same for all storage types)
-    topic_model_path = Path(metadata["topic_model_path"])
-    with open(topic_model_path, 'rb') as f:
+    topic_model_file = _resolve_topic_model_path(metadata)
+    if not topic_model_file:
+        raise FileNotFoundError(f"Cannot resolve topic model path from metadata for ID: {graph_id}")
+    with open(Path(topic_model_file), 'rb') as f:
         topic_model = pickle.load(f)
 
     return graph, topic_model, metadata
@@ -157,13 +175,21 @@ def display_available_graphs():
         print(f"   Documents: {graph['num_documents']}, Chunks: {graph['num_chunks']}")
         print(f"   Nodes: {graph['num_nodes']}, Edges: {graph['num_edges']}")
 
+        def _graph_filename(meta: dict) -> str:
+            """Extract the pickle filename from metadata."""
+            paths = meta.get("paths", {})
+            p = paths.get("graph") if isinstance(paths, dict) else None
+            if not p:
+                p = meta.get("graph_path") or meta.get("pickle_path")
+            return Path(p).name if p else "unknown"
+
         if graph['storage_type'] == 'dual':
-            print(f"   Pickle: {Path(graph['pickle_path']).name}")
-            print(f"   PostgreSQL: {graph['postgres_database']}")
+            print(f"   Pickle: {_graph_filename(graph)}")
+            print(f"   PostgreSQL: {graph.get('postgres_database', 'N/A')}")
         elif graph['storage_type'] == 'postgresql':
-            print(f"   Database: {graph.get('database_name', graph.get('postgres_database'))}")
+            print(f"   Database: {graph.get('database_name', graph.get('postgres_database', 'N/A'))}")
         else:
-            print(f"   File: {Path(graph.get('graph_path', graph.get('pickle_path'))).name}")
+            print(f"   File: {_graph_filename(graph)}")
 
     print("\n" + "=" * 80)
     print(f"\nTotal: {len(graphs)} graph(s)")
